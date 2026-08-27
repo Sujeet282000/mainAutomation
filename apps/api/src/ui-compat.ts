@@ -93,7 +93,7 @@ function _buildPlanPreview(
     const actionOp = app.operations.find((o) => o.type !== "trigger");
     steps.push({
       label: actionOp?.name ?? app.name,
-      type: actionOp?.type === "logic" ? "logic" : "action",
+      type: "action" as const,
       app: app.name,
     });
     actionIndex++;
@@ -604,7 +604,7 @@ export function registerUiCompat(authed: Router) {
           // ── Ground operations through the same boundary as /generate ──
           // This ensures every operation is validated against the real catalog
           // and the resulting graph is a valid WorkflowGraph.
-          let groundedGraph = graph ?? { nodes: [], edges: [] };
+          let groundedGraph: any = body.graph ? (() => { try { return coerceWorkflowGraph(body.graph); } catch { return { nodes: [], edges: [] }; } })() : { nodes: [], edges: [] };
           let groundedApplied: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
           let groundedRejected: Array<{ operation: unknown; reason: string }> = [];
           let groundedNeedsConfirmation: unknown[] = [];

@@ -81,7 +81,7 @@ export async function validateWorkflow(ctx: CopilotToolContext): Promise<Copilot
   if (!flow) {
     return { ok: false, error: { code: "NOT_FOUND", message: "Workflow not found." } };
   }
-  const issues = validateWorkflowGraph(flow.draft_definition as Record<string, unknown>);
+  const { issues } = await validateWorkflowGraph(flow.draft_definition as Record<string, unknown>, { workspaceId: ctx.workspaceId, strict: false });
   return {
     ok: issues.length === 0,
     data: { issues, publishable: issues.length === 0 },
