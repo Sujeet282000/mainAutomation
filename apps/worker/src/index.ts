@@ -1,6 +1,7 @@
 import { Queue, Worker } from "bullmq";
 import { Db } from "@algoverge/db";
 import { Executor } from "@algoverge/engine";
+import { runExecution } from "../../api/src/engine";
 import { connection } from "./redis";
 import { adapterStepHandler } from "./adapter-handler";
 import { createEngineDb } from "./engine-db";
@@ -15,26 +16,41 @@ const executor = new Executor(engineDb, { flowStep: transitionQueue }, new Map([
   ["piece_action", adapterStepHandler],
 ]));
 
-const worker = new Worker(
+const flowWorker = new Worker(
   "flow-steps",
   async (job) => {
-    const runId = String(job.data.runId);
-    const cursor = Number(job.data.cursor ?? 0);
-    const epoch = Number(job.data.epoch ?? 1);
-    await executor.transition(runId, cursor, epoch);
+    await executor.transition(
+      String(job.data.runId),
+      Number(job.data.cursor ?? 0),
+      Number(job.data.epoch ?? 1),
+    );
   },
   { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10) },
 );
 
-worker.on("completed", (job) => console.log(`Flow run ${job.data.runId} transition completed`));
-worker.on("failed", (job, err) => console.error(`Flow run ${job?.data?.runId ?? "unknown"} failed`, err));
-worker.on("error", (err) => console.error("Worker error", err));
+// Compatibility worker: existing UI/API executions continue to work while
+// automations are migrated to flow_runs. It can be removed only after the
+// migration is complete and no callers enqueue the legacy queue.
+const legacyWorker = new Worker(
+  "executions",
+  async (job) => {
+    const executionId = String(job.data.executionId);
+    await runExecution(executionId);
+  },
+  { connection, concurrency: Number(process.env.LEGACY_WORKER_CONCURRENCY ?? 5) },
+);
 
-console.log("Worker listening on flow-steps queue");
+flowWorker.on("completed", (job) => console.log(`Flow run ${job.data.runId} transition completed`));
+flowWorker.on("failed", (job, err) => console.error(`Flow run ${job?.data?.runId ?? "unknown"} failed`, err));
+flowWorker.on("error", (err) => console.error("Flow worker error", err));
+legacyWorker.on("completed", (job) => console.log(`Legacy execution ${job.data.executionId} completed`));
+legacyWorker.on("failed", (job, err) => console.error(`Legacy execution ${job?.data?.executionId ?? "unknown"} failed`, err));
+legacyWorker.on("error", (err) => console.error("Legacy worker error", err));
+
+console.log("Worker listening on flow-steps and executions queues");
 
 const shutdown = async () => {
-  await worker.close();
-  await transitionQueue.close();
+  await Promise.all([flowWorker.close(), legacyWorker.close(), transitionQueue.close()]);
   await connection.quit();
   await db.close();
 };
