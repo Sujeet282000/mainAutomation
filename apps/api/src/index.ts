@@ -10,6 +10,7 @@ import { ensureProductSchema } from "./ensure-schema";
 import { webhookRouter } from "./triggers/webhook-ingress";
 import { tickSchedules } from "./schedules";
 import { tickPolling } from "./poll";
+import { copilotApprovalRouter } from "./copilot-approval";
 
 // Prevent unhandled promise rejections from crashing the process
 process.on("unhandledRejection", (reason) => {
@@ -52,6 +53,10 @@ app.use(health);
 app.use("/mcp", mcpHttp);
 app.use("/api/v1/mcp", mcpHttp);
 app.use("/api", webhookRouter);
+
+// Explicitly-approved Copilot operations are handled by a separate authenticated
+// router so the approval boundary cannot be bypassed by the generic Copilot routes.
+app.use("/api/v1", copilotApprovalRouter);
 
 // Internal control-plane endpoint used only by apps/scheduler. The scheduler
 // discovers due cron/polling triggers; the worker remains execution-only.
