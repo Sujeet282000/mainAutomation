@@ -1037,20 +1037,136 @@ authed.post("/copilot/refine", async (req, res) => {
   res.json(result);
 });
 
-authed.post("/copilot/:sessionId/accept", async (req, res) => {
-  const session = await queryOne<{ proposed_definition: unknown; flow_id: string | null }>(
-    `SELECT proposed_definition, flow_id FROM copilot_sessions WHERE id = $1 AND org_id = $2`,
+/**
+ * POST /copilot/sessions/:sessionId/approve
+ *
+ * Server-authoritative approval boundary. The browser sends only the sessionId
+ * (and optionally flowId). The server decides exactly what is being approved:
+ *
+ *   1. Load session — reject if missing, completed, or not in active state
+ *   2. Load pending_operations from the session (stored by copilot-http)
+ *   3. Load CURRENT workflow graph from the flows table
+ *   4. Re-validate operations against the current catalog and current graph
+ *   5. Apply with explicit approval (allowDestructive=true for user-approved ops)
+ *   6. Validate the resulting graph
+ *   7. Persist as draft
+ *   8. Mark session completed
+ *   9. Audit log
+ *  10. Return the validated graph to the frontend
+ *
+ * Protection against:
+ *   - stale proposal / already-completed session
+ *   - browser-supplied replacement operations
+ *   - wrong workspace / wrong flow
+ *   - unknown catalog operations
+ *   - invalid resulting workflow
+ *   - credential injection
+ *   - bypassing confirmation
+ *   - partial application
+ */
+authed.post("/copilot/sessions/:sessionId/approve", requireRole("owner", "admin", "editor"), async (req, res) => {
+  // 1. Load session and verify state
+  const session = await queryOne<{
+    id: string; org_id: string; flow_id: string | null; status: string;
+    pending_operations: unknown[] | null; proposed_definition: unknown;
+  }>(
+    `SELECT id, org_id, flow_id, status, pending_operations, proposed_definition
+     FROM copilot_sessions WHERE id = $1 AND org_id = $2`,
     [req.params.sessionId, req.orgId],
   );
-  if (!session?.proposed_definition) return res.status(404).json({ error: "not_found" });
-  const flowId = String(req.body?.flowId ?? session.flow_id ?? "");
+  if (!session) return res.status(404).json({ error: "session_not_found" });
+  if (session.status !== "active") {
+    return res.status(409).json({ error: "session_not_active", status: session.status });
+  }
+
+  // 2. Load pending operations from the session — browser cannot supply replacements
+  const pendingOps = session.pending_operations;
+  if (!Array.isArray(pendingOps) || pendingOps.length === 0) {
+    return res.status(400).json({ error: "no_pending_operations" });
+  }
+
+  // 3. Determine target flow and load CURRENT workflow graph
+  const body = z.object({ flowId: z.string().uuid().optional() }).parse(req.body ?? {});
+  const flowId = body.flowId ?? session.flow_id;
   if (!flowId) return res.status(400).json({ error: "no_flow" });
-  await query(`UPDATE flows SET draft_definition = $3, updated_at = now() WHERE id = $1 AND org_id = $2`, [
+
+  const flow = await queryOne<{ draft_definition: unknown }>(
+    `SELECT draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
+    [flowId, req.orgId],
+  );
+  if (!flow) return res.status(404).json({ error: "flow_not_found" });
+
+  const currentGraph = loadBuilderGraph(flow.draft_definition);
+
+  // 4-5. Re-validate operations against current catalog and apply with approval
+  const { applyAgentOperations } = await import("./agent-operation-applier");
+  const result = await applyAgentOperations({
+    graph: currentGraph,
+    operations: pendingOps,
+    workspaceId: req.orgId!,
+    organizationId: req.orgId!,
+    allowDestructive: true, // user explicitly approved — destructive ops allowed
+  });
+
+  // Reject if any operations were rejected during re-validation
+  if (result.rejected.length > 0) {
+    return res.status(422).json({
+      error: "operations_rejected",
+      rejected: result.rejected,
+      issues: result.issues,
+    });
+  }
+
+  // 6. Validate the resulting graph
+  const { validateWorkflowGraph } = await import("./workflow-validation");
+  const validation = await validateWorkflowGraph(result.graph, {
+    workspaceId: req.orgId!,
+    strict: true,
+  });
+  if (validation.issues.length > 0) {
+    return res.status(422).json({
+      error: "invalid_resulting_graph",
+      issues: validation.issues,
+    });
+  }
+
+  // 7. Persist as draft
+  const draft = persistBuilderDraft(validation.graph);
+  await query(
+    `UPDATE flows SET draft_definition = $3, updated_at = now(), updated_by = $4
+     WHERE id = $1 AND org_id = $2`,
+    [flowId, req.orgId, JSON.stringify(draft), req.user!.userId],
+  );
+
+  // 8. Mark session completed
+  await query(
+    `UPDATE copilot_sessions SET status = 'completed', pending_operations = NULL, updated_at = now()
+     WHERE id = $1`,
+    [session.id],
+  );
+
+  // 9. Audit log
+  await query(
+    `INSERT INTO audit_logs (org_id, actor_id, actor_kind, action, target_type, target_id, metadata)
+     VALUES ($1, $2, 'user', 'copilot_approve', 'flow', $3, $4)`,
+    [req.orgId, req.user!.userId, flowId, JSON.stringify({
+      sessionId: session.id,
+      applied: result.applied.length,
+      rejected: result.rejected.length,
+      needsConfirmation: result.needsConfirmation.length,
+    })],
+  ).catch(() => undefined);
+
+  // 10. Return the validated graph so the frontend can hydrate from it
+  res.json({
+    ok: true,
     flowId,
-    req.orgId,
-    JSON.stringify(session.proposed_definition),
-  ]);
-  res.json({ ok: true, flowId });
+    graph: validation.graph,
+    applied: result.applied,
+    rejected: result.rejected,
+    needsConfirmation: result.needsConfirmation,
+    issues: result.issues,
+  });
 });
 
 authed.post("/copilot/suggest-field", async (req, res) => {

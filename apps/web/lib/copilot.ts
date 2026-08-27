@@ -175,7 +175,15 @@ export async function refineCopilotSession(
   });
 }
 
+export type ClarificationQuestion = {
+  question: string;
+  options?: string[];
+  required: boolean;
+};
+
 export type CopilotPlanResult = {
+  requestId: string;
+  sessionId?: string;
   reply: string;
   preview?: {
     summary: string;
@@ -185,14 +193,22 @@ export type CopilotPlanResult = {
     missing_information: string[];
     confidence: number;
   } | null;
+  graph?: unknown;
   operations: CopilotOperation[];
+  applied_operations?: CopilotOperation[];
+  rejected_operations?: Array<{ operation: unknown; reason: string }>;
+  needs_confirmation?: CopilotOperation[];
+  issues?: Array<{ code?: string; message: string }>;
   needs_input: string[];
+  clarificationQuestions?: ClarificationQuestion[];
+  confidence?: number;
 };
 
 export async function planCopilotWorkflow(opts: {
   prompt: string;
   automationId?: string;
   graph?: unknown;
+  requestId?: string;
 }) {
   return api<CopilotPlanResult>("/ai/copilot/plan", {
     method: "POST",
@@ -200,6 +216,7 @@ export async function planCopilotWorkflow(opts: {
       prompt: opts.prompt,
       automationId: opts.automationId,
       graph: opts.graph,
+      requestId: opts.requestId,
     }),
   });
 }

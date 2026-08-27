@@ -17,6 +17,7 @@ type Msg = {
 type ChatResult = {
   reply: string;
   graph?: unknown;
+  sessionId?: string;
   applied?: boolean;
   chapter?: string;
   youDoFirst?: string[];
@@ -85,7 +86,7 @@ export function CopilotPanel({
   onBuild: (prompt: string) => void | Promise<{ graph?: unknown; summary?: string; rebuilt?: boolean; changed?: boolean } | void>;
   onStop: () => void;
   onChat: (prompt: string) => Promise<ChatResult>;
-  onApply: (graph: unknown) => void;
+  onApply: (graph: unknown, sessionId?: string) => void | Promise<void>;
   onRevert: () => void;
   incomingPrompt?: string | null;
   onIncomingPromptHandled?: () => void;
@@ -94,7 +95,9 @@ export function CopilotPanel({
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [sending, setSending] = useState(false);
   const [proposal, setProposal] = useState<unknown>(null);
+  const [proposalSessionId, setProposalSessionId] = useState<string | undefined>();
   const [checkpoint, setCheckpoint] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [width, setWidth] = useState(DEFAULT_W);
@@ -108,6 +111,8 @@ export function CopilotPanel({
   useEffect(() => {
     setMsgs([]);
     setProposal(null);
+    setProposalSessionId(undefined);
+    setApproving(false);
     setCheckpoint(false);
     setInput("");
     setMinimized(false);
@@ -200,7 +205,10 @@ export function CopilotPanel({
         }
       ]);
       if (result.graph && result.applied) setCheckpoint(true);
-      if (result.graph && (mode === "ask_as_you_build" || !result.applied)) setProposal(result.graph);
+      if (result.graph && (mode === "ask_as_you_build" || !result.applied)) {
+        setProposal(result.graph);
+        setProposalSessionId(result.sessionId);
+      }
     } catch (err) {
       setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? err.message : "Copilot is unavailable." }]);
     } finally {
@@ -220,6 +228,7 @@ export function CopilotPanel({
   const collapsed = !open || minimized;
   const chips = draftConfigured
     ? [
+        "Test this workflow",
         "What is happening?",
         "What should I do first?",
         "Fill this step",
@@ -420,13 +429,20 @@ export function CopilotPanel({
             <Button
               size="sm"
               className="mt-2"
-              onClick={() => {
-                onApply(proposal);
-                setCheckpoint(true);
-                setProposal(null);
+              disabled={approving}
+              onClick={async () => {
+                setApproving(true);
+                try {
+                  await onApply(proposal, proposalSessionId);
+                  setCheckpoint(true);
+                  setProposal(null);
+                  setProposalSessionId(undefined);
+                } finally {
+                  setApproving(false);
+                }
               }}
             >
-              Apply to draft
+              {approving ? "Approving…" : "Apply to draft"}
             </Button>
           </div>
         ) : null}

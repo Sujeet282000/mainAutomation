@@ -17,6 +17,121 @@ function catalogApps() {
   return listCatalogApps();
 }
 
+/**
+ * Build a plan preview from prompt heuristics for the Plan & Review modal.
+ * This is the fallback when the Python AI service is unavailable.
+ */
+function _buildPlanPreview(
+  prompt: string,
+  operations: Array<{ kind: string; arguments: Record<string, unknown> }> = [],
+  needsInput: string[] = [],
+) {
+  const lower = prompt.toLowerCase();
+  const apps = APP_CATALOG;
+  const usedApps: Array<{ name: string; slug: string }> = [];
+  const steps: Array<{ label: string; type: string; app: string }> = [];
+  const missingConnections: string[] = [];
+  const missingInfo = [...needsInput];
+  let confidence = 0.7;
+
+  // Detect apps from prompt
+  const appHints: Array<{ re: RegExp; slug: string }> = [
+    { re: /gmail|inbox|email/i, slug: "gmail" },
+    { re: /google sheet|spreadsheet|sheets/i, slug: "google-sheets" },
+    { re: /calendar|meeting/i, slug: "google-calendar" },
+    { re: /slack/i, slug: "slack" },
+    { re: /hubspot|crm/i, slug: "hubspot" },
+    { re: /whatsapp/i, slug: "whatsapp" },
+    { re: /openai|chatgpt|ai/i, slug: "openai" },
+    { re: /webhook|http post/i, slug: "webhook" },
+    { re: /schedule|cron|every day/i, slug: "schedule" },
+    { re: /form|typeform/i, slug: "typeform" },
+    { re: /github/i, slug: "github" },
+    { re: /discord/i, slug: "discord" },
+    { re: /telegram/i, slug: "telegram" },
+  ];
+
+  const detectedSlugs = new Set<string>();
+  for (const hint of appHints) {
+    if (hint.re.test(lower) && !detectedSlugs.has(hint.slug)) {
+      const app = apps.find((a) => a.slug === hint.slug);
+      if (app) {
+        detectedSlugs.add(hint.slug);
+        usedApps.push({ name: app.name, slug: app.slug });
+      }
+    }
+  }
+
+  // Detect trigger type
+  if (/schedule|cron|every day|every morning|hourly/i.test(lower)) {
+    steps.push({ label: "Schedule Trigger", type: "trigger", app: "schedule" });
+  } else if (/webhook|http post|catch hook/i.test(lower)) {
+    steps.push({ label: "Webhook Trigger", type: "trigger", app: "webhook" });
+  } else if (/form|typeform|submitted/i.test(lower)) {
+    steps.push({ label: "Form Submission", type: "trigger", app: "typeform" });
+  } else {
+    // Find the first app with a trigger
+    const triggerApp = detectedSlugs.size > 0 ? [...detectedSlugs][0] : "manual";
+    const app = apps.find((a) => a.slug === triggerApp);
+    const triggerOp = app?.operations.find((o) => o.type === "trigger");
+    steps.push({
+      label: triggerOp?.name ?? `${app?.name ?? triggerApp} Trigger`,
+      type: "trigger",
+      app: app?.name ?? triggerApp,
+    });
+  }
+
+  // Add actions for detected apps (skip the first one which is the trigger)
+  let actionIndex = 0;
+  for (const slug of detectedSlugs) {
+    if (actionIndex === 0 && steps[0]?.app === slug) {
+      actionIndex++;
+      continue;
+    }
+    const app = apps.find((a) => a.slug === slug);
+    if (!app) continue;
+    const actionOp = app.operations.find((o) => o.type !== "trigger");
+    steps.push({
+      label: actionOp?.name ?? app.name,
+      type: "action" as const,
+      app: app.name,
+    });
+    actionIndex++;
+  }
+
+  // If no steps detected, add generic ones
+  if (steps.length <= 1) {
+    steps.push({ label: "Action", type: "action", app: "HTTP" });
+  }
+
+  // Check for missing connections
+  const SKIP_AUTH = new Set(["webhook", "http", "manual", "schedule", "forms"]);
+  for (const step of steps) {
+    const app = apps.find((a) => a.name === step.app || a.slug === step.app.toLowerCase().replace(/\s+/g, "-"));
+    if (app && !SKIP_AUTH.has(app.slug) && (app.authType ?? "none") !== "none") {
+      missingConnections.push(`Connect ${app.name} account`);
+    }
+  }
+
+  // Deduplicate missing connections
+  const uniqueMissing = [...new Set(missingConnections)];
+
+  // Calculate confidence based on how many apps were detected
+  if (detectedSlugs.size >= 2) confidence = 0.85;
+  else if (detectedSlugs.size === 1) confidence = 0.7;
+  else confidence = 0.5;
+
+  return {
+    summary: `I'll create a workflow that: ${steps.map((s) => s.label).join(" → ")}`,
+    steps,
+    apps_used: usedApps,
+    missing_connections: uniqueMissing,
+    missing_information: missingInfo,
+    confidence,
+    reasoning: `Detected ${detectedSlugs.size} app(s) from your prompt. ${steps.length} step(s) planned.`,
+  };
+}
+
 function mapConnStatus(status: string) {
   if (status === "active") return "connected";
   return status;
@@ -383,9 +498,30 @@ export function registerUiCompat(authed: Router) {
             rejectedOps = opResult.rejected;
             needsConfirmation = opResult.needsConfirmation;
           }
+          // When operations need confirmation, create a session and store
+          // the pending operations so the approve endpoint can re-validate
+          // them at approval time.
+          let sessionId: string | undefined;
+          const needsApproval = needsConfirmation.length > 0 || rejectedOps.length > 0;
+          if (needsApproval && agentReply.operations?.length) {
+            const { ensureProjectId } = await import("./copilot-http");
+            const projectId = await ensureProjectId(req.orgId!);
+            const created = await queryOne<{ id: string }>(
+              `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
+               VALUES ($1, $2, $3, $4, 'ask_as_you_build') RETURNING id`,
+              [req.orgId, projectId, req.user!.userId, body.automationId ?? null],
+            );
+            sessionId = created!.id;
+            await query(
+              `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
+               WHERE id = $1`,
+              [sessionId, JSON.stringify(agentReply.operations), appliedGraph ? JSON.stringify(persistBuilderDraft(appliedGraph)) : null],
+            );
+          }
           res.json({
             reply: agentReply.message,
             graph: applied ? appliedGraph : undefined,
+            sessionId,
             applied,
             source: "python-agent",
             youDoFirst: [],
@@ -416,6 +552,172 @@ export function registerUiCompat(authed: Router) {
       lastTest: body.lastTest ?? null,
     });
     res.json(result);
+  });
+
+  authed.post("/ai/copilot/plan", async (req, res) => {
+    const body = z
+      .object({
+        prompt: z.string().min(1),
+        automationId: z.string().uuid().optional(),
+        graph: z.unknown().optional(),
+        requestId: z.string().optional(),
+      })
+      .parse(req.body);
+
+    // Each planning request gets a unique requestId so the frontend can
+    // discard stale responses when the user edits and resubmits.
+    const requestId = body.requestId ?? `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    // Try Python AI service for intelligent planning
+    const ai = await probeAiService();
+    if (ai.reachable) {
+      try {
+        const definition = body.graph ? persistBuilderDraft(body.graph) : {};
+        const planResult = await signedAiJson<{
+          reply?: string;
+          preview?: {
+            summary: string;
+            steps: Array<{ label: string; type: string; app: string }>;
+            apps_used: Array<{ name: string; slug: string }>;
+            missing_connections: string[];
+            missing_information: string[];
+            confidence: number;
+          };
+          operations?: Array<{ kind: string; arguments: Record<string, unknown> }>;
+          needs_input?: string[];
+        }>(
+          "/copilot/plan",
+          {
+            message: body.prompt,
+            workflow: definition,
+            catalog: APP_CATALOG.map((a) => ({
+              slug: a.slug,
+              name: a.name,
+              operations: a.operations.map((o) => ({ key: o.key, name: o.name, type: o.type })),
+            })),
+          },
+          req.orgId!,
+        );
+        if (planResult) {
+          const rawOps = planResult.operations ?? [];
+
+          // ── Ground operations through the same boundary as /generate ──
+          // This ensures every operation is validated against the real catalog
+          // and the resulting graph is a valid WorkflowGraph.
+          let groundedGraph: any = body.graph ? (() => { try { return coerceWorkflowGraph(body.graph); } catch { return { nodes: [], edges: [] }; } })() : { nodes: [], edges: [] };
+          let groundedApplied: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
+          let groundedRejected: Array<{ operation: unknown; reason: string }> = [];
+          let groundedNeedsConfirmation: unknown[] = [];
+          let groundedIssues: Array<{ code: string; message: string }> = [];
+          let groundedOperations = rawOps;
+
+          if (rawOps.length > 0) {
+            try {
+              const { applyAgentOperations } = await import("./agent-operation-applier");
+              const result = await applyAgentOperations({
+                graph: groundedGraph,
+                operations: rawOps,
+                workspaceId: req.orgId!,
+                organizationId: req.orgId!,
+                allowDestructive: false, // plan mode — no destructive ops auto-applied
+              });
+              groundedGraph = result.graph;
+              groundedApplied = result.applied;
+              groundedRejected = result.rejected;
+              groundedNeedsConfirmation = result.needsConfirmation;
+              groundedIssues = result.issues;
+              // Replace raw ops with validated ops for the preview and session storage
+              groundedOperations = [
+                ...result.applied,
+                ...result.needsConfirmation,
+              ];
+            } catch {
+              /* grounding failed — fall through with raw operations */
+            }
+          }
+
+          // Build the preview from grounded operations — same source of truth
+          // that the builder will use when the user approves.
+          const preview = planResult.preview ?? _buildPlanPreview(
+            body.prompt,
+            groundedOperations.map((op) => ({ kind: op.kind, arguments: op.arguments })),
+            planResult.needs_input ?? [],
+          );
+
+          // Create a session and store pending operations so the approve
+          // endpoint can re-validate them at approval time.
+          let sessionId: string | undefined;
+          if (body.automationId) {
+            const { ensureProjectId } = await import("./copilot-http");
+            const projectId = await ensureProjectId(req.orgId!);
+            const created = await queryOne<{ id: string }>(
+              `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
+               VALUES ($1, $2, $3, $4, 'ask_as_you_build') RETURNING id`,
+              [req.orgId, projectId, req.user!.userId, body.automationId],
+            );
+            sessionId = created!.id;
+            // Store grounded operations + proposed graph for the approve endpoint
+            const { persistBuilderDraft } = await import("./flow-runtime");
+            await query(
+              `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
+               WHERE id = $1`,
+              [
+                sessionId,
+                JSON.stringify(groundedOperations),
+                JSON.stringify(persistBuilderDraft(groundedGraph)),
+              ],
+            );
+          }
+
+          // Build structured clarification questions from needs_input +
+          // missing_connections. These become interactive questions in
+          // Plan & Review rather than flat text warnings.
+          const clarificationQuestions: Array<{
+            question: string;
+            options?: string[];
+            required: boolean;
+          }> = [];
+          for (const input of planResult.needs_input ?? []) {
+            clarificationQuestions.push({ question: input, required: true });
+          }
+          for (const conn of preview.missing_connections ?? []) {
+            // Avoid duplicating needs_input entries
+            if (!clarificationQuestions.some((q) => q.question === conn)) {
+              clarificationQuestions.push({ question: conn, required: true });
+            }
+          }
+
+          res.json({
+            requestId,
+            sessionId,
+            reply: planResult.reply ?? preview.summary,
+            preview,
+            graph: groundedGraph,
+            operations: groundedOperations,
+            applied_operations: groundedApplied,
+            rejected_operations: groundedRejected,
+            needs_confirmation: groundedNeedsConfirmation,
+            issues: groundedIssues,
+            needs_input: planResult.needs_input ?? [],
+            clarificationQuestions,
+            confidence: preview.confidence ?? 0.7,
+          });
+          return;
+        }
+      } catch {
+        /* Python service unavailable — fall through to local planner */
+      }
+    }
+
+    // Local heuristic planning fallback
+    const preview = _buildPlanPreview(body.prompt, [], []);
+    res.json({
+      requestId,
+      reply: preview.summary,
+      preview,
+      operations: [],
+      needs_input: [],
+    });
   });
 
   authed.post("/ai/copilot/diagnose-run", async (req, res) => {

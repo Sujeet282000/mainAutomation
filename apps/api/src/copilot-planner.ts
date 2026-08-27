@@ -4,6 +4,7 @@ import type { WorkflowGraph } from "@algoverge/shared";
 
 const PlannedIntent = z.object({
   summary: z.string().min(1).max(500),
+  goal: z.string().min(1).max(500).optional(),
   trigger: z.object({
     phrase: z.string().min(1).max(500),
     appHint: z.string().nullable().default(null),
@@ -19,6 +20,22 @@ const PlannedIntent = z.object({
     operationConfidence: z.number().min(0).max(1).default(0),
     intentKind: z.enum(["app_action", "ai", "agent", "http", "code", "table"])
   })).max(32),
+  conditions: z.array(z.object({
+    stepId: z.string().optional(),
+    description: z.string().min(1).max(300),
+    branches: z.array(z.object({
+      label: z.string().min(1).max(100),
+      stepIds: z.array(z.string()).default([])
+    })).min(2).max(8)
+  })).max(8).default([]),
+  clarificationQuestions: z.array(z.object({
+    question: z.string().min(1).max(300),
+    options: z.array(z.string().min(1).max(100)).max(6).optional(),
+    stepId: z.string().optional(),
+    field: z.string().optional(),
+    required: z.boolean().default(true)
+  })).max(6).default([]),
+  confidence: z.number().min(0).max(1).default(0.7),
   ambiguities: z.array(z.string().min(1).max(300)).max(16).default([])
 });
 
@@ -40,6 +57,16 @@ function normalize(intent: PlannedCopilotIntent): PlannedCopilotIntent {
     steps: [...intent.steps]
       .sort((a, b) => a.order - b.order)
       .map((step, i) => ({ ...step, order: i + 1, appHint: step.appHint?.trim() || null, operation: step.operation?.trim() || null })),
+      .map((step, i) => ({ ...step, order: i + 1 })),
+    conditions: (intent.conditions ?? []).map((c) => ({
+      ...c,
+      branches: c.branches.map((b) => ({ ...b, stepIds: b.stepIds ?? [] }))
+    })),
+    clarificationQuestions: (intent.clarificationQuestions ?? []).map((q) => ({
+      ...q,
+      options: q.options ?? undefined,
+      required: q.required ?? true
+    })),
     ambiguities: [...new Set(intent.ambiguities.map((x) => x.trim()).filter(Boolean))]
   };
 }
@@ -88,6 +115,14 @@ export async function planCopilotIntent(opts: {
       "operationConfidence must reflect confidence in the catalog match, not confidence in the user's request.",
       "Ask an ambiguity only when a missing choice materially changes the workflow. Never ask for credentials, tokens, IDs, or secrets that can be selected later by the UI.",
       "Do not output chain-of-thought. summary is a short user-safe explanation."
+      "Return JSON with: summary, goal, trigger, steps, conditions, clarificationQuestions, confidence, ambiguities.",
+      "Each step must describe one meaningful action or control-flow intent in execution order.",
+      "Use intentKind=ai for summarization, classification, extraction, generation or transformation; use agent only when the user explicitly asks an autonomous agent to act.",
+      "Do not invent operation identifiers. The catalog is grounding context; appHint should be null when uncertain.",
+      "conditions: if the user describes branching (if/else, qualified/not, yes/no), create conditions with labeled branches mapping to stepIds.",
+      "clarificationQuestions: ask ONLY when a missing choice materially changes the workflow. Each question should have concrete options derived from the catalog. Never ask for credentials, tokens, IDs, or secrets that can be selected later by the UI. Empty array if nothing is ambiguous.",
+      "confidence: 0.0-1.0 based on how well you understand the request and how many integrations are well-specified.",
+      "Do not output chain-of-thought. summary is a short user-safe explanation. goal is the high-level user objective."
     ].join(" ")
   });
 

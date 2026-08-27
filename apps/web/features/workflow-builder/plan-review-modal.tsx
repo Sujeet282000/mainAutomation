@@ -32,6 +32,7 @@ export function PlanReviewModal({
   onConfirm,
   onCancel,
   onEdit,
+  onClarify,
 }: {
   open: boolean;
   plan: CopilotPlanResult | null;
@@ -40,16 +41,26 @@ export function PlanReviewModal({
   onConfirm: () => void;
   onCancel: () => void;
   onEdit: () => void;
+  onClarify?: (answers: Record<string, string>) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   if (!open) return null;
 
   const steps: PlanStep[] = (plan?.preview?.steps ?? []) as PlanStep[];
   const appsUsed = plan?.preview?.apps_used ?? [];
   const missingConns = plan?.preview?.missing_connections ?? [];
   const missingInfo = plan?.preview?.missing_information ?? [];
-  const confidence = plan?.preview?.confidence ?? 0;
+  const confidence = plan?.preview?.confidence ?? plan?.confidence ?? 0;
   const summary = plan?.preview?.summary ?? plan?.reply ?? "";
+  const appliedOps = plan?.applied_operations ?? [];
+  const rejectedOps = plan?.rejected_operations ?? [];
+  const needsConfirmation = plan?.needs_confirmation ?? [];
+  const questions = plan?.clarificationQuestions ?? [];
+  // Build is disabled when required questions are unanswered
+  const allRequiredAnswered = questions
+    .filter((q) => q.required)
+    .every((q) => clarificationAnswers[q.question]?.trim());
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/50 p-4">
@@ -112,6 +123,52 @@ export function PlanReviewModal({
               </p>
               <p className="mt-2 text-sm text-ink leading-relaxed">{summary}</p>
             </div>
+
+            {/* Clarification questions — interactive before building */}
+            {questions.length > 0 && (
+              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+                <p className="text-sm font-medium text-amber-800">
+                  I need a few details before building
+                </p>
+                <div className="mt-3 space-y-3">
+                  {questions.map((q, qi) => (
+                    <div key={qi}>
+                      <p className="text-xs font-medium text-ink">{q.question}</p>
+                      {q.options && q.options.length > 0 ? (
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {q.options.map((opt) => (
+                            <button
+                              key={opt}
+                              type="button"
+                              className={cn(
+                                "rounded-full border px-2.5 py-1 text-[11px] transition",
+                                clarificationAnswers[q.question] === opt
+                                  ? "border-amber-500 bg-amber-100 text-amber-800 font-medium"
+                                  : "border-line bg-white text-ink hover:border-amber-300"
+                              )}
+                              onClick={() => setClarificationAnswers((prev) => ({ ...prev, [q.question]: opt }))}
+                            >
+                              {clarificationAnswers[q.question] === opt && (
+                                <Check className="mr-1 inline h-2.5 w-2.5" />
+                              )}
+                              {opt}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          className="mt-1 w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-xs outline-none focus:border-amber-400"
+                          placeholder="Type your answer…"
+                          value={clarificationAnswers[q.question] ?? ""}
+                          onChange={(e) => setClarificationAnswers((prev) => ({ ...prev, [q.question]: e.target.value }))}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Confidence bar */}
             {confidence > 0 && (
@@ -245,6 +302,42 @@ export function PlanReviewModal({
                 </ul>
               </div>
             )}
+
+            {/* Rejected operations — catalog validation failed */}
+            {rejectedOps.length > 0 && (
+              <div className="mt-3 rounded-xl border border-danger/30 bg-danger/5 p-3">
+                <p className="text-xs font-medium text-danger">
+                  <AlertTriangle className="mr-1 inline h-3 w-3" />
+                  Some steps couldn't be created
+                </p>
+                <ul className="mt-2 space-y-1">
+                  {rejectedOps.map((item, i) => (
+                    <li key={i} className="text-xs text-ink">
+                      <span className="font-medium">{String((item.operation as Record<string, unknown>)?.kind ?? "operation")}:</span>{" "}
+                      <span className="text-ink-muted">{item.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Needs confirmation — destructive or high-risk ops */}
+            {needsConfirmation.length > 0 && (
+              <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3">
+                <p className="text-xs font-medium text-amber-800">
+                  <AlertTriangle className="mr-1 inline h-3 w-3" />
+                  These steps need your approval
+                </p>
+                <ul className="mt-2 space-y-1">
+                  {needsConfirmation.map((op, i) => (
+                    <li key={i} className="text-xs text-amber-700">
+                      {op.kind === "remove_node" ? "Remove a step" : op.kind}
+                      {op.arguments?.nodeId ? ` (${String(op.arguments.nodeId)})` : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 
@@ -257,10 +350,20 @@ export function PlanReviewModal({
             <Button size="sm" variant="secondary" onClick={onEdit}>
               Edit request
             </Button>
+            {questions.length > 0 && onClarify && (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => onClarify(clarificationAnswers)}
+                disabled={loading}
+              >
+                Update plan
+              </Button>
+            )}
             <Button
               size="sm"
               onClick={onConfirm}
-              disabled={loading || !plan}
+              disabled={loading || !plan || !allRequiredAnswered}
               className="bg-violet-600 text-white hover:bg-violet-700"
             >
               {loading ? (
@@ -268,7 +371,7 @@ export function PlanReviewModal({
               ) : (
                 <Sparkles className="mr-1 h-3 w-3" />
               )}
-              Build workflow
+              {questions.length > 0 && !allRequiredAnswered ? "Answer questions to build" : "Build workflow"}
             </Button>
           </div>
         </div>

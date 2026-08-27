@@ -33,10 +33,20 @@ async function groundGraph(graph: unknown, operations: unknown[], opts: { worksp
   return applyAgentOperations({ graph, operations, workspaceId: opts.workspaceId, organizationId: opts.organizationId, allowDestructive: opts.allowDestructive });
 }
 
-async function persistGroundedGraph(sessionId: string, graph: unknown) {
+async function persistGroundedGraph(sessionId: string, graph: unknown, pendingOps?: unknown[]) {
   const coerced = coerceWorkflowGraph(graph);
   const definition = persistBuilderDraft(coerced);
-  await query(`UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`, [JSON.stringify(definition), sessionId]);
+  if (pendingOps && pendingOps.length > 0) {
+    await query(
+      `UPDATE copilot_sessions SET proposed_definition = $1, pending_operations = $2, stage = 'persist', updated_at = now() WHERE id = $3`,
+      [JSON.stringify(definition), JSON.stringify(pendingOps), sessionId],
+    );
+  } else {
+    await query(
+      `UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`,
+      [JSON.stringify(definition), sessionId],
+    );
+  }
   return { graph: coerced, definition };
 }
 
@@ -64,6 +74,10 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
             const persisted = requiresReview ? null : await persistGroundedGraph(opts.sessionId, grounded.graph);
             sawResult = true;
             await send({ ...ev, graph: requiresReview ? rawGraph ?? ev.graph : persisted!.graph, definition: persisted?.definition, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: !requiresReview && grounded.applied.length > 0, mode, source: "python-copilot" });
+            const needsApproval = grounded.needsConfirmation.length > 0 || grounded.rejected.length > 0;
+            const persisted = await persistGroundedGraph(opts.sessionId, grounded.graph, needsApproval ? operations : undefined);
+            sawResult = true;
+            await send({ ...ev, graph: persisted.graph, definition: persisted.definition, sessionId: opts.sessionId, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: mode === "auto_build" && grounded.needsConfirmation.length === 0 && grounded.rejected.length === 0, mode, source: "python-copilot" });
             continue;
           } catch (error) {
             await send({ type: "error", stage: "validate", message: error instanceof Error ? error.message : "AI proposal could not be grounded" });
@@ -80,8 +94,8 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
     if (ev.type === "result") {
       const definition = persistBuilderDraft(ev.result.graph);
       await query(`UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`, [JSON.stringify(definition), opts.sessionId]);
-      await send({ type: "proposal", graph: ev.result.graph, definition, summary: ev.result.summary, applied: mode === "auto_build", rebuilt: ev.result.rebuilt, changed: ev.result.changed, source: ev.result.source, mode });
-      await send({ type: "result", graph: ev.result.graph, summary: ev.result.summary, applied: mode === "auto_build", rebuilt: ev.result.rebuilt, changed: ev.result.changed, source: ev.result.source, mode });
+      await send({ type: "proposal", graph: ev.result.graph, definition, summary: ev.result.summary, sessionId: opts.sessionId, applied: mode === "auto_build", rebuilt: ev.result.rebuilt, changed: ev.result.changed, source: ev.result.source, mode });
+      await send({ type: "result", graph: ev.result.graph, summary: ev.result.summary, sessionId: opts.sessionId, applied: mode === "auto_build", rebuilt: ev.result.rebuilt, changed: ev.result.changed, source: ev.result.source, mode });
     } else if (ev.type === "stage") await send({ type: "stage", stage: STAGE_FOR_DB[ev.stage] ?? ev.stage, label: ev.label });
     else await send(ev as Record<string, unknown>);
   }
@@ -99,9 +113,16 @@ export async function refineCopilotSession(opts: { sessionId: string; orgId: str
       const result = await groundGraph(graph, operations, { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: false });
       const changed = JSON.stringify(result.graph) !== JSON.stringify(graph);
       const definition = persistBuilderDraft(result.graph);
-      const canPersist = result.rejected.length === 0 && result.needsConfirmation.length === 0;
-      if (changed && canPersist) await query(`UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`, [JSON.stringify(definition), opts.sessionId]);
-      return { reply: refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change."), graph: result.graph, definition, applied: result.applied.length > 0, changed, summary: refined.summary, operations, applied_operations: result.applied, rejected_operations: result.rejected, needs_confirmation: result.needsConfirmation, needs_input: refined.needs_input ?? [], issues: [...(refined.issues ?? []), ...result.issues], test_results: result.testResults, publishable: Boolean(refined.publishable) && result.issues.length === 0 && result.rejected.length === 0 && result.needsConfirmation.length === 0, source: "python-copilot" };
+      const needsApproval = result.rejected.length > 0 || result.needsConfirmation.length > 0;
+      if (changed && !needsApproval) {
+        await query(`UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`, [JSON.stringify(definition), opts.sessionId]);
+      } else if (needsApproval && operations.length > 0) {
+        await query(
+          `UPDATE copilot_sessions SET proposed_definition = $1, pending_operations = $2, stage = 'persist', updated_at = now() WHERE id = $3`,
+          [JSON.stringify(definition), JSON.stringify(operations), opts.sessionId],
+        );
+      }
+      return { reply: refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change."), graph: result.graph, definition, sessionId: opts.sessionId, applied: result.applied.length > 0, changed, summary: refined.summary, operations, applied_operations: result.applied, rejected_operations: result.rejected, needs_confirmation: result.needsConfirmation, needs_input: refined.needs_input ?? [], issues: [...(refined.issues ?? []), ...result.issues], test_results: result.testResults, publishable: Boolean(refined.publishable) && result.issues.length === 0 && result.rejected.length === 0 && result.needsConfirmation.length === 0, source: "python-copilot" };
     }
   }
   const result = await copilotChat({ prompt: opts.prompt, workspaceId: opts.orgId, organizationId: opts.orgId, userId: opts.userId, userEmail: opts.userEmail, automationId: opts.flowId ?? session?.flow_id ?? undefined, graph, selectedStepId: opts.selectedStepId, mode: parseCopilotMode(opts.mode ?? session?.mode) });
