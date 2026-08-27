@@ -58,11 +58,12 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
           const rawGraph = operations.length ? graph : ev.graph;
           try {
             const grounded = operations.length
-              ? await groundGraph(rawGraph ?? ev.graph, operations as AgentOperation[], { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: mode === "auto_build" })
+              ? await groundGraph(rawGraph ?? ev.graph, operations as AgentOperation[], { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: false })
               : { graph: coerceWorkflowGraph(ev.graph), applied: [], rejected: [], needsConfirmation: [], issues: [], testResults: [] };
-            const persisted = await persistGroundedGraph(opts.sessionId, grounded.graph);
+            const requiresReview = grounded.needsConfirmation.length > 0 || grounded.rejected.length > 0;
+            const persisted = requiresReview ? null : await persistGroundedGraph(opts.sessionId, grounded.graph);
             sawResult = true;
-            await send({ ...ev, graph: persisted.graph, definition: persisted.definition, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: mode === "auto_build" && grounded.needsConfirmation.length === 0 && grounded.rejected.length === 0, mode, source: "python-copilot" });
+            await send({ ...ev, graph: requiresReview ? rawGraph ?? ev.graph : persisted!.graph, definition: persisted?.definition, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: !requiresReview && grounded.applied.length > 0, mode, source: "python-copilot" });
             continue;
           } catch (error) {
             await send({ type: "error", stage: "validate", message: error instanceof Error ? error.message : "AI proposal could not be grounded" });
@@ -71,7 +72,7 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
         }
         await send({ ...ev, stage: STAGE_FOR_DB[String(ev.stage ?? "")] ?? ev.stage, label: ev.label ?? ev.stage });
       }
-      if (sawResult) { await send({ type: "done", status: "draft_saved", publishable: true, note: "Review and publish. Copilot never publishes.", source: "python-copilot" }); return; }
+      if (sawResult) { await send({ type: "done", status: "draft_ready", publishable: true, note: "Review and publish. Confirmation-gated operations must be explicitly approved.", source: "python-copilot" }); return; }
     } catch (err) { await send({ type: "reasoning", text: `AI plane failed (${err instanceof Error ? err.message : "error"}); using the Node catalog engine.` }); }
   } else await send({ type: "reasoning", text: ai.hint });
 
@@ -95,7 +96,7 @@ export async function refineCopilotSession(opts: { sessionId: string; orgId: str
     const refined = await signedAiJson<{ applied?: boolean; definition?: unknown; summary?: string; operations?: AgentOperation[]; needs_input?: string[]; issues?: Array<Record<string, unknown>>; publishable?: boolean }>("/copilot/refine", { definition: persistBuilderDraft(graph), instruction: opts.prompt, selected_step_id: opts.selectedStepId, catalog: listCatalogApps() }, opts.orgId);
     if (refined) {
       const operations = refined.operations ?? [];
-      const result = await groundGraph(graph, operations, { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: parseCopilotMode(opts.mode ?? session?.mode) === "auto_build" });
+      const result = await groundGraph(graph, operations, { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: false });
       const changed = JSON.stringify(result.graph) !== JSON.stringify(graph);
       const definition = persistBuilderDraft(result.graph);
       const canPersist = result.rejected.length === 0 && result.needsConfirmation.length === 0;
