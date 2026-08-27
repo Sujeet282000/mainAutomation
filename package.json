@@ -13,12 +13,12 @@
     "dev:web": "npm run dev -w @algoverge/web",
     "dev:worker": "npm run dev -w @algoverge/worker",
     "dev:ai": "cd apps/ai && python -m uvicorn main:app --reload --port 8000",
-    "migrate": "npm run migrate -w @orchestra/api",
-    "seed": "npm run seed -w @orchestra/api",
+    "migrate": "npm run migrate -w @algoverge/api",
+    "seed": "npm run seed -w @algoverge/api",
     "docker:up": "docker compose up -d postgres redis",
     "docker:down": "docker compose down",
-    "build": "npm run build -w @orchestra/shared && npm run build -w @orchestra/api",
-    "test": "npm run test -w @orchestra/api",
+    "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/api",
+    "test": "npm run test -w @algoverge/api",
     "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit"
   },
   "devDependencies": {

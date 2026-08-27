@@ -343,9 +343,9 @@ CREATE TABLE public.flow_runs (
 
   PRIMARY KEY (id, created_at),
   FOREIGN KEY (flow_id, org_id) REFERENCES public.flows(id, org_id) ON DELETE CASCADE,
-  FOREIGN KEY (flow_version_id, org_id) REFERENCES public.flow_versions(id, org_id) ON DELETE RESTRICT,
-  UNIQUE (org_id, idempotency_key) -- dedup barrier
+  FOREIGN KEY (flow_version_id, org_id) REFERENCES public.flow_versions(id, org_id) ON DELETE RESTRICT
 ) PARTITION BY RANGE (created_at);
+CREATE UNIQUE INDEX flow_runs_idempotency_idx ON public.flow_runs (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- run_steps: one row per node execution, partition key = run_created_at
 CREATE TABLE public.run_steps (
