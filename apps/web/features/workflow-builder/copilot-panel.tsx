@@ -11,6 +11,7 @@ type Msg = {
   text: string;
   youDoFirst?: string[];
   iCan?: string[];
+  workflowPreview?: WorkflowPreviewData;
 };
 type ChatResult = {
   reply: string;
@@ -19,6 +20,7 @@ type ChatResult = {
   chapter?: string;
   youDoFirst?: string[];
   iCan?: string[];
+  preview?: WorkflowPreviewData;
   operations?: Array<{ kind: string; arguments: Record<string, unknown>; requires_confirmation?: boolean }>;
   applied_operations?: Array<{ kind: string; arguments: Record<string, unknown> }>;
   rejected_operations?: Array<{ operation: unknown; reason: string }>;
@@ -192,7 +194,8 @@ export function CopilotPanel({
           role: "assistant",
           text: result.reply,
           youDoFirst: result.youDoFirst,
-          iCan: result.iCan
+          iCan: result.iCan,
+          workflowPreview: (result as Record<string, unknown>).preview as WorkflowPreviewData | undefined
         }
       ]);
       if (result.graph && result.applied) setCheckpoint(true);
@@ -219,6 +222,7 @@ export function CopilotPanel({
         "What is happening?",
         "What should I do first?",
         "Fill this step",
+        "Add a branch after this step",
         "Add the next step",
         "Explain the last test",
         "What integrations are available?",
@@ -228,6 +232,9 @@ export function CopilotPanel({
         "When a Gmail arrives, add a Sheets row",
         "Every morning, summarize Calendar in Slack",
         "Send WhatsApp when a Google Sheet row is added",
+        "When a lead comes in, analyze with AI and send to Slack",
+        "Catch a webhook, branch on the payload, and notify the right team",
+        "Build a complete workflow: trigger → AI → action → branch → loop",
       ];
 
   if (collapsed) {
@@ -389,6 +396,9 @@ export function CopilotPanel({
                     ))}
                   </ul>
                 </div>
+              ) : null}
+              {m.workflowPreview && m.workflowPreview.steps.length > 0 ? (
+                <WorkflowPreview preview={m.workflowPreview} />
               ) : null}
               {m.iCan && m.iCan.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
