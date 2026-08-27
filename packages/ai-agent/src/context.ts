@@ -1,11 +1,15 @@
 import type { AgentContext } from './types';
 
+export type AgentRole = 'user' | 'assistant';
+export interface AgentConversationTurn { role: AgentRole; content: string; }
+
 export interface WorkflowContextSnapshot {
   flow?: unknown;
   version?: unknown;
   selectedNode?: unknown;
   connections?: unknown[];
   recentRuns?: unknown[];
+  conversation?: AgentConversationTurn[];
 }
 
 export interface AgentContextLoader {
