@@ -6,27 +6,17 @@ export function createEngineDb(db: Db) {
     flowRuns: {
       async claimTransition(runId: string, expectedCursor: number, expectedEpoch: number) {
         const result = await db.service.query(
-          `UPDATE flow_runs
-           SET transition_epoch = transition_epoch + 1,
-               transition_lease = now() + interval '5 minutes'
-           WHERE id = $1 AND cursor = $2 AND transition_epoch = $3
-             AND status IN ('running', 'queued')
-           RETURNING *`,
+          `UPDATE flow_runs SET transition_epoch = transition_epoch + 1, transition_lease = now() + interval '5 minutes'
+           WHERE id = $1 AND cursor = $2 AND transition_epoch = $3 AND status IN ('running', 'queued') RETURNING *`,
           [runId, expectedCursor, expectedEpoch],
         );
         const row = result.rows[0];
-        if (!row) return null;
-        return mapRun(row);
+        return row ? mapRun(row) : null;
       },
       async checkpoint(runId: string, input: { expectedCursor: number; expectedEpoch: number; appendContext: Record<string, unknown>; nextCursor: number; status: string }) {
         const result = await db.service.query(
-          `UPDATE flow_runs
-           SET context = context || $3::jsonb,
-               cursor = $4,
-               status = $5,
-               transition_epoch = transition_epoch + 1
-           WHERE id = $1 AND cursor = $2 AND transition_epoch = $6
-           RETURNING *`,
+          `UPDATE flow_runs SET context = context || $3::jsonb, cursor = $4, status = $5, transition_epoch = transition_epoch + 1
+           WHERE id = $1 AND cursor = $2 AND transition_epoch = $6 RETURNING *`,
           [runId, input.expectedCursor, JSON.stringify(input.appendContext), input.nextCursor, input.status, input.expectedEpoch],
         );
         if (!result.rows[0]) throw new Error("FLOW_RUN_CHECKPOINT_CONFLICT");
@@ -34,18 +24,15 @@ export function createEngineDb(db: Db) {
       },
       async finish(runId: string, status: string, context: unknown, finishedAt: Date) {
         await db.service.query(
-          `UPDATE flow_runs
-           SET status = $2, context = $3::jsonb, finished_at = $4,
-               duration_ms = extract(epoch from ($4 - started_at)) * 1000,
-               steps_billable = (SELECT count(*)::int FROM run_steps WHERE run_id = $1 AND status = 'succeeded')
-           WHERE id = $1`,
+          `UPDATE flow_runs SET status = $2, context = $3::jsonb, finished_at = $4,
+             duration_ms = extract(epoch from ($4 - started_at)) * 1000,
+             steps_billable = (SELECT count(*)::int FROM run_steps WHERE run_id = $1 AND status = 'succeeded') WHERE id = $1`,
           [runId, status, JSON.stringify(context), finishedAt],
         );
       },
       async pause(runId: string, input: { expectedCursor: number; expectedEpoch: number; contextJson: Record<string, unknown>; reason: string; resumeAt: string | null }) {
         const result = await db.service.query(
-          `UPDATE flow_runs
-           SET status = 'paused', paused_reason = $3, resume_at = $4, context = $5::jsonb
+          `UPDATE flow_runs SET status = 'paused', paused_reason = $3, resume_at = $4, context = $5::jsonb
            WHERE id = $1 AND cursor = $2 AND transition_epoch = $6`,
           [runId, input.expectedCursor, input.reason, input.resumeAt, JSON.stringify(input.contextJson), input.expectedEpoch],
         );
@@ -56,8 +43,7 @@ export function createEngineDb(db: Db) {
       async byId(versionId: string) {
         const result = await db.service.query("SELECT * FROM flow_versions WHERE id = $1", [versionId]);
         const row = result.rows[0];
-        if (!row) return null;
-        return { id: row.id, orgId: row.org_id, flowId: row.flow_id, versionNumber: row.version_number, definition: row.definition };
+        return row ? { id: row.id, orgId: row.org_id, flowId: row.flow_id, versionNumber: row.version_number, definition: row.definition } : null;
       },
     },
     runSteps: {
@@ -69,11 +55,11 @@ export function createEngineDb(db: Db) {
         const row = result.rows[0];
         return row ? { outputJson: row.output_json ?? {} } : null;
       },
-      async insert(input: { runId: string; runCreatedAt: string; orgId: string; stepId: string; stepType: string; operationId?: string; effectKey?: string; status: string; inputJson?: Record<string, unknown> }) {
+      async insert(input: any) {
         const result = await db.service.query(
-          `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, attempt)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1) RETURNING *`,
-          [input.runId, input.runCreatedAt, input.orgId, input.stepId, input.stepType, input.operationId ?? null, input.effectKey ?? null, input.status, input.inputJson ? JSON.stringify(input.inputJson) : null],
+          `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, output_json, error_class, error_code, error_json, attempt, duration_ms, finished_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,
+          [input.runId, input.runCreatedAt, input.orgId, input.stepId, input.stepType, input.operationId ?? null, input.effectKey ?? null, input.status, input.inputJson ? JSON.stringify(input.inputJson) : null, input.outputJson ? JSON.stringify(input.outputJson) : null, input.errorClass ?? null, input.errorCode ?? null, input.errorJson ? JSON.stringify(input.errorJson) : null, input.attempt ?? 1, input.durationMs ?? null],
         );
         return result.rows[0];
       },
