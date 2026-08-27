@@ -1,0 +1,155 @@
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⨯ ./features/workflow-builder/workflow-builder.tsx
+Error:   [31mx[0m Expected '</', got '$'
+      ,-[[36;1;4mC:\Users\admin\Pictures\atuomate\apps\web\features\workflow-builder\workflow-builder.tsx[0m:1329:1]
+ [2m1326[0m |                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+ [2m1327[0m |                   setConfirmDelete({
+ [2m1328[0m |                     id: ctxMenu.nodeId,
+ [2m1329[0m |                     label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+      : [35;1m                                ^[0m
+ [2m1330[0m |                   });
+ [2m1331[0m |                   setCtxMenu(null);
+ [2m1331[0m |                 }}
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./features/workflow-builder/workflow-builder.tsx
+./app/(workspace)/automations/[id]/editor/page.tsx
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.

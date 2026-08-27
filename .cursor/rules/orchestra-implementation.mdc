@@ -1,0 +1,321 @@
+---
+description: Orchestra spec is the only source of truth; implement greenfield, phase by phase, without skipping existing-looking features.
+alwaysApply: true
+---
+
+# Orchestra — specification-first implementation
+
+Authoritative spec: `C:\Users\admin\Downloads\Orchestra — AI and Copilot Workflow Automation Platform.docx` (also `docs/_orchestra_spec_extract.txt` when the docx cannot be read).
+
+The **previous prompt** (32 numbered execution sections) lives in `docs/ORCHESTRA_IMPLEMENTATION_INSTRUCTIONS.md`. Follow that file in full. The block below is a **separate instruction block after that prompt**. It overrides any “inspect the repo and skip what already exists” reasoning.
+
+The specification already defines a specific architecture and sequential implementation process, including the **three-plane architecture** and the **shared execution/tooling model**. Do not replace those with a different design.
+
+For UI, Zapier / Make / Activepieces may be used as **UX references only**. They must not replace the Orchestra specification. The document already identifies Zapier’s build-mode approach, Make’s visual mapping/reasoning approach, and Activepieces’ Piece/MCP approach as **architectural lessons** — implement Orchestra’s equivalents, not copies of those products.
+
+The repository is only the destination. Existing code may be reused only after it is verified as fully spec-compliant.
+
+Do not produce a roadmap, wait for phase approval, or declare a phase complete from a happy path.
+
+---
+
+# ADDITIONAL MANDATORY INSTRUCTION — SPECIFICATION-FIRST / GREENFIELD IMPLEMENTATION
+
+IMPORTANT:
+
+For this implementation task, DO NOT use the existing codebase to decide what functionality is required or what should be skipped.
+
+The provided Orchestra specification document is the ONLY source of truth for the product requirements, architecture, features, workflows, UI behavior, backend behavior, database behavior, execution model, AI behavior, integrations, security, testing, and implementation order.
+
+Treat the implementation as a GREENFIELD implementation of the document.
+
+The existing repository is only the destination where the implementation must be written.
+
+DO NOT reason like:
+
+"this feature already exists, so I can skip it."
+
+DO NOT reason like:
+
+"the current implementation is close enough."
+
+DO NOT reason like:
+
+"we already have something similar, so this phase is complete."
+
+Instead:
+
+"According to the specification, what must exist at this stage, and is the repository implementation fully compliant with it?"
+
+If something already exists, you may reuse it internally, but you MUST verify that it completely satisfies the specification before considering that requirement complete.
+
+If it does not completely satisfy the document, modify/refactor/rebuild it.
+
+==================================================
+PHASE-BY-PHASE EXECUTION
+==================================================
+
+You may internally work phase-by-phase because the document itself is structured around implementation stages.
+
+However:
+
+DO NOT create a separate implementation plan for me.
+
+DO NOT stop and ask me to approve the next phase.
+
+DO NOT wait for confirmation.
+
+DO NOT return a roadmap instead of code.
+
+Simply execute the phases sequentially according to the specification.
+
+For each phase:
+
+1. Read the relevant specification section completely.
+2. Understand all requirements in that section.
+3. Implement EVERY requirement from that section.
+4. Implement all dependencies required by that section.
+5. Implement the backend.
+6. Implement the database/persistence.
+7. Implement the APIs/services.
+8. Implement the UI wherever the specification requires UI.
+9. Implement validation and error handling.
+10. Implement security requirements.
+11. Implement tests.
+12. Run the relevant checks.
+13. Fix all issues.
+14. Verify the phase end-to-end.
+15. Only then move to the next phase.
+
+Never mark a phase complete merely because the main happy path works.
+
+==================================================
+SPECIFICATION COMPLETENESS CHECK
+==================================================
+
+At the end of every phase, internally verify:
+
+- Did I implement every requirement?
+- Did I implement every API mentioned?
+- Did I implement every data model mentioned?
+- Did I implement every state mentioned?
+- Did I implement every validation?
+- Did I implement every error path?
+- Did I implement every permission/security rule?
+- Did I implement persistence?
+- Did I implement required UI?
+- Did I implement loading/empty/error/success states?
+- Did I implement tests?
+- Did I connect the feature to the rest of the architecture?
+- Did I accidentally create a simplified version?
+- Did I leave any TODO/mock/placeholder?
+- Did I skip anything because similar functionality existed already?
+
+If anything is missing, finish it before moving forward.
+
+==================================================
+UI / UX RESEARCH
+==================================================
+
+For UI/UX implementation, the specification remains the primary source of truth.
+
+However, where the document references products such as:
+
+- Zapier
+- Make
+- Activepieces
+- Microsoft Copilot Studio
+- similar workflow automation platforms
+
+you MAY research their current public UI/UX patterns to understand how mature workflow automation products implement the corresponding experience.
+
+You may research:
+
+- workflow builder UX
+- step configuration panels
+- trigger/action selection
+- app selection
+- connection selection
+- field mapping
+- dynamic variables
+- paths/branches
+- loops
+- approvals
+- run history
+- execution details
+- task/run logs
+- Copilot interaction
+- AI-generated workflow editing
+- connection management
+- templates
+- testing individual steps
+- publish/version UX
+- rollback/version history
+- error states
+- empty states
+- loading states
+- responsive behavior
+- navigation patterns
+- search/filter patterns
+
+Use this research ONLY to improve the quality of implementation and UX.
+
+Do NOT copy proprietary code.
+
+Do NOT copy protected assets.
+
+Do NOT blindly reproduce another product.
+
+The Orchestra document defines WHAT Orchestra must do.
+
+Research can help determine HOW the experience should feel and behave when the specification does not provide enough UI detail.
+
+==================================================
+ZAPIER-QUALITY UI PRINCIPLE
+==================================================
+
+The target UI quality should be comparable to a modern professional automation platform.
+
+The UI should feel:
+
+- polished
+- predictable
+- fast
+- clean
+- professional
+- information-dense without being confusing
+- consistent
+- accessible
+- responsive
+- production-ready
+
+Do not create basic CRUD screens where the specification requires a workflow-builder experience.
+
+For workflow-related UI, think in terms of:
+
+Trigger
+→ Configuration
+→ Data
+→ Mapping
+→ Logic
+→ Testing
+→ Execution
+→ Results
+→ Debugging
+→ Publish
+
+Every important user action should have an obvious state and feedback.
+
+==================================================
+DO NOT LET EXISTING UI LIMIT THE DESIGN
+==================================================
+
+If the current UI is significantly different from the specification:
+
+DO NOT force the specification into the existing UI.
+
+Instead implement the UI required by the specification.
+
+Existing components can be reused when they are genuinely compatible, but existing UI limitations must not determine the target product.
+
+The target is the Orchestra product described in the document, NOT the existing application's current appearance.
+
+==================================================
+RESEARCH RULE
+==================================================
+
+If the specification says or implies that a product behavior needs to resemble an established workflow automation pattern and you are uncertain about the correct UX:
+
+RESEARCH IT.
+
+For example, research how Zapier currently handles:
+
+- trigger setup
+- action setup
+- mapping
+- paths
+- testing
+- publishing
+- run history
+- errors
+- workflow editing
+- app/connection selection
+
+Then implement the equivalent Orchestra experience using Orchestra's own architecture and terminology.
+
+Do not stop implementation merely because the specification does not provide a pixel-by-pixel UI design.
+
+Use the specification + appropriate product research + sound UX engineering judgment.
+
+==================================================
+IMPORTANT DISTINCTION
+==================================================
+
+The priority hierarchy is:
+
+1. Orchestra specification
+2. Architecture/code explicitly provided inside the Orchestra specification
+3. Security and architectural invariants defined by the specification
+4. External product research for UX/reference only
+5. Existing repository implementation
+6. Your own implementation judgment
+
+Existing code MUST NEVER override the specification.
+
+External products MUST NEVER override the specification.
+
+Your own assumptions MUST NEVER override the specification.
+
+==================================================
+CONTINUOUS EXECUTION
+==================================================
+
+Work through the specification from beginning to end.
+
+If Phase 1 is complete:
+
+→ immediately implement Phase 2.
+
+If Phase 2 is complete:
+
+→ immediately implement Phase 3.
+
+Continue until the complete document has been implemented.
+
+Do not stop after the foundation.
+
+Do not stop after the backend.
+
+Do not stop after the engine.
+
+Do not stop after Copilot.
+
+Do not stop after the UI.
+
+Do not stop after the first working demo.
+
+The objective is COMPLETE IMPLEMENTATION OF THE DOCUMENT.
+
+==================================================
+FINAL RULE
+==================================================
+
+Treat the document as if the client handed you a complete product engineering specification and said:
+
+"Build this product exactly according to this specification."
+
+Your job is to BUILD IT.
+
+Not analyze it.
+
+Not summarize it.
+
+Not create a plan for it.
+
+Not decide which requirements are important.
+
+Not skip existing-looking features.
+
+Not stop at an MVP.
+
+IMPLEMENT THE COMPLETE SPECIFICATION, PHASE BY PHASE, UNTIL EVERYTHING REQUIRED BY THE DOCUMENT IS ACTUALLY WORKING.

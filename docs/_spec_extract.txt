@@ -1,0 +1,1693 @@
+ZAPIER-CLASS
+AUTOMATION PLATFORM
+Complete Feature Reference, Step-by-Step Build Flow & Production Specification
+Every Zapier feature, page, integration and setup step — mapped for building a full-fledged automation app
+Version 1.0  |  Engineering & Product Reference Edition
+Classification: Internal / Build Reference
+Table of Contents
+Executive Summary
+Zapier Platform Overview & Market Positioning
+Complete Zapier Feature Catalog (36 Feature Areas, incl. full Integration Catalog)
+Step-by-Step: Building a Zap End-to-End (Screen by Screen)
+Step-by-Step: Tables, Interfaces, Canvas, Chatbots & Agents Walkthroughs
+System Architecture Blueprint to Build Your Own Platform
+Core Data Model
+Integration / Piece SDK Specification
+Public REST API Specification
+AI & Agent Orchestration Layer
+Security, Privacy & Compliance
+Connections, Apps & Workflows — How They Actually Bind, Technically
+Non-Functional Requirements
+Deployment Topology & Self-Hosted Option
+Sample Automation Recipes by Department
+End-to-End Reference Scenario
+Integration Setup Guides by Category
+The 50 Most-Used Zapier Apps — Setup & Configuration Reference
+Feature Parity Build Checklist
+Team & Roles Required to Build This
+Estimated Infrastructure Cost Ranges
+Testing & QA Strategy
+Accounts & Platforms You Must Create Manually
+Manual Setup Checklist (Ordered, Step-by-Step)
+Pricing & Plan Design Reference
+Delivery Roadmap
+Appendix — Glossary of Terms
+1. Executive Summary
+This document is a complete, page-by-page build reference for a Zapier-class automation platform. It is written to satisfy two goals at once: first, to serve as an exhaustive feature catalog of everything Zapier itself offers today — every product, every step type, every settings screen, every admin control — so nothing is skipped; and second, to translate that catalog into a production specification you can hand to a team (or use solo) to build your own full-fledged automation application, including the exact third-party accounts and platforms you must create by hand before a single line of code runs.
+Zapier has evolved from a simple "if this app does X, do Y in that app" connector into what it now calls an AI Orchestration Platform. The core primitive is still the Zap — a trigger followed by one or more actions — but it now sits inside a family of seven interlocking products: Zaps, Tables, Interfaces, Canvas, Chatbots, Agents, and Copilot, all connected to an integration catalog of 8,000–9,000+ apps and exposed to external AI assistants through a Model Context Protocol (MCP) server. This document covers all of it.
+1.1 What This Document Contains
+Complete feature catalog — every Zapier product and sub-feature, organized the way Zapier itself organizes its UI, with what each screen does and every configuration option on it.
+Step-by-step UI flow — a screen-by-screen walkthrough of building a Zap, a Table, an Interface, a Canvas, a Chatbot, and an Agent, in the order a new user actually clicks through them.
+Full integration map — every major app category Zapier supports, with representative apps in each, and how connections/authentication work per category.
+Build blueprint — the system architecture, data model, execution engine, Piece SDK, and API surface needed to build an equivalent platform from scratch.
+Manual setup checklist — the exact external accounts, platforms, API keys, and legal/compliance registrations a builder must create by hand — nothing skipped.
+Roadmap and glossary — a phased delivery plan and a full glossary of every term used across the document.
+1.2 How To Use This Document
+Sections 2–6 are the feature and UX reference — read these to understand exactly what a Zapier-class product must do and look like, feature by feature and page by page. Sections 6–11 are the engineering specification — read these to understand how to build it, including performance targets and deployment options in sections 12–13. Sections 16–17 are the operational checklist — read these before you write any code, because most of the "cannot be automated" work (creating developer accounts, registering OAuth apps, provisioning infrastructure) has to happen first and manually.
+2. Zapier Platform Overview & Market Positioning
+Zapier was founded in 2011 by Wade Foster, Mike Knoop, and Bryan Helmig. It is bootstrapped/profitable, fully remote, headquartered virtually out of Sunnyvale, California, and serves 3+ million businesses. Its core promise has not changed since day one: connect any two (or more) of thousands of apps, without writing code, and let events in one app automatically trigger actions in another.
+2.1 The Seven Interlocking Products
+Product
+What It Is
+Primary Use
+Zaps
+Trigger → Action workflow engine
+Core automation: move data, react to events
+Tables
+Automation-native relational database
+Store and query workflow data without a separate DB
+Interfaces
+No-code forms, pages, and mini apps
+Collect input, display data, trigger Zaps from a UI
+Canvas
+AI-assisted visual diagramming tool
+Plan a process, then auto-generate the underlying Zaps
+Chatbots
+No-code AI chatbot builder
+Customer-facing conversational support/lead capture
+Agents (Central)
+Autonomous AI teammates
+Goal-driven, reasoning automation across connected apps
+Copilot
+AI build-assistant embedded everywhere
+Natural-language creation of Zaps, Agents, Tables, etc.
+2.2 Positioning Statement
+Zapier markets itself as "the most connected AI orchestration platform" — no longer just an integration tool, but the action layer that lets both humans and AI systems reliably do things across a company's entire software stack. Its defining moat is integration breadth: 8,000–9,000+ pre-built app connections, including long-tail and enterprise systems (SAP, NetSuite, Workday) that smaller/newer automation and agent-building competitors have not reached.
+2.3 Competitive Frame of Reference
+Platform
+Model
+Differentiator to Match or Beat
+Zapier
+Closed-source, cloud-only, per-task billing
+Largest app catalog (8,000–9,000+ apps), Copilot, Agents/Central, MCP server
+Activepieces
+Open-source (MIT), cloud + self-hosted, credit billing
+MCP-native from the ground up, embeddable builder SDK, unlimited self-hosted runs
+Make.com
+Closed-source, visual scenario builder, operations billing
+Highly granular visual data-mapping, native loops/iterators/aggregators
+n8n
+Fair-code, self-hostable, node-based canvas
+Full custom-code nodes, cheaper at high volume, developer-first
+2.4 Primary Personas
+Persona
+Goals
+Key Features Used
+Business Ops / RevOps
+Automate lead routing, CRM sync, reporting without code
+Templates, Zap editor, Tables, Interfaces
+Support / Success Manager
+Escalate tickets, notify teams, auto-respond
+Paths, Chatbots, Slack/Email actions, human-in-the-loop
+Developer / Platform Engineer
+Build custom integrations, embed automation
+Zapier Platform CLI, Visual Builder, Webhooks, Code steps, SDK
+IT / Security Admin
+Govern access, ensure compliance, control spend
+SSO/SAML, SCIM, RBAC, audit logs, task-usage dashboards
+AI / Automation Power User
+Chain LLMs and agents across tools autonomously
+Agents, MCP, AI Actions, Copilot, Canvas
+2.5 Business Model Snapshot
+Zapier bills primarily by tasks (one task = one completed action step in a Zap run). Filters, Formatter steps, and Paths branching do not themselves consume tasks. Plans run Free (100 tasks/month, 2-step Zaps only) → Professional (multi-step Zaps, premium apps, webhooks, unlimited Zaps) → Team (shared workspaces, SAML SSO, shared app connections, Premier support) → Enterprise (custom task pools, advanced governance, audit, and negotiated SLAs). Tables, Interfaces, Chatbots, and Agents historically shipped as separate metered add-on products layered on top of core plans, with basic tiers bundled into paid plans and advanced tiers priced and metered independently.
+3. Complete Zapier Feature Catalog
+This section enumerates every feature area of Zapier in the same grouping a builder would encounter clicking through the product, from the core Zap engine outward to Tables, Interfaces, Canvas, Chatbots, Agents, the developer platform, and admin/governance controls. Each entry lists what the feature does, every configuration option it exposes, and how it behaves at runtime — sufficient detail to write user stories and acceptance criteria against.
+3.1 Zaps — The Core Workflow Engine
+A Zap is a single automated workflow: one Trigger followed by one or more Actions, executed in order every time the trigger fires. Zaps are the atomic unit of the entire platform; every other product (Tables, Interfaces, Chatbots, Agents) ultimately reads from or writes to Zaps.
+Zap states — Draft (editing, not live), Published/On (live and listening), Off (paused, keeps history and configuration).
+Ownership & sharing — personal Zaps, team/folder-shared Zaps, and Zaps owned by a shared app connection.
+Naming & organization — custom Zap titles, folders, tags/labels, and a searchable "My Zaps" dashboard with filters by status, app, and owner.
+Run modes — real-time (instant, webhook-driven), scheduled/polling (checks every 1–15 minutes depending on plan), and manually triggered test runs.
+3.2 Triggers, Actions & Searches
+Every app integration ("app" in Zapier's directory) exposes some combination of three primitive operation types that Zaps are built from:
+Trigger — the event that starts a Zap (e.g., "New Row in Google Sheets", "New Email Matching Search in Gmail"). Triggers are either instant (webhook push from the app) or polling (Zapier checks the app's API on an interval).
+Action — an operation performed in an app once the Zap runs (e.g., "Send Channel Message in Slack", "Create Record in Airtable").
+Search — a lookup that finds existing data in an app (e.g., "Find Contact" in a CRM) so the result can be used later in the Zap; often paired with a "Search or Create" fallback that creates the record if not found.
+Action groups — some steps combine a search and a create/update into one configurable step ("Search & Create") to avoid needing two separate steps.
+3.3 Zap Editor — Screen-by-Screen
+The Zap editor is a vertical, top-to-bottom canvas: Trigger at the top, then each subsequent Action or logic step stacked below it, connected by a visual line. Screens/panels a builder moves through:
+App & Event Selection — search or browse the app directory, then pick the specific trigger/action event for that app (each app can expose dozens of events).
+Account/Connection Selection — choose an existing authenticated connection or add a new one (OAuth popup, API key field, or username/password depending on the app).
+Set Up Trigger/Action — a form of input fields specific to that event; fields can be static text, dropdowns populated live from the connected account, or dynamic fields that appear based on earlier answers.
+Data to Insert / Field Mapping — a right-hand or inline picker exposing every output field from all upstream steps, with expandable nested-JSON drill-down (caret icons) for deeply nested API responses, so any field can be dropped into any downstream input by click or drag.
+Test Step — pulls a real, live sample record from the connected account (or lets the user pick from recent items) and shows exactly what data will flow through; required before a step can be turned on for most triggers.
+Continue/Publish — once every step tests successfully, the Zap can be turned on, which registers the underlying webhook subscription, polling schedule, or event listener with the external app.
+Autosave & draft state — every keystroke is saved to a draft version; nothing goes live until the Zap is explicitly turned on.
+Undo/redo — full edit history within a session.
+Zoom & minimap — for long, many-step Zaps.
+Rename, duplicate, and move steps — steps can be reordered by drag, duplicated, or deleted without losing downstream mappings where possible.
+Inline error banners — a step with missing required fields or a failed test is flagged directly on the canvas before publish.
+3.4 Multi-Step Zaps
+Paid plans allow unlimited additional Action steps after the first, letting a single trigger fan out into many sequential actions — e.g., a new deal in a CRM can simultaneously post to Slack, create a project in a PM tool, add a row to a spreadsheet, and send a welcome email, all inside one Zap.
+Each additional step is added with a "+" control directly on the canvas at the point it should execute.
+Steps execute strictly in the order shown top-to-bottom unless routed through Paths.
+Any step's output fields remain available to every step below it, not just the immediately preceding one.
+3.5 Paths — Conditional Branching
+Paths let one trigger split into multiple mutually exclusive branches based on conditions evaluated against the trigger or any upstream step's data — Zapier's equivalent of if/then/else logic.
+Rule builder — each Path has one or more condition rows (field / operator / value), combined with AND or ALL/ANY logic.
+Multiple paths — A, B, C… each with its own independent rule set and its own chain of subsequent action steps.
+Fallback / else path — an optional default branch that runs when no other path's conditions match.
+Continue-on-no-match toggle — controls whether the Zap run is marked as "filtered out" or continues silently if nothing matches.
+Path-level testing — each path can be tested independently with sample data to confirm the right branch fires.
+3.6 Filters
+A Filter step stops a Zap from continuing unless incoming data meets specified conditions — a single-branch gatekeeper, as opposed to Paths' multi-branch router.
+Field / condition / value rows, combinable with AND/OR logic across multiple conditions.
+Common operators: exists/doesn't exist, (does not) contain, (does not) exactly match, greater/less than, is (not) empty, is (not) in a list, matches regex (on higher plans).
+Filters do not consume a task if the Zap is stopped at that step, making them a cost-free way to add precondition logic.
+3.7 Formatter by Zapier
+A built-in, no-extra-account-needed transformation step used to reshape data between the trigger and downstream actions. It does not consume a task.
+Category
+Representative Transforms
+Text
+Capitalize, lowercase/uppercase, trim whitespace, replace, split, extract email/URL/phone/number, truncate, count, find/replace with regex, convert Markdown to HTML
+Numbers
+Perform math operation, format number, currency conversion (with rate lookup), spell out number, random number generator
+Date / Time
+Format date, add/subtract time, compare two dates, convert time zone, extract day/month/year, calculate duration between dates
+Utilities
+Line-item to text / text to line-items, lookup table (map an input to an output using a static table), pick from list, create/parse JSON, import CSV, generate unique ID
+3.8 Delay by Zapier
+Pauses a Zap run for a specified duration before continuing to the next step. Does not consume a task for the delay itself (the following action step still does when it runs).
+Delay For — a fixed duration (minutes, hours, days, weeks) from the moment the step is reached.
+Delay Until — a specific date/time, either static or computed from a data field earlier in the Zap (e.g., "3 days before the deadline field").
+Delay Queue — processes delayed items strictly in the order they entered the delay, useful for sequencing.
+3.9 Sub-Zaps / Nested Zaps
+Lets one Zap call another Zap as a reusable sub-routine, passing data in and (optionally) receiving data back — used to avoid duplicating the same multi-step logic across many parent Zaps.
+A Sub-Zap is authored like a normal Zap but started by a special "Sub-Zap" trigger instead of an app event.
+The parent Zap calls it with a "Run a Sub-Zap" action step, mapping input fields.
+Useful for shared logic such as standardized error notification, data enrichment, or logging routines reused across dozens of parent Zaps.
+3.10 Looping by Zapier
+A dedicated built-in step that iterates over a list/array (e.g., line items on an order, rows in an uploaded CSV) and runs the subsequent action steps once per item, since the core linear Zap canvas has no native loop construct.
+Loop source: a line-item field, a comma-separated text field split into items, or a fixed number of iterations.
+Each loop iteration counts as its own task execution for every action inside the loop.
+Commonly paired with Formatter's line-item transforms to prepare the array being looped over.
+3.11 Webhooks by Zapier
+Lets a Zap trigger from, or send to, any arbitrary HTTP endpoint — the escape hatch that connects Zapier to systems with no pre-built app integration.
+Capability
+Description
+Catch Hook
+Creates a unique URL; any POST/GET to it instantly triggers the Zap with the payload as trigger data
+Catch Raw Hook
+Same as above but preserves the raw, unparsed request body
+Retrieve Poll
+Polls a given URL on a schedule and triggers on new data
+GET / POST / PUT / PATCH / DELETE (Action)
+Sends an outbound HTTP request with custom headers, query params, body, and auth (Basic, Bearer, API key, OAuth)
+Custom Request
+Full manual control over method, headers, and raw body for edge cases
+3.12 Code by Zapier / Functions
+Runs custom JavaScript or Python directly inside a Zap step for logic no built-in step can express — data transformation, custom API calls, complex conditionals, or calling out to a private library.
+Input fields are mapped from upstream steps into named variables available inside the code sandbox.
+Supports npm/pip-style standard libraries within the sandbox's allowed set; outbound HTTP calls (fetch/requests) are permitted for calling external APIs directly from code.
+A recent platform update extended maximum runtime for code steps to around 10 minutes, enabling heavier multi-API workflows and larger data processing without splitting logic across multiple Zaps.
+Rebranded/extended as "Functions" for reusable, testable, versioned code blocks callable from multiple Zaps.
+3.13 Email Parser by Zapier
+A standalone companion tool (separate mini-app) that converts unstructured inbound emails into structured trigger data for a Zap.
+Generates a unique parser email address to forward or auto-forward mail to.
+User highlights sample text in a sample email to teach the parser which fragments map to which named fields (e.g., "Order Number", "Total").
+Parsed fields become available as trigger fields in a normal Zap once enough sample emails have been mailboxed.
+3.14 Schedule by Zapier
+A built-in trigger for time-based automation with no external app required.
+Every N minutes/hours (paid plans), daily, weekly (with day-of-week selection), or monthly (with day-of-month selection).
+Time zone configuration per schedule.
+Used for recurring digests, reminders, batch syncs, and cleanup jobs.
+3.15 Storage by Zapier
+A simple built-in key-value store for persisting small pieces of data between separate Zap runs (e.g., remembering the last processed record ID, a running counter, or a dedupe list) without needing an external database or Table.
+Set Value, Get Value, Increment Value action/search steps.
+Scoped per Zapier account with a defined size limit per key and total keys, suitable for lightweight state, not bulk data (use Tables for that).
+3.16 Digest by Zapier
+Collects multiple trigger events over time and releases them together as a single batched summary instead of firing downstream actions once per event.
+Digest name groups related entries together; each incoming item is appended with a template (e.g., "{{Name}} signed up on {{Date}}").
+Release schedule: a specific time daily/weekly/monthly, or manually via a separate release trigger.
+Downstream step receives the full compiled digest text as one field — ideal for daily summary emails or reports.
+3.17 Human-in-the-Loop: Approvals & Conditional Forms
+Several features let a Zap pause for a human decision rather than running fully unattended.
+Zapier Interfaces Forms — collect structured input and can gate a workflow behind a submitted approval form.
+Conditional logic in Forms — on paid Interfaces tiers, later questions can be shown/hidden dynamically based on answers to earlier questions.
+Email/Slack "Approve or Deny" actions — many communication app integrations expose interactive buttons that write a decision back into the Zap's data for downstream branching via Paths.
+Agent human-approval checkpoints — Agents can be configured to require explicit human sign-off before taking a sensitive action (e.g., sending an external email or processing a payment).
+3.18 Zapier Tables
+An automation-native relational database built directly into the platform, positioned to remove the need for a separate lightweight database tool for many workflows.
+Structure — Bases contain Tables; Tables contain typed Fields (text, number, date, checkbox, single/multi-select, attachment, link-to-another-record, formula, AI field) and Records (rows).
+Views — grid view plus filtered/sorted saved views.
+Triggers — New Record, Updated Record, New or Updated Record, Deleted Record.
+Actions — Create Record, Update Record, Find Record, Find or Create Record, Delete Record, Create Table, Bulk actions on paid tiers.
+AI fields — a field type that runs a prompt against a connected AI model per-row to enrich or classify data automatically as records are added.
+Automations tab — table-native, lightweight automation rules that can run without leaving Tables (e.g., "When Status changes to Done, send Slack message") in addition to full Zap triggers.
+Access — the free tier includes unlimited tables at a base capacity; higher tiers raise record limits, add advanced permissions, and bulk operations.
+3.19 Zapier Interfaces
+A no-code builder for forms, web pages, and lightweight internal apps that plug directly into Zaps and Tables — used to give a workflow a human-facing front end without a separate website builder.
+Components — Forms (single or multi-page, with conditional/dynamic question logic on paid tiers), Pages (static content blocks, embedded Tables views, images, buttons), and Apps (multi-page experiences combining forms, tables, and navigation into an internal tool such as a lightweight CRM or intake portal).
+Form field types — short/long text, single/multi-select, dropdown, file upload, date, rating, signature, hidden fields for pre-filled context, payment collection on eligible plans.
+Publishing — hosted on a Zapier subdomain, embeddable via iframe/JS snippet on an external site, or password-protected for internal-only use.
+Triggers — "New Form Submission" and "New Interface Interaction" start Zaps directly from user activity on the Interface.
+Theming — logo, color palette, and custom domain on higher tiers for white-labeled experiences.
+3.20 Zapier Canvas
+A free, AI-assisted visual diagramming tool for planning a business process before (or instead of) building it step-by-step in the Zap editor; Canvas plans can be turned directly into live Zaps, Tables, Interfaces, Agents, and Chatbots.
+Nodes — process steps, decision/split-path nodes, and "default steps" that represent human/team-dependent actions not yet automated.
+Automated steps — nodes that add or pull in existing Zap workflows, including Interfaces, directly onto the canvas.
+Grouped nodes — clusters that organize a complex, multi-team process into readable sections.
+On-canvas field mapping — map inputs/outputs between connected nodes without leaving Canvas to open the full Zap editor.
+Agent support — Agents can be added and configured directly from within Canvas.
+Zapier asset builder — type a description into a node and use AI to turn that text into a real Zap, Interface, Chatbot, or Table.
+Time-saved & activity metadata — Canvas can display estimated time saved and live run/record/submission counts for every connected asset, turning the diagram into a live operations dashboard.
+Auto-generated Canvas — the platform can automatically generate a Canvas diagram of how a company's existing Zaps, Tables, Interfaces, Chatbots, and Agents relate to one another, fully editable afterward.
+Rich text & sharing — images, links, checklists, custom colors, and shareable/collaborative editing for cross-team alignment.
+3.21 Zapier Chatbots
+A no-code builder for AI chatbots trained on a business's own content and connected to automation, used for customer support, lead capture, and internal FAQ deflection.
+Knowledge sources — uploaded documents, URLs to crawl, and connected help-center content, used to ground chatbot answers.
+Custom instructions/prompt — defines tone, scope, and behavior boundaries for the bot.
+Actions from chat — a chatbot conversation can trigger a Zap directly (e.g., "create a support ticket", "look up an order"), turning chat into a two-way automation surface, not just Q&A.
+Deployment — embeddable widget on a website, a hosted standalone chat link, or integration into existing support channels.
+Lead collection — structured capture of visitor contact details mid-conversation, feeding directly into CRM Zaps.
+Org-wide admin control — administrators can disable Chatbots across an entire organization from a central control (as a governance/compliance lever).
+3.22 Zapier Agents (Central)
+Zapier's autonomous AI-teammate product: goal-oriented agents that reason, plan, and take multi-step actions across connected apps rather than following a single fixed trigger-action path.
+Goal / instructions — defined in natural language — what the agent is responsible for and the boundaries it should respect.
+Connected tools — the specific apps, actions, Tables, and Zaps the agent is permitted to use, scoped explicitly rather than given blanket access.
+Reasoning models — agents can be configured against different underlying LLMs depending on task complexity and cost/quality tradeoffs.
+Monitoring mode — agents can passively watch a data source (inbox, table, feed) and act only when their conditions are met, rather than waiting for a discrete external trigger.
+Human oversight — approval checkpoints, activity logs, and the ability to pause/edit an agent's permissions at any time.
+Agent templates — a library of ready-made agents (e.g., lead enrichment, lead scoring & routing, meeting follow-up assistant, candidate ranking, brand-voice/content checker) that can be launched and customized in minutes from the Templates hub.
+Enterprise controls — audit logs, managed credentials, and admin controls consistent with the rest of the platform's governance model.
+Non-determinism disclosure — Zapier explicitly documents that agents, being LLM-driven, will not always behave identically run to run, unlike deterministic Zap steps, and that agents can only act within the specific apps, triggers, and actions they have been explicitly connected to.
+3.23 Zapier Copilot
+An AI build-assistant embedded across every product surface (Zaps, Agents, Chatbots, Canvas, Tables, Interfaces) that turns a plain-language description into a working configuration.
+Describe a desired automation in a sentence; Copilot proposes the trigger, actions, and field mappings, then lets the user review and adjust before publishing.
+Can refine an agent's instructions automatically when test runs do not behave as intended.
+From a single prompt, Copilot can architect a cross-product solution: a Canvas plan, a Table schema, a Forms input layer, and the connecting Zaps, together.
+Supports voice input for dictating build instructions, and can construct custom API actions on the fly when no pre-built app action covers a need.
+3.24 AI Actions / AI by Zapier / AI Fields
+First-class AI model steps usable inside any ordinary Zap, independent of the standalone Agents product.
+AI by Zapier action step — prompt-driven text generation, summarization, classification, extraction of structured data from unstructured text, translation, and sentiment/intent detection, insertable as a normal step in any Zap.
+Model choice — steps can be pointed at different providers/models (e.g., GPT-4o-class, Claude, Gemini-class models) depending on the account's connected AI provider keys or Zapier's managed model access.
+Vision & transcription — image-understanding prompts and audio transcription as callable step types.
+AI fields in Tables — a field type that automatically enriches or classifies each record with a model call as data is created or updated.
+Custom/API actions via AI — Copilot or the action-builder can generate a working custom HTTP action against an arbitrary API description without a pre-built app Piece existing yet.
+3.25 Zapier MCP (Model Context Protocol)
+An integration layer that exposes Zapier's entire app catalog and tens of thousands of underlying actions as callable tools to any external AI assistant that supports the MCP standard, including general-purpose chat assistants and custom agents built on other frameworks.
+Lets an external AI client take real-world actions ("send this email", "create this ticket", "look up this contact") without a human first building a dedicated Zap for that exact task.
+Positions Zapier as a universal action/tool layer sitting underneath many different AI front ends, not just its own products.
+Access and permission scoping follow the same connected-account model as the rest of the platform — an MCP client can only call actions the underlying Zapier account is authorized for.
+3.26 Transfer by Zapier
+A bulk, one-time (or repeatable) data-migration tool distinct from the ongoing, event-driven behavior of a normal Zap — used to move existing historical records between two apps rather than reacting to new events.
+Select a source app/object and a destination app/object, map fields once, then run the transfer across all existing matching records.
+Useful for initial backfills before turning on a live Zap that only reacts going forward (e.g., migrate 5 years of existing contacts, then let a Zap handle new ones).
+3.27 Zap Templates & Template Gallery
+A searchable library of pre-built Zap, Agent, Table, Interface, and Chatbot configurations for common use cases, browsable by app, category, or team function.
+One-click "Use this template" pre-fills the trigger/action apps and typical field mappings, leaving only account connection and final field confirmation to the user.
+Agent templates specifically surface proven, goal-defined agents (lead enrichment, scoring/routing, meeting follow-up, HR candidate ranking, brand-voice checking, etc.) directly from the same Templates hub as Zap templates, so AI workflows are discoverable in one place rather than built from scratch.
+Templates are also promoted contextually inside Canvas and inside individual app directory pages.
+3.28 App Directory / Integration Catalog
+Zapier's directory spans 8,000–9,000+ apps as of 2026, organized into browsable categories. Each app's directory page lists its available triggers, actions, and searches, its authentication method, and popular templates using it.
+Category
+Representative Apps
+CRM & Sales
+Salesforce, HubSpot, Pipedrive, Zoho CRM, Close, Copper
+Marketing
+Mailchimp, ActiveCampaign, Klaviyo, Facebook Lead Ads, Google Ads
+Communication
+Slack, Microsoft Teams, Gmail, Outlook, Twilio, Discord, Telegram
+Project Management
+Asana, Trello, Monday.com, Jira, ClickUp, Basecamp
+E-commerce
+Shopify, WooCommerce, BigCommerce, Stripe, PayPal, Square
+Productivity / Docs
+Google Sheets, Microsoft Excel 365, Notion, Airtable, Google Drive, OneDrive, SharePoint
+Finance & Accounting
+QuickBooks, Xero, NetSuite, FreshBooks, Bill.com
+Forms & Surveys
+Typeform, Google Forms, JotForm, SurveyMonkey, Calendly
+Support / Helpdesk
+Zendesk, Intercom, Freshdesk, Help Scout
+Databases & Dev Tools
+Postgres, MySQL, Snowflake, GitHub, GitLab, PagerDuty
+AI / LLM Providers
+OpenAI, Anthropic Claude, Google AI (Gemini), Hugging Face
+HR & People Ops
+BambooHR, Workday, Gusto, Greenhouse
+Enterprise Systems
+SAP, NetSuite, Workday (deep, enterprise-only connectors)
+Social & Content
+WordPress, YouTube, LinkedIn, X/Twitter, Buffer
+Custom / Fallback
+HTTP / Webhooks (any REST API), Code by Zapier (any logic)
+Authentication per app — OAuth 2.0 (most common; secure popup consent flow), API key, username/password, or custom auth schemes defined by the app's Piece definition.
+Shared app connections — on Team/Enterprise plans, one authenticated connection to an app can be reused across many users' Zaps instead of each person re-authenticating individually.
+Premium apps — certain apps are gated to paid plans due to their support/maintenance cost or partner agreement terms.
+3.29 Zapier Platform — Developer Tools
+The framework by which Zapier itself, its partners, and independent developers add new apps ("Pieces"/integrations) to the directory, and by which developers embed Zapier inside their own products.
+Tool
+Purpose
+Platform CLI
+Scaffolds, builds, tests, and pushes a new app integration from a local Node.js project
+Visual Builder
+A no-code / low-code browser-based tool for building simpler integrations without local tooling
+Zapier SDK
+Lets external code, agents, and CLI tools securely discover apps, inspect actions/inputs, manage connections, and call actions directly from outside the Zapier UI
+Partner Program
+Formal certification path for SaaS vendors to publish and co-market an official integration
+Embed / Platform UI
+White-labeled Zapier automation embedded directly inside a third-party product's own UI
+Natural Language Actions (NLA) API
+Lets developers expose Zapier's app marketplace as callable actions inside their own AI product
+Integration definitions specify authentication, one or more triggers/actions/searches, input field schemas, and sample output data used for the field-mapping picker.
+Apps can be private (internal use only), invite-only (shared with specific users), or public (submitted for Zapier review and directory listing).
+Versioning lets an app maintainer ship breaking changes without disrupting Zaps built on an older version until users explicitly migrate.
+3.30 Admin, Team & Governance Controls
+Control
+Description
+Folders
+Organize Zaps, Tables, and Interfaces into shared, permissioned groups
+Shared Workspaces
+Team-level containers with shared members, folders, and app connections
+Roles & Permissions
+Admin, member, and custom role scoping over who can create, edit, publish, or view assets
+SSO / SAML
+Single sign-on via a corporate identity provider, available from the Team plan up
+SCIM Provisioning
+Automated user provisioning/deprovisioning from an identity provider (Enterprise)
+Audit Logs
+Chronological record of billing/plan changes, permission changes, connection changes, and asset edits, viewable by admins/finance/compliance without a support ticket
+Folder Documentation Tab
+A place to keep operational/system context alongside the automations it documents
+Org-wide Feature Toggles
+e.g., disabling Chatbots platform-wide for compliance reasons
+Managed Credentials (Agents)
+Centrally issued and rotated credentials for AI agents rather than individual logins
+3.31 Zap History, Monitoring & Error Handling
+Zap History — a per-Zap, per-run log of every execution, its status (success, error, filtered, halted), the exact input/output data at each step, and total run time.
+Task history dashboard — account-wide view of task consumption over time, filterable by Zap, app, and date range.
+Error notifications — configurable email/Slack alerts on step failure, with a direct link back to the failed run's data for debugging.
+Auto-replay — automatic retry of a failed step following transient errors (e.g., a brief API outage) on a backoff schedule before surfacing it as a hard failure.
+Zap auto-pause on repeated failure — protects against runaway error loops or against a Zap silently failing for an extended period unnoticed.
+AI guardrails / governance controls — organization-level safeguards specifically around AI-driven steps (Agents, AI Actions, Chatbots) to bound risk in automated decision-making.
+3.32 Version History & Draft/Published State
+Every publish creates a restorable version snapshot of the full Zap configuration.
+Rollback to any prior version without losing run history.
+Draft edits never affect the currently live/published version until explicitly republished, so a Zap can be safely edited while continuing to run its last good configuration.
+3.33 Task Usage, Limits & Plan Tiers
+Plan
+Representative Scope
+Free
+100 tasks/month, 2-step Zaps only, core AI features included for individual use
+Professional
+Multi-step Zaps, Paths, premium apps, webhooks, unlimited Zaps, task volume scaling by tier
+Team
+Everything in Professional + shared workspaces, shared app connections, SAML SSO, Premier support, multi-user seats
+Enterprise
+Custom negotiated task pools, SCIM, advanced admin/governance, audit logging, dedicated support, custom compliance add-ons (e.g., HIPAA)
+A "task" is one completed action step in one Zap run; Filters, Paths branching logic, and Formatter steps do not themselves consume a task.
+Tables, Interfaces, Chatbots, and Agents have historically carried their own separate metered tiers layered on top of the core plan (basic capability bundled free/into paid plans, advanced capability billed and metered independently).
+Polling interval (how often a non-instant trigger checks for new data) improves at higher plan tiers, down to near-real-time on top tiers.
+3.34 Learning, Community & Services
+Zapier University — structured courses and certification paths for building automations and, at higher levels, becoming a certified expert.
+Community — forums for troubleshooting, template sharing, and feature requests.
+Zapier Experts Marketplace — a directory of certified freelancers/agencies available to hire for custom build-outs.
+Help Center / Documentation — searchable per-app and per-feature documentation, plus in-product contextual help.
+Annual conference — a flagship event (e.g., "ZapConnect") showcasing roadmap and major product announcements.
+3.35 Browser Extension & Mobile Access
+Browser extension: quick-create Zaps from data on the current web page, and a right-click "send to Zapier" style capture.
+Mobile companion access for monitoring Zap activity and approving human-in-the-loop steps on the go (availability and feature depth vary by release).
+3.36 Security, Privacy & Compliance
+Encryption — TLS in transit; encryption at rest for stored credentials and workflow data.
+Credential storage — OAuth tokens and API keys stored in a dedicated secrets vault, never exposed in plaintext to end users after entry.
+Compliance certifications — SOC 2 Type II as a baseline; GDPR data-processing terms; HIPAA available as an Enterprise add-on for regulated healthcare workflows.
+Data residency & retention — configurable retention windows for stored run history on higher tiers.
+Least-privilege connections — each app connection is scoped only to the permissions the user grants during OAuth, not blanket account access.
+Agent-specific safeguards — explicit tool/action allow-lists per agent, human-approval checkpoints, and AI guardrail policies to prevent unintended autonomous actions.
+4. Step-by-Step: Building a Zap End-to-End
+This is the exact screen-by-screen sequence a user follows to go from an empty workspace to a live, running Zap — useful both as a UX spec and as an onboarding script.
+Open Dashboard — land on "My Zaps"; click "Create" → "Zaps".
+Name the Zap — default auto-generated title, editable at any time from the top bar.
+Choose Trigger App — search or browse the app directory; select the app that starts this automation.
+Choose Trigger Event — pick from the list of events that app exposes (e.g., "New Row", "New Submission", "Updated Deal").
+Connect Account — authenticate via OAuth popup, API key, or credentials; reuse an existing saved connection if available.
+Set Up Trigger — fill in event-specific fields (e.g., which spreadsheet, which folder, which list) using dropdowns populated live from the connected account.
+Test Trigger — Zapier pulls a real recent record; review the sample data returned.
+Add Action Step — click the "+" below the trigger; search/select the destination app.
+Choose Action Event — pick the specific operation (e.g., "Send Channel Message", "Create Row").
+Connect Account (Action App) — same OAuth/API-key flow as the trigger, for the second app.
+Map Fields — for each input field on the action, either type static text or insert a dynamic value from the trigger (or any prior step) via the field picker, including nested/expandable JSON fields.
+Test Action — runs the action once for real against the connected account (e.g., actually sends a test Slack message) so the mapping can be visually confirmed.
+Add Logic Steps as Needed — insert Filter, Paths, Formatter, Delay, Sub-Zap, Code, or Looping steps anywhere in the chain by clicking "+" at that point.
+Repeat Add/Configure/Test — for every additional action step required by the workflow.
+Review Full Zap — scroll the complete canvas top to bottom to confirm the sequence and branch logic.
+Publish — toggle the Zap from Draft to On; this registers the live webhook subscription or polling schedule with the trigger app.
+Monitor — open Zap History at any time to see every run, its status, and the exact data at each step; configure error notifications.
+5. Step-by-Step: Tables, Interfaces, Canvas, Chatbots & Agents
+5.1 Building a Table
+From the dashboard, click "Create" → "Table", or create one inline from within a Zap step.
+Name the Table and add Fields, choosing a type for each (text, number, date, select, attachment, link-to-record, formula, AI field).
+Add Records manually, via CSV import, or leave empty for a Zap to populate.
+Optionally define an AI field's prompt so new/updated records are auto-enriched.
+Create a Table Automation (native rule) or connect a full Zap using "New/Updated Record" as the trigger.
+Set view filters/sorts as needed and share the Table with the workspace.
+5.2 Building an Interface
+Click "Create" → "Interface"; choose a template or start blank.
+Choose a component type: Form, Page, or multi-page App.
+Add fields (for a Form) or content blocks/embedded Table views (for a Page/App).
+Configure conditional logic so later questions depend on earlier answers (paid tiers).
+Connect submissions to a Zap trigger ("New Form Submission") or directly to a Table.
+Apply theming (logo, colors) and, on higher tiers, a custom domain.
+Publish and share the hosted link, or embed via iframe/JS snippet on an external site.
+5.3 Building a Canvas
+Click "Create" → "Canvas", or auto-generate one from existing connected assets.
+Add process nodes describing each step of the business process in plain language.
+Use Copilot / the asset builder to convert a node into a real Zap, Table, Interface, Agent, or Chatbot with one action.
+Add split-path/decision nodes for branch logic and group related nodes for readability.
+Map fields directly on the canvas between connected nodes.
+Share the Canvas with the team; review time-saved and activity metadata as connected assets run in production.
+5.4 Building a Chatbot
+Click "Create" → "Chatbot"; name it and write its custom instructions/persona.
+Add knowledge sources: upload documents, add URLs to crawl, or connect existing help-center content.
+Define any actions the bot can take mid-conversation (e.g., trigger a Zap to create a ticket or look up an order).
+Test the bot in the built-in preview chat window.
+Configure lead-capture fields if the bot should collect visitor contact details.
+Deploy: embed the widget on a website or share the hosted chat link.
+5.5 Building an Agent
+Click "Create" → "Agent", or start from an Agent template in the Templates hub.
+Write the agent's goal/instructions in natural language.
+Connect the specific tools (apps, actions, Tables, Zaps) the agent is allowed to use — explicit allow-list, not blanket access.
+Choose or confirm the underlying reasoning model.
+Set the trigger mode: react to a specific event, or run in a monitoring mode watching a data source continuously.
+Add human-approval checkpoints for any sensitive action.
+Use Copilot to refine instructions if test runs behave unexpectedly.
+Activate the agent and review its activity log to confirm it is acting within its intended scope.
+6. System Architecture Blueprint to Build Your Own Platform
+This section translates the feature catalog above into the system you would actually build. It assumes a multi-tenant SaaS delivered as a cloud product, with an optional self-hosted deployment path, following the same shape as Zapier, Activepieces, and Make.
+6.1 High-Level Component Map
+Layer
+Responsibility
+Web App (Builder UI)
+Zap editor canvas, Tables, Interfaces, Canvas, Chatbot, Agent builders, admin console
+API Gateway
+Authn/z, rate limiting, request routing to internal services
+Trigger Service
+Manages webhook subscriptions and polling schedules per connected app
+Execution Engine
+Orchestrates step-by-step run of a workflow; evaluates Paths/Filters; handles retries
+Task Queue / Workers
+Durable, horizontally scalable queue (e.g., Kafka/SQS/RabbitMQ) feeding a worker pool that executes individual steps
+Piece/Connector Runtime
+Sandboxed execution environment that runs each integration's trigger/action/search code
+Connection & Secrets Vault
+Encrypted storage and refresh of OAuth tokens, API keys, and credentials
+Tables Service
+Managed relational storage backing the Tables product, with its own query/filter API
+Interfaces Service
+Form/page rendering, submission handling, hosting, and embed delivery
+AI/Agent Orchestration Layer
+Model routing, tool-calling, agent memory/state, guardrail enforcement
+Notification & Digest Service
+Error alerts, scheduled digests, and human-approval prompts
+Billing & Metering Service
+Task counting, plan enforcement, usage dashboards, invoicing integration
+Admin/Governance Service
+SSO/SAML, SCIM, RBAC, audit logging
+Observability Stack
+Structured logging, metrics, tracing across every run for the Zap History UI
+6.2 Execution Engine — Runtime Internals
+An event arrives at the Trigger Service (webhook push or a polling tick discovers new data).
+The Trigger Service normalizes the payload into the workflow's internal event schema and enqueues a new Run.
+The Execution Engine picks up the Run and walks the workflow's step graph top-to-bottom, evaluating Filters and Paths as boolean gates against accumulated run data.
+For each Action/Search step, the Engine invokes the Piece/Connector Runtime in an isolated sandbox with the mapped input fields resolved from all prior step outputs.
+Each step's result (success payload or error) is persisted immediately to the Run's history record, before moving to the next step — this is what powers per-step Zap History inspection.
+Transient failures are retried on an exponential backoff policy up to a configured limit before the Run is marked failed and an error notification is dispatched.
+Delay and Digest steps suspend the Run (or a per-item sub-run) and re-enqueue it for resumption at the scheduled time rather than holding a worker thread idle.
+A completed Run's task count is reported to the Billing & Metering Service in the same transaction as the final step result.
+6.3 Multi-Tenancy & Isolation
+Every Run, Connection, Table, and Interface record is scoped by tenant/workspace ID at the database layer, enforced by row-level security, not just application logic.
+The Piece/Connector Runtime executes third-party and user-authored code (Code steps, custom Pieces) in a sandboxed, resource-limited container per invocation, with no shared state or filesystem across tenants.
+Secrets are encrypted per-tenant with envelope encryption; a compromised worker node must not be able to decrypt another tenant's credentials.
+7. Core Data Model
+Entity
+Key Fields
+Notes
+Workspace / Team
+id, name, plan_tier, billing_account_id
+Top-level tenant boundary
+User
+id, workspace_id, role, sso_subject_id
+Role-based permissions per workspace
+Connection
+id, app_key, auth_type, encrypted_credentials, owner_id, shared_flag
+One authenticated link to a third-party app
+Zap (Workflow)
+id, name, status(draft/on/off), folder_id, version
+Container for the trigger + step graph
+Step
+id, zap_id, type(trigger/action/search/filter/path/formatter/delay/code/loop/subzap), position, config_json
+One node in the workflow graph
+Field Mapping
+step_id, input_key, source_step_id, source_path
+Resolves a step's input to an upstream output field
+Run
+id, zap_id, status, started_at, finished_at, task_count
+One execution of a Zap from trigger to completion
+Run Step Result
+run_id, step_id, input_payload, output_payload, status, duration_ms
+Per-step audit trail powering Zap History
+Table / Base
+id, workspace_id, name
+Container for Fields and Records
+Table Field
+id, table_id, name, type, config
+Typed column definition, including AI-field prompt config
+Table Record
+id, table_id, data_json, created_at, updated_at
+One row
+Interface
+id, workspace_id, type(form/page/app), theme, publish_state
+No-code front end asset
+Canvas
+id, workspace_id, nodes_json, edges_json
+Diagram plan, optionally linked to real assets
+Chatbot
+id, workspace_id, instructions, knowledge_source_ids, action_zap_ids
+Config for the conversational agent
+Agent
+id, workspace_id, goal, allowed_tools_json, model_id, trigger_mode, approval_required
+Autonomous agent configuration
+Piece (App Definition)
+id, key, version, auth_schema, triggers[], actions[], searches[]
+Integration definition, versioned
+Audit Log Entry
+id, workspace_id, actor_id, action, target_type, target_id, timestamp
+Immutable governance trail
+Usage Record
+workspace_id, period, task_count, plan_limit
+Feeds billing and dashboards
+8. Integration / Piece SDK Specification
+Mirrors Zapier's Platform CLI + Visual Builder model: a versioned, self-describing package that declares authentication, and one or more triggers/actions/searches, each with an input field schema and a sample output payload used to power the builder UI's field picker and test-step preview.
+8.1 Piece Package Structure
+manifest.json — app key, display name, icon, version, category tags.
+authentication.js — auth type (OAuth2 / API key / basic / custom), field definitions, token refresh logic.
+triggers/*.js — one file per trigger event: polling or subscribe/unsubscribe (instant) implementation, input field schema, sample output.
+actions/*.js — one file per action: perform(inputData) implementation, input field schema, sample output.
+searches/*.js — same shape as actions but semantically read-only lookups, optionally paired with a create fallback.
+8.2 Field Schema Requirements
+Every input field declares: key, label, type (string/number/boolean/datetime/file/dropdown), required flag, and — for dropdowns — either a static choice list or a dynamic-options function that queries the connected account live.
+Fields can declare altersDynamicFields:true when choosing one field's value should change what options a later field offers (cascading dropdowns).
+8.3 Lifecycle & Distribution
+Scaffold via CLI (or Visual Builder for simpler apps).
+Implement authentication and at least one trigger or action.
+Local test harness runs against real sandbox credentials.
+Push a private version for internal-only or invite-only use.
+Submit for platform review to gain public directory listing.
+Publish new versions without breaking Zaps built on prior versions (version pinning per Zap).
+9. Public REST API Specification (v1)
+Resource
+Key Endpoints
+Purpose
+Auth
+POST /oauth/token, POST /oauth/authorize
+OAuth2 client-credential and user-delegated auth
+Zaps
+GET/POST /zaps, POST /zaps/{id}/publish, POST /zaps/{id}/pause
+CRUD + lifecycle control
+Runs
+GET /zaps/{id}/runs, GET /runs/{id}
+Execution history and per-step results
+Connections
+GET/POST /connections, DELETE /connections/{id}
+Manage authenticated app links
+Tables
+GET/POST /tables, GET/POST/PATCH/DELETE /tables/{id}/records
+Programmatic Table CRUD
+Interfaces
+GET /interfaces/{id}, POST /interfaces/{id}/submissions
+Read config, receive submissions
+Agents
+GET/POST /agents, POST /agents/{id}/run, GET /agents/{id}/activity
+Manage and invoke agents
+Webhooks (inbound)
+POST /hooks/{unique_id}
+Catch-hook endpoint for instant triggers
+Usage
+GET /usage, GET /usage/tasks
+Task consumption for billing dashboards
+Admin
+GET /audit-log, POST /scim/v2/Users
+Governance and provisioning
+All endpoints authenticated via OAuth2 bearer tokens scoped per workspace; server-to-server access via API keys for internal/private integrations.
+Rate limits tiered by plan, with 429 responses carrying Retry-After headers.
+Webhook delivery includes HMAC request signing so receiving apps can verify authenticity.
+10. AI & Agent Orchestration Layer
+10.1 Model Routing
+A model-abstraction layer accepts a logical request ("generate", "classify", "extract", "reason+act") and routes it to a configured provider (OpenAI-class, Anthropic-class, Google-class, or self-hosted open-weight models), so AI Action steps, Table AI fields, Copilot, and Agents all share one routing/quota layer instead of each reimplementing provider calls.
+Per-workspace model preferences and BYO-API-key support let enterprise customers control cost and data-handling terms.
+10.2 Agent Runtime
+An Agent record defines its goal, an explicit allow-list of tools (mapped 1:1 to existing Piece actions/searches and Table operations), a trigger mode, and an approval policy.
+On activation, the Agent Runtime maintains a reasoning loop: observe (new event or polled state) → plan (LLM call proposing a next tool call) → check against the allow-list and any approval policy → execute the tool call through the same Piece Runtime used by ordinary Zaps → observe the result → continue or stop.
+Every planning step and tool call is written to an immutable Agent Activity Log, mirroring Run Step Results for Zaps, so agent behavior is fully auditable after the fact.
+Approval-required actions pause the loop and create a pending approval item (deliverable via Interfaces, Slack, or email) until a human responds.
+10.3 MCP Server Layer
+Exposes the full Piece catalog as MCP-compatible tool definitions so any external MCP-aware AI client can call them directly, subject to the same per-connection authorization scope as the rest of the platform.
+Each MCP tool call is logged through the same Run/audit infrastructure as an internal Agent tool call, so external-assistant activity is not a governance blind spot.
+10.4 Guardrails
+Org-wide policy toggles for which AI surfaces (Chatbots, Agents, AI Actions) are enabled at all.
+Per-agent tool allow-lists enforced at execution time, not just suggested at build time.
+Configurable spend/action-volume ceilings per agent per period, with automatic pause on breach.
+PII/redaction filters optionally applied to data passed into model calls for regulated workspaces.
+11. Security, Privacy & Compliance
+11.1 Data Protection
+TLS 1.2+ for all data in transit; AES-256 encryption at rest for databases and object storage.
+Credential vault using envelope encryption with per-tenant data encryption keys, rotated automatically.
+Field-level encryption available for especially sensitive Table columns on regulated-industry tiers.
+11.2 Identity & Access
+SAML 2.0 / OIDC SSO from the Team tier up; SCIM 2.0 user provisioning/deprovisioning at Enterprise.
+Role-based access control (Admin, Builder, Viewer, and custom roles) enforced per workspace, per folder.
+Granular API-key scoping mirroring the same permission model as human users.
+11.3 Compliance Program
+Certification / Framework
+Applicability
+SOC 2 Type II
+Baseline trust certification covering security, availability, confidentiality
+GDPR
+Data-processing addendum, EU data-subject rights tooling, regional data residency options
+HIPAA
+Business Associate Agreement available as an Enterprise add-on for healthcare workflows
+CCPA/CPRA
+California consumer data rights support
+ISO 27001 (target)
+Information security management system alignment for enterprise sales cycles
+11.4 Audit & Monitoring
+Immutable, append-only audit log of permission changes, connection changes, billing/plan changes, and asset publishes.
+Anomaly detection on connection usage patterns (e.g., a sudden spike in one connection's task volume) surfaced to admins.
+Data retention policy configurable per workspace for Run history and audit logs, with a default and a maximum on Enterprise.
+12. Connections, Apps & Workflows — How They Actually Bind, Technically
+This section goes underneath the no-code UI and explains, in real engineering terms, what happens when a user clicks "Connect," picks an app, and builds a flow — how a Connection object, an App/Piece definition, and a Workflow (Zap) graph are actually wired together at runtime, and how data physically moves between steps. Everything in Section 3 describes what the product does; this section describes how it is built underneath.
+12.1 The Three Objects That Get Bound Together
+Object
+What It Really Is
+Where It Lives
+App / Piece Definition
+A versioned code package declaring an auth scheme plus one or more trigger/action/search functions and their input/output schemas
+Shipped as a package in the Piece registry; loaded by the Piece Runtime at execution time, never per-tenant
+Connection
+A row in the Connections table: a specific set of encrypted credentials (OAuth tokens or API keys) tied to one App Piece and one owning tenant/user
+Connections table + encrypted secrets vault; referenced by ID, never embedded directly in workflow config
+Workflow / Zap Graph
+A directed graph of Step nodes, each pointing at an App Piece's specific trigger/action, a Connection ID to use, and a Field Mapping describing where its inputs come from
+Workflow/Step tables; the graph itself holds no credentials, only references
+The critical design point: a Step never stores credentials directly. It stores a connection_id foreign key. This is what lets one Connection be reused across many Zaps (and, on Team plans, across many users) without re-authenticating, and lets a credential be rotated or revoked in one place without touching every workflow that uses it.
+12.2 What Actually Happens When a User Clicks "Connect"
+The browser calls POST /connections/init with the chosen app_key. The API looks up that Piece's auth_schema (OAuth2, API key, Basic, or custom) from the Piece registry.
+For OAuth2: the API builds an authorization URL using the Piece's declared client_id, scopes, and a redirect_uri pointing back at the platform's own OAuth callback endpoint, then opens it in a popup.
+The user authenticates on the third-party app's own site (Google, Slack, Salesforce, etc.) — the platform never sees the user's third-party password, only what the OAuth flow returns.
+The third-party app redirects back to the platform's callback with a short-lived authorization code.
+The platform's backend (never the browser) exchanges that code, server-to-server, for an access token and refresh token, using the Piece's client_secret, which is never exposed to the frontend.
+The access + refresh tokens are encrypted with the tenant's data key (envelope encryption) and written to the Connections table as a new row; the browser only ever receives a connection_id back, never the raw tokens.
+For API-key-based apps, the flow is simpler: the raw key the user pastes in is sent directly to the backend over TLS, encrypted, and stored the same way — the frontend never persists it, even temporarily, in browser storage.
+12.3 How a Connection Gets Bound Into a Step at Build Time
+In the Zap editor, when a user picks an app + event for a Step, the frontend calls GET /pieces/{app_key}/triggers/{event_key} (or /actions/...) to fetch that event's declared input field schema.
+The frontend renders that schema as a form. Any field marked dynamic (e.g., "which Slack channel") triggers a live call — GET /connections/{id}/dynamic-options?field=channel — which the backend fulfills by invoking that Piece's options() function against the live third-party API using the bound Connection's credentials, so the dropdown always reflects the real, current account state, not a cached list.
+When the user saves the step, the frontend persists: step.piece = app_key, step.event = event_key, step.connection_id = the chosen Connection, and step.input_config = the field values (static text or {{step_N.field}} template references).
+Nothing about the third-party app's actual API shape is stored on the Step — only the Piece's abstracted field keys. This is what lets a Piece author change the underlying vendor API in a new Piece version without every existing Zap breaking, as long as the field-key contract stays stable.
+12.4 How Field Mapping Physically Resolves at Runtime
+A downstream step's input like {{step_2.customer.email}} is not a live pointer — it is a path expression resolved against that specific Run's accumulated data at execution time, not against the Zap definition.
+When the Execution Engine finishes Step 2, it writes Step 2's full output payload into that Run's context object, keyed by step ID (run_context['step_2'] = {...}).
+Before invoking Step 3, the Engine walks Step 3's input_config, and for every templated field, does a path lookup into run_context using the stored path (step_2.customer.email), substituting the resolved value.
+If a referenced path is missing (e.g., the trigger app didn't return that field this time), the Engine either substitutes an empty value or halts the Run with a mapping error, depending on whether the field was marked required in the Piece's schema.
+This resolution happens fresh on every single Run — it is why editing an upstream step's output shape (e.g., a Piece version upgrade that renames a field) can silently break downstream mappings until the user re-maps them, which is exactly why Piece versioning and step-level validation exist.
+12.5 How a Trigger Actually Gets "Wired Live" on Publish
+Instant (webhook) triggers — on publish, the Engine calls that Piece's subscribe() function, which uses the bound Connection's credentials to call the third-party app's own API and register a webhook pointed at a unique URL like https://hooks.platform.com/t/{trigger_subscription_id}. That subscription ID is stored against the Step. On un-publish/delete, unsubscribe() is called to remove the third-party webhook — leaving it registered after deletion is a common real-world bug class to guard against.
+Polling triggers — on publish, a row is written into a Scheduler table (piece, connection_id, poll_interval, cursor). A scheduler service ticks on that interval, invokes the Piece's poll() function with the stored cursor (e.g., "last seen ID" or "last seen timestamp"), and only emits new Run events for records after that cursor, then advances and persists the cursor for next time.
+Webhook delivery in — when the third-party app calls the platform's hook URL, an ingress service authenticates the payload (HMAC signature verification where the app supports it), maps the URL's subscription ID back to the owning Step/Connection, and enqueues a new Run onto the Task Queue — the actual Execution Engine work happens asynchronously from the inbound HTTP request, so the webhook call itself can return 200 immediately.
+12.6 Binding at Execution Time — the Full Step Invocation
+The Execution Engine worker picks the next queued Step invocation off the Task Queue.
+It loads the Step's piece + event + connection_id + resolved input payload (from 12.4).
+It loads the Connection's encrypted credentials from the vault and decrypts them in-memory, inside the sandboxed worker process, for this invocation only — decrypted credentials are never written to disk or logs.
+It loads the versioned Piece code (pinned to the exact Piece version that Step was built against) into the Piece Runtime sandbox.
+It calls that Piece's perform(inputData, auth) function, passing the resolved inputs and the decrypted credentials as arguments; the Piece code itself makes the actual outbound HTTPS call to the third-party app's REST/GraphQL API.
+If the third-party API returns an auth error because a token expired, the Runtime automatically attempts a token refresh using the Connection's stored refresh_token before failing the Step, transparently to the workflow.
+The result (or error) is written to that Run's Step Result record, merged into run_context, and the Engine advances to the next Step, repeating from 12.4.
+12.7 Multi-App Binding Inside One Workflow — Worked Example
+A single Zap — "New Row in Google Sheets → Create Contact in HubSpot → Post Message in Slack" — actually binds three independent Connections into one Run:
+Step 1 (Trigger) is bound to Connection A (a Google account) and its Piece's poll() function; the Scheduler invokes it on an interval using Connection A's OAuth token.
+Step 2 (Action) is bound to Connection B (a HubSpot account); its input_config maps {{step_1.row.email}} and {{step_1.row.name}} into HubSpot's contact-creation schema; at runtime the Engine resolves those from Step 1's actual output before calling HubSpot's Piece code with Connection B's credentials.
+Step 3 (Action) is bound to Connection C (a Slack workspace); its message template interpolates {{step_2.contact.id}} — a field that only exists because Step 2 already ran and wrote its result into the shared run_context.
+All three Connections are entirely independent credential objects, owned potentially by different users if the workspace uses shared app connections, but the Run itself is a single ordered execution binding all three together through the run_context object, not through any direct connection between the apps themselves.
+12.8 Why This Design Matters in Practice
+Rotating or re-authenticating one Connection (e.g., a Slack token expiring) never requires touching the Zap graph itself — only the Connection row changes.
+A Piece can ship a new version with a different underlying vendor API call while old Zaps keep running against the pinned older Piece version until the user explicitly upgrades.
+Because credentials are decrypted only inside an ephemeral sandboxed worker process per invocation, a compromised web server never has access to live third-party tokens.
+Because trigger subscriptions are tracked as first-class rows (webhook subscription IDs, polling cursors), the platform can detect and self-heal a "silently dead" trigger — e.g., a webhook the third-party app stopped delivering to — rather than a Zap failing invisibly forever.
+13. Non-Functional Requirements
+12.1 Performance & Scale Targets
+Dimension
+Target
+Instant trigger latency
+Under 5 seconds from external webhook receipt to first action execution
+Polling trigger interval
+As low as 1 minute on top tiers, up to 15 minutes on entry tiers
+Sustained execution throughput
+Design for billions of monthly task executions at full platform scale, matching market-leader benchmarks
+Execution Engine availability
+99.9%+ monthly uptime SLA for paid tiers; 99.95%+ for Enterprise
+API availability
+99.9%+ monthly uptime SLA
+Data durability
+At least 99.999999999% durability for stored Run history and Table data (object-storage-class durability)
+12.2 Reliability Requirements
+At-least-once delivery semantics for every queued Run, with idempotency keys on action steps to guard against duplicate side effects on retry.
+Dead-letter queues for Runs that exhaust retries, surfaced to both the customer (via Zap History and error alerts) and internal on-call engineering.
+Graceful degradation: if the AI/Agent layer is unavailable, ordinary deterministic Zaps must continue running unaffected.
+Zero data loss on deploys — rolling deploys of the Execution Engine must drain in-flight Runs before old worker versions are retired.
+12.3 Scalability Requirements
+Horizontal auto-scaling of the worker pool based on queue depth, independent of the web app and API tiers.
+Tenant-fair scheduling so one workspace's burst of task volume cannot starve other tenants' Runs (per-tenant concurrency caps and priority lanes).
+Piece Runtime sandboxes must scale statelessly — any worker can execute any tenant's step with no session affinity required.
+14. Deployment Topology & Self-Hosted Option
+Following the Activepieces and Zapier precedent, the platform should support more than one deployment shape so it can win both self-serve SMB customers and security-sensitive enterprise buyers.
+Topology
+Description
+Target Customer
+Multi-tenant Cloud SaaS
+Shared infrastructure, isolated by workspace at the data layer; fastest onboarding
+SMB, mid-market, default for all new signups
+Single-tenant Cloud
+Dedicated compute/database per customer inside the vendor's cloud account
+Larger enterprise customers needing isolation without self-hosting
+Self-hosted / Air-gapped
+Customer runs the full stack (via Docker/Kubernetes manifests) inside their own network with no outbound dependency on the vendor
+Regulated industries, government, and security-maximalist enterprises
+Self-hosted deployments still need periodic connectivity (or an offline license file) for license validation and update delivery, but must not require the vendor to see customer workflow data.
+A published Helm chart / docker-compose reference deployment lowers the barrier for the self-hosted path, mirroring Activepieces' open-source distribution model.
+Piece/Connector definitions should be identical in code across all three topologies so a self-hosted customer is never missing an integration available to cloud customers.
+15. Sample Automation Recipes by Department
+Concrete, representative Zap patterns for each core persona — useful both as onboarding templates and as acceptance-test scenarios for the Piece catalog.
+14.1 Sales & RevOps
+Trigger
+Actions
+New Lead in Facebook Lead Ads
+Enrich via AI Action → Create/Update Contact in CRM → Notify rep in Slack → Add row to Pipeline Table
+Deal Stage Changed to "Closed Won" in CRM
+Create record in QuickBooks → Send Slack celebration message → Trigger onboarding Sub-Zap
+New Row in Tables (Lead Queue)
+AI Agent scores and routes lead → Search or Create in CRM → Send Interfaces approval form to manager
+14.2 Marketing
+Trigger
+Actions
+New Submission in Interfaces Form
+Add to Mailchimp list → Create Table record → Send confirmation email
+Schedule (weekly)
+Pull campaign metrics via HTTP → Formatter to compute deltas → Digest → Post summary to Slack
+New Mention (social listening app)
+AI Action classifies sentiment → Path: negative → create support ticket; positive → log in Table
+14.3 Support & Customer Success
+Trigger
+Actions
+New Ticket in Helpdesk
+Chatbot attempts auto-resolution → Path: unresolved → escalate to Slack channel + assign in Helpdesk
+New Chatbot Conversation Flagged
+Create ticket in Helpdesk → Notify on-call via SMS (Twilio) → Log transcript to Table
+Ticket Unanswered for 4 Hours (Schedule + Search)
+Filter by SLA breach → Send escalation email → Update priority field
+14.4 IT, DevOps & Platform Engineering
+Trigger
+Actions
+New Incident in PagerDuty
+Create Slack war-room channel → Post incident Interfaces status page → Loop over on-call list to notify
+Webhook from CI/CD Pipeline
+Code step parses build result → Path by status → notify team, update deployment Table record
+New User in Identity Provider (SCIM)
+Provision accounts across connected apps → Create onboarding checklist in Table → Assign approvals via Interfaces
+14.5 Finance & Operations
+Trigger
+Actions
+New Invoice Email (Email Parser)
+Extract structured fields → AI Action reads attached PDF line items → Create bill in QuickBooks → Approval step to CFO via Interfaces
+New Expense Report Submission
+Filter by amount threshold → Path: over threshold requires Approve/Deny → Sync to accounting system
+Schedule (monthly)
+Pull data from multiple finance apps via HTTP/Transfer → Formatter aggregates → Digest → Email board summary
+16. End-to-End Reference Scenario
+A single worked example threading together most of the feature areas above, useful as a QA acceptance scenario and as a sales demo script.
+Scenario: Automated Invoice Processing with Human Approval
+Trigger — an email with a PDF invoice attachment lands in a monitored "Invoices" inbox label (Gmail/Outlook trigger, or Email Parser if the source is unstructured forwarded mail).
+Extraction — an AI Action step reads the attached PDF and extracts line items, vendor, amount, and due date into structured JSON.
+Validation — a Filter step confirms all required fields were extracted; if not, the run stops and an error notification alerts the AP team.
+Duplicate check — a Search step looks up the vendor + invoice number in Zapier Tables to prevent double-processing.
+Data write — a Formatter step normalizes currency and date formats, then a Create Record action writes the invoice into an "AP Queue" Table.
+Routing — a Path step branches on amount: under a threshold auto-proceeds; over the threshold requires approval.
+Human approval — for over-threshold invoices, an Interfaces-hosted approval form is sent to the CFO with Approve/Deny actions; the run pauses (Delay Until / webhook callback) until a response is received.
+Posting — on approval, an action step creates the bill in QuickBooks Online and updates the Table record's status field.
+Notification — a Slack message confirms posting to the requester; a Digest step batches all invoices processed that day into one end-of-day summary email.
+Audit — every step's input/output is retained in Zap History, and the approval decision is recorded in the Audit Log for compliance review.
+This single scenario exercises: email/app triggers, AI extraction, Filters, Search/Create against Tables, Formatter, Paths, human-in-the-loop approval via Interfaces, Delay, downstream app actions, Digest, Zap History, and the Audit Log — nearly the full feature surface of the platform in one realistic business process.
+17. Integration Setup Guides by Category
+Practical, per-category connection setup steps — what an end user (or a builder configuring their own Piece) actually has to do to get each class of app authenticated and usable inside a Zap. Grouped by category since the steps are consistent within a category regardless of which specific app is chosen.
+17.1 Google Workspace (Sheets, Gmail, Drive, Calendar)
+Click Connect on the Google-based app; a Google OAuth consent popup opens.
+Sign in with the Google account that owns the data to connect.
+Review and accept the requested scopes (e.g., read/write access to Sheets, send-as access to Gmail) — only the scopes the specific trigger/action needs are requested, not blanket account access.
+Google returns an authorization code exchanged for an access + refresh token, stored encrypted in the connection vault.
+For apps requesting sensitive scopes (e.g., full Gmail access) at high user volume, the platform operator must have already passed Google's OAuth app verification review — an end user cannot work around this.
+The connection is now reusable across every Zap using that Google account, without repeating the OAuth flow.
+17.2 Slack
+Click Connect on a Slack trigger/action; a workspace-selection screen appears.
+An admin (or a user with sufficient workspace permission) approves the requested bot/user scopes (e.g., post messages, read channel list).
+Slack issues a bot token scoped to that specific workspace; the connection is reusable for all Zaps targeting that workspace.
+Channel/user pickers in later step configuration are populated live from the connected workspace via the Slack Web API.
+17.3 CRM Platforms (Salesforce, HubSpot, Pipedrive)
+Choose the specific CRM app and initiate Connect; most use OAuth, though some legacy integrations still accept an API key generated from the CRM's own settings panel.
+For Salesforce specifically, the connecting user's profile must have API access enabled by their Salesforce admin, and a Connected App may need to be pre-approved in the target Salesforce org.
+Once connected, custom fields and picklists defined in the CRM automatically populate as selectable options in the Zap editor's field-mapping panel — no separate configuration step is needed for standard custom-field support.
+17.4 Payments (Stripe, PayPal, Square)
+Connect via OAuth (Stripe Connect / PayPal) or a restricted API key generated in the provider's dashboard, scoped to read-only or read-write as needed.
+Because payment data is sensitive, these connections should be flagged for additional audit-log detail and, on regulated workspaces, additional approval gating before a Zap using them can be published.
+Test-mode vs. live-mode keys should be kept as separate connections so a Zap can be fully tested against sandbox data before being pointed at real transactions.
+17.5 E-commerce (Shopify, WooCommerce, BigCommerce)
+Shopify: install the platform's public app (or a custom app for a single store) from the Shopify admin's App section; this generates the OAuth credentials automatically.
+WooCommerce/self-hosted platforms: generate a REST API key/secret pair from the store's own admin settings, since there is no central app-store OAuth flow for a self-hosted WordPress install.
+Product, order, and customer fields become available as trigger/action data immediately after connection; custom fields/metafields may require an additional "fetch schema" step.
+17.6 Databases (Postgres, MySQL, Snowflake)
+Connections require direct network reachability: either the database must accept inbound connections from the platform's worker IP ranges (allow-listed), or a secure tunnel/VPN peering must be established.
+Credentials are a database username/password or a cloud-native IAM role, entered directly rather than via OAuth.
+Because direct database actions can run arbitrary queries, these connections should default to read-only credentials unless a write action is explicitly required, and every query executed should be logged for audit.
+17.7 AI Model Providers (OpenAI, Anthropic, Google AI)
+Generate an API key from the provider's console (platform.openai.com, console.anthropic.com, or Google AI Studio/Vertex).
+Attach billing to that provider account, since these are metered pay-per-token services independent of the automation platform's own billing.
+Paste the key into the connection screen, or — for platform-managed model access — simply select the model; no separate key is needed if the platform is fronting the provider relationship itself.
+Set per-workspace spend ceilings where supported, since AI steps can otherwise consume budget unpredictably compared to fixed-cost app actions.
+17.8 Custom APIs via Webhooks / HTTP
+No pre-built Piece is required — choose the Webhooks app directly.
+For an outbound action: supply the target URL, HTTP method, headers (including any auth header such as Bearer token or API key), and body template with mapped fields.
+For an inbound trigger: Zapier/your platform generates a unique Catch Hook URL; that URL is pasted into the external system's own webhook-configuration screen (a manual step performed outside the automation platform, inside the third-party system).
+Test with a real request before publishing, since malformed headers or an incorrect content-type are the most common first-connection failure.
+18. The 50 Most-Used Zapier Apps — Setup & Configuration Reference
+This is a no-code, click-by-click reference for the 50 apps that show up most often in real Zapier workflows. Section 18.1 is a master table covering all 50 at a glance — category, how you authenticate, and the triggers/actions you'll actually use. Section 18.2 gives a full, numbered connect-and-configure walkthrough, inside the Zap builder, for the 15 highest-usage apps among them.
+18.1 Master Table — All 50 Apps
+#
+App
+Category
+Auth Type
+Top Triggers
+Top Actions
+1
+Gmail
+Email
+OAuth 2.0 (Google)
+New Email Matching Search, New Attachment, New Labeled Email
+Send Email, Create Draft, Add Label, Reply to Thread
+2
+Google Sheets
+Spreadsheets
+OAuth 2.0 (Google)
+New Spreadsheet Row, New/Updated Row, New Worksheet
+Create Row, Update Row, Lookup Row, Delete Row
+3
+Slack
+Communication
+OAuth 2.0 (Slack)
+New Message Posted, New Channel, New Mention
+Send Channel Message, Send Direct Message, Create Channel, Update Status
+4
+Google Drive
+File Storage
+OAuth 2.0 (Google)
+New File, New Folder, New File in Folder
+Upload File, Create Folder, Copy File, Share File
+5
+Google Calendar
+Calendar
+OAuth 2.0 (Google)
+New Event, Event Start, Event Cancelled
+Create Detailed Event, Quick Add Event, Update Event
+6
+Microsoft Outlook
+Email
+OAuth 2.0 (Microsoft)
+New Email, New Event, New Contact
+Send Email, Create Event, Create Contact
+7
+Microsoft Excel 365
+Spreadsheets
+OAuth 2.0 (Microsoft)
+New Row, New Table
+Add Row, Update Row, Get Row
+8
+Microsoft Teams
+Communication
+OAuth 2.0 (Microsoft)
+New Channel Message, New Chat Message
+Post Channel Message, Post Chat Message, Create Channel
+9
+Salesforce
+CRM
+OAuth 2.0 (Connected App)
+New Record, Updated Record, New Outbound Message
+Create Record, Update Record, Find Record
+10
+HubSpot
+CRM / Marketing
+OAuth 2.0
+New Contact, New Deal, Deal Stage Changed
+Create/Update Contact, Create Deal, Add to List
+11
+Pipedrive
+CRM
+OAuth 2.0 / API Token
+New Deal, New Person, Deal Updated
+Create Deal, Create Person, Update Deal
+12
+Zoho CRM
+CRM
+OAuth 2.0
+New Lead, New Contact, New Deal
+Create/Update Lead, Create Deal
+13
+Airtable
+Database
+OAuth 2.0 / API Key
+New Record, New/Updated Record
+Create Record, Update Record, Find Record
+14
+Notion
+Docs / Database
+OAuth 2.0
+New Database Item, Updated Database Item
+Create Database Item, Update Page, Append Content
+15
+Trello
+Project Management
+OAuth 2.0
+New Card, Card Moved to List, New Comment
+Create Card, Move Card, Add Comment
+16
+Asana
+Project Management
+OAuth 2.0
+New Task, New Project, Task Completed
+Create Task, Update Task, Add Comment
+17
+Monday.com
+Project Management
+OAuth 2.0 / API Key
+New Item, Column Value Changed
+Create Item, Update Column Value
+18
+Jira Software
+Dev / PM
+OAuth 2.0 / API Token
+New Issue, Issue Updated, New Comment
+Create Issue, Update Issue, Add Comment
+19
+ClickUp
+Project Management
+OAuth 2.0
+New Task, Task Status Updated
+Create Task, Update Task
+20
+Basecamp
+Project Management
+OAuth 2.0
+New To-do, New Message
+Create To-do, Post Message
+21
+Shopify
+E-commerce
+OAuth 2.0 (App Install)
+New Order, New Customer, New Paid Order
+Create Order, Update Order, Create Customer
+22
+WooCommerce
+E-commerce
+REST API Key/Secret
+New Order, New Product
+Create Order, Update Order Status
+23
+Stripe
+Payments
+OAuth 2.0 / Restricted API Key
+New Charge, New Customer, New Payment
+Create Customer, Create Invoice, Create Payment Link
+24
+PayPal
+Payments
+OAuth 2.0
+New Sale, New Dispute
+Create Payout, Create Invoice
+25
+Square
+Payments / POS
+OAuth 2.0
+New Payment, New Customer
+Create Payment, Create Customer
+26
+QuickBooks Online
+Accounting
+OAuth 2.0
+New Invoice, New Customer, New Payment
+Create Invoice, Create Customer, Create Expense
+27
+Xero
+Accounting
+OAuth 2.0
+New Invoice, New Contact
+Create Invoice, Create Contact, Create Bill
+28
+Mailchimp
+Email Marketing
+OAuth 2.0
+New Subscriber, New Campaign, Unsubscribe
+Add/Update Subscriber, Add Tag, Send Campaign
+29
+ActiveCampaign
+Email Marketing / CRM
+API Key + URL
+New Contact, Tag Added, New Deal
+Create/Update Contact, Add Tag, Create Deal
+30
+Klaviyo
+Email Marketing
+API Key
+New Profile, New Event, New Order
+Create/Update Profile, Track Event
+31
+Typeform
+Forms
+OAuth 2.0
+New Entry
+Create Form (limited), Retrieve Responses
+32
+Google Forms
+Forms
+OAuth 2.0 (Google)
+New Response
+— (trigger-only app)
+33
+JotForm
+Forms
+API Key
+New Submission
+Create Submission (rare use)
+34
+Calendly
+Scheduling
+OAuth 2.0
+New Invitee, Invitee Canceled
+— (trigger-only app)
+35
+Zoom
+Video Conferencing
+OAuth 2.0
+New Meeting Registrant, Meeting Started, Recording Completed
+Create Meeting, Update Meeting, Add Registrant
+36
+Twilio
+SMS / Voice
+API Key (Account SID + Auth Token)
+New SMS, Incoming Call
+Send SMS, Make Call
+37
+Discord
+Communication
+Webhook URL / Bot Token
+New Message in Channel
+Send Channel Message
+38
+Telegram
+Communication
+Bot Token
+New Message
+Send Message, Send Photo
+39
+Facebook Lead Ads
+Marketing
+OAuth 2.0 (Facebook Business)
+New Lead
+— (trigger-only app)
+40
+Facebook Pages
+Social Media
+OAuth 2.0
+New Post, New Comment
+Create Page Post
+41
+LinkedIn
+Social Media
+OAuth 2.0
+— (limited)
+Create Share Update, Create Company Update
+42
+WordPress
+CMS
+Application Password / OAuth
+New Post, New Comment, New User
+Create Post, Update Post, Create User
+43
+Zendesk
+Helpdesk
+OAuth 2.0 / API Token
+New Ticket, Ticket Updated
+Create Ticket, Update Ticket, Add Comment
+44
+Intercom
+Helpdesk / Chat
+OAuth 2.0
+New Conversation, New Lead
+Create/Update User, Send Message, Create Note
+45
+Freshdesk
+Helpdesk
+API Key
+New Ticket, Ticket Updated
+Create Ticket, Update Ticket
+46
+GitHub
+Dev Tools
+OAuth 2.0
+New Issue, New Pull Request, New Commit
+Create Issue, Create Comment, Create Release
+47
+DocuSign
+Documents / E-sign
+OAuth 2.0
+New Envelope Completed, Envelope Sent
+Send Envelope, Create Envelope from Template
+48
+Dropbox
+File Storage
+OAuth 2.0
+New File, New Folder
+Upload File, Create Folder, Create Share Link
+49
+OpenAI / ChatGPT (AI by Zapier)
+AI
+API Key (or platform-managed)
+— (action-only)
+Send Prompt, Conversation, Extract Structured Data
+50
+Webhooks by Zapier
+Universal / Custom
+None (built-in) / Header-based auth per target
+Catch Hook, Catch Raw Hook, Retrieve Poll
+GET, POST, PUT, PATCH, DELETE, Custom Request
+18.2 Full Connect-and-Configure Walkthroughs — Top 15 Apps
+For each app below: how the connection is authenticated, and the exact no-code steps to set it up as a trigger or action inside the Zap builder.
+1. Gmail
+In the Zap editor, search "Gmail" and choose it as the Trigger app; pick event "New Email Matching Search" (most common) or "New Attachment."
+Click Sign in to Google; a Google OAuth popup opens — choose the account and approve the requested Gmail scope (read, or read+send if used as an action).
+Configure the Search String field (e.g., from:billing@vendor.com has:attachment) to scope exactly which emails should trigger the Zap.
+Test trigger — Zapier pulls the most recent matching email so you can confirm subject, body, sender, and attachment fields are present.
+As an Action instead: choose event "Send Email," map To/Subject/Body fields from upstream steps, and test — this actually sends a real email to confirm formatting.
+2. Google Sheets
+Choose Google Sheets as Trigger; event "New Spreadsheet Row" (fires once per new row) is the most common choice.
+Connect the Google account (same OAuth popup flow as Gmail, scoped to Sheets).
+Select the specific Spreadsheet, then the Worksheet (tab) to watch — both dropdowns populate live from the connected account.
+Test trigger to confirm each column maps to a named field (Column A, Column B, etc., or header-row names if the sheet uses them).
+As an Action: choose "Create Spreadsheet Row," pick the same spreadsheet/worksheet, and map each column's value from upstream step data.
+3. Slack
+Add Slack as an Action step (most common use); choose event "Send Channel Message."
+Connect Slack — a workspace picker appears; an admin approves the bot's requested scopes (chat:write, channels:read, etc.).
+Pick the target Channel from a live dropdown populated from the connected workspace.
+Write the Message Text, inserting mapped fields from upstream steps (e.g., "New deal: {{step_1.deal_name}} — ${{step_1.amount}}").
+Optionally configure Bot Name/Icon overrides and test — this posts a real message to confirm formatting before publishing.
+4. Salesforce
+Choose Salesforce as Trigger; event "New Record" or "Updated Record," then pick the Object (Lead, Contact, Opportunity, or a custom object).
+Connect via OAuth — sign in to the Salesforce org; the connecting user's profile must have API Enabled permission, granted by a Salesforce admin beforehand.
+Set any additional filter criteria (e.g., only records where Stage = "Closed Won").
+Test trigger to confirm custom fields from the org appear as mappable data.
+As an Action: "Create Record" or "Update Record" — pick the Object, then map every required field (marked in the form) plus any optional custom fields.
+5. HubSpot
+Choose HubSpot as Trigger or Action; common pattern: Trigger "New Deal" or Action "Create or Update Contact."
+Connect via OAuth — sign in to the HubSpot account and approve the requested scopes for CRM objects.
+For "Create or Update Contact," map Email (the match key), First/Last Name, and any custom properties defined in the HubSpot portal — these appear automatically in the field list.
+Test the action — this creates/updates a real test contact, so use a test email address first.
+6. Stripe
+Choose Stripe as Trigger; event "New Charge" or "New Customer" are the most common.
+Connect via OAuth (Stripe Connect) or paste a Restricted API Key generated from the Stripe Dashboard → Developers → API Keys, scoped to only the resources needed.
+Keep separate connections for Test Mode and Live Mode keys so a Zap can be validated against sandbox data first.
+Test trigger to confirm charge amount, currency, and customer fields are present.
+As an Action: "Create Invoice" or "Create Payment Link" — map customer/amount fields from upstream steps.
+7. Shopify
+Choose Shopify as Trigger; event "New Order" or "New Paid Order."
+Click Connect — you're redirected to your Shopify admin to install Zapier's app (or a custom app for a single store), which auto-generates the OAuth credentials.
+Approve the requested permissions (read orders/customers, or read+write if using action steps).
+Test trigger — pulls a recent order, exposing line items as an array (useful with Looping/Formatter downstream).
+As an Action: "Update Order" or "Create Customer" — map fields accordingly.
+8. Airtable
+Choose Airtable as Trigger; event "New Record" or "New or Updated Record."
+Connect via OAuth (or a Personal Access Token on older setups) — approve access to the specific Base(s) you want visible.
+Select the Base, then the Table within it, from live dropdowns.
+Test trigger to confirm every Airtable field (including linked records and attachments) appears as mappable data.
+As an Action: "Create Record" — map each Airtable field; single-select/multi-select fields render as dropdowns matching the Base's actual configured options.
+9. Trello
+Choose Trello as Trigger; event "New Card" or "Card Moved to List."
+Connect via OAuth — sign in to Trello and authorize access.
+Pick the Board, then optionally the List, from live dropdowns.
+As an Action: "Create Card" — pick target Board/List, map Name/Description from upstream data, and optionally set due date or assign members.
+10. Mailchimp
+Choose Mailchimp as Trigger; event "New Subscriber" (common for lead-capture-to-email-list flows) or as an Action "Add/Update Subscriber."
+Connect via OAuth — sign in to the Mailchimp account and approve access.
+For the Action, pick the target Audience (list), map Email (required) plus any Merge Fields (First Name, custom fields) defined in that audience.
+Optionally add Tags to segment the subscriber, then test — this adds a real test subscriber, so use a disposable test address first.
+11. Zoom
+Choose Zoom as Trigger; event "New Meeting Registrant" or "Recording Completed" are common.
+Connect via OAuth — sign in and approve meeting/webinar read scopes.
+As an Action: "Create Meeting" — map Topic, Start Time, and Duration from upstream data (e.g., from a Calendly or Interfaces booking step).
+Test to confirm the generated join URL is returned for use in a downstream confirmation email.
+12. QuickBooks Online
+Choose QuickBooks Online as Trigger or Action; common pattern: Action "Create Invoice."
+Connect via OAuth — sign in to the QuickBooks company file and approve access.
+Map Customer (search-or-create against existing QuickBooks customers), Line Items (often built via a Looping step over an order's items), and due date.
+Test in a QuickBooks sandbox company first if available, since this creates a real financial record.
+13. Twilio
+Choose Twilio as Action; event "Send SMS."
+Connect using the Account SID and Auth Token found in the Twilio Console dashboard (no OAuth popup — pasted directly).
+Map the From number (a Twilio number you own) and To number (often mapped from a trigger's phone field), and write the Body text with interpolated fields.
+Test — this sends a real SMS, so test against your own number first.
+14. Notion
+Choose Notion as Trigger; event "New Database Item" or as an Action "Create Database Item."
+Connect via OAuth — during authorization, Notion asks you to explicitly pick which pages/databases to share with the integration (Notion's access model is share-based, not blanket-account).
+Pick the specific Database from the list of shared databases.
+Map each property — Notion's property types (Select, Multi-select, Date, Relation) render as matching field types in the Zap editor.
+15. Typeform
+Choose Typeform as Trigger; event "New Entry" (the only practical trigger — Typeform is a data-source app, not an action target).
+Connect via OAuth — sign in and approve access to your forms.
+Pick the specific Form from a live dropdown.
+Test trigger to pull the most recent submission; each question becomes its own mappable field, matched by question text.
+Commonly paired downstream with a CRM "Create Contact" action and a Mailchimp "Add Subscriber" action in the same multi-step Zap.
+19. Feature Parity Build Checklist
+Every feature area from Section 3, mapped to a build phase and priority, so nothing on the list gets skipped during implementation planning.
+Feature Area
+Phase
+Priority
+Zaps / core trigger-action engine
+Phase 1
+P0 — launch blocker
+Triggers, Actions, Searches
+Phase 1
+P0 — launch blocker
+Zap Editor UI (canvas, field mapping, testing)
+Phase 1
+P0 — launch blocker
+Multi-step Zaps
+Phase 1
+P0 — launch blocker
+Paths (branching)
+Phase 2
+P0 — launch blocker
+Filters
+Phase 2
+P0 — launch blocker
+Formatter (text/number/date/utilities)
+Phase 2
+P0 — launch blocker
+Delay
+Phase 2
+P1
+Sub-Zaps / Nested Zaps
+Phase 2
+P2
+Looping
+Phase 2
+P1
+Webhooks
+Phase 2
+P0 — launch blocker
+Code by Zapier / Functions
+Phase 2
+P1
+Email Parser
+Phase 3
+P2
+Schedule
+Phase 2
+P0 — launch blocker
+Storage
+Phase 2
+P2
+Digest
+Phase 3
+P2
+Human-in-the-loop approvals
+Phase 3
+P1
+Tables
+Phase 3
+P0 — launch blocker
+Interfaces (Forms/Pages/Apps)
+Phase 3
+P0 — launch blocker
+Canvas
+Phase 5
+P2
+Chatbots
+Phase 4
+P2
+Agents / Central
+Phase 4
+P1
+Copilot
+Phase 4
+P1
+AI Actions / AI fields
+Phase 4
+P1
+MCP server
+Phase 4
+P2
+Transfer
+Phase 3
+P3
+Templates gallery
+Phase 3
+P1
+App directory / integration catalog
+Phase 1 onward
+P0 — ongoing
+Piece SDK / Developer Platform
+Phase 6
+P1
+Admin & governance (SSO, SCIM, RBAC, audit)
+Phase 5
+P0 for Enterprise sales
+Zap History, monitoring, error handling
+Phase 2
+P0 — launch blocker
+Version history
+Phase 2
+P1
+Task usage & billing
+Phase 5
+P0 — launch blocker
+University / Community / Experts
+Phase 6
+P3
+Browser extension / mobile
+Phase 6
+P3
+Security & compliance program
+Phase 5
+P0 for Enterprise sales
+20. Team & Roles Required to Build This
+Role
+Responsibility
+When Needed
+Backend/Platform Engineers
+Execution Engine, Trigger Service, queueing, Piece Runtime
+From day one
+Frontend Engineers
+Zap editor, Tables, Interfaces, Canvas, admin console UI
+From day one
+Integration Engineers
+Build and maintain individual Pieces/connectors
+Ongoing, scales with catalog size
+AI/ML Engineer
+Model routing, Agent runtime, guardrails, prompt/tooling design
+From Phase 4
+DevOps / SRE
+Infrastructure, CI/CD, on-call, observability
+From day one
+Security Engineer
+Secrets vault, sandboxing, SOC 2 readiness, pen-test coordination
+From Phase 1, intensifying at Phase 5
+Product Manager
+Feature prioritization, roadmap, competitive tracking
+From day one
+Product Designer
+UX for the builder canvas and no-code surfaces
+From day one
+QA / Test Engineer
+Regression across Pieces, execution reliability testing
+From Phase 2
+Technical Writer
+Per-app documentation, API docs, help center
+From Phase 2, scaling with catalog
+Developer Relations
+Partner Program, public Piece SDK adoption, community
+From Phase 6
+Compliance/Legal
+DPAs, ToS, SOC 2/HIPAA/GDPR program, vendor contracts
+From Phase 1 (documents), Phase 5 (audits)
+Customer Success / Support
+Onboarding, troubleshooting, Experts marketplace curation
+From public launch
+21. Estimated Infrastructure Cost Ranges
+Indicative monthly ranges for early-stage operation (low tens of thousands of monthly active workflows); costs scale materially with task volume and connector count, and should be re-modeled against your actual cloud contract.
+Cost Category
+Indicative Monthly Range (early stage)
+Compute (API, workers, execution engine)
+$1,500 – $8,000
+Managed database (Postgres/MySQL)
+$300 – $2,000
+Queue / message broker
+$100 – $1,000
+Object storage & CDN
+$100 – $800
+AI model API usage (OpenAI/Anthropic/Google)
+$500 – $10,000+ (usage-driven)
+Monitoring/observability tooling
+$200 – $1,500
+Error tracking
+$50 – $500
+Transactional email/SMS
+$50 – $500
+Security tooling & annual pen-test/SOC 2 audit
+$15,000 – $60,000 per year (amortized)
+22. Testing & QA Strategy
+23.1 Test Layers
+Unit tests — every Piece's trigger/action/search functions, tested against recorded API fixtures.
+Contract tests — verify a Piece's declared input/output schema matches what the live third-party API actually returns, run on a schedule to catch upstream API drift.
+Integration tests — full Run execution across a multi-step Zap in a sandboxed tenant, including Paths/Filters/Formatter logic.
+Load tests — sustained and burst task throughput against the Execution Engine and queue, validating the tenant-fair scheduling guarantees.
+Security tests — sandbox escape attempts against the Piece Runtime, credential-isolation verification, and periodic third-party penetration testing.
+AI/Agent evaluation — prompt regression suites for Copilot and Agents, measuring task-completion accuracy and guardrail adherence before each model or prompt change ships.
+23.2 Release Process
+Feature branch → automated unit/contract/integration test suite → staging deploy.
+Staging smoke test against a representative set of real (sandboxed) third-party accounts per major app category.
+Canary rollout to a small percentage of production traffic with automated rollback on elevated error rate.
+Full production rollout with monitoring dashboards watched through the deployment window.
+23. Accounts & Platforms You Must Create Manually
+None of this can be automated away — before any code is written, a real person has to register these accounts by hand, because each one requires identity verification, legal agreement, or a human-reviewed application. This is the complete list, grouped by purpose.
+12.1 Cloud Infrastructure Accounts
+Account to Create
+Why You Need It
+Cloud provider (AWS, Google Cloud, or Azure)
+Compute, managed database, object storage, queues
+Container registry (Docker Hub or provider-native)
+Store built images for the API, workers, and web app
+Managed Kubernetes or ECS/Cloud Run account
+Orchestrate the worker pool and execution engine at scale
+Managed Postgres/MySQL (RDS, Cloud SQL, or PlanetScale)
+Primary relational store for Zaps, Runs, Tables
+Redis / ElastiCache
+Caching, rate-limit counters, short-lived job locks
+Message queue (SQS, Pub/Sub, or a hosted Kafka/RabbitMQ)
+Durable event queue between Trigger Service and Execution Engine
+CDN (CloudFront, Cloudflare, or Fastly)
+Serve the web app and Interfaces-hosted pages
+DNS registrar + DNS host
+Domain for the app, API, and customer-facing Interfaces subdomains
+SSL certificate provider (or ACM / Let's Encrypt automation)
+HTTPS everywhere, including custom Interface domains
+12.2 Developer / OAuth App Registrations (one per integration)
+For every third-party app you want your platform to connect to, you must personally register a developer/OAuth application in that vendor's developer portal to obtain a client ID and client secret. This is required individually, per app, before that integration can authenticate a single user — there is no bulk shortcut.
+Category
+Developer Portals to Register In (examples)
+Google Workspace apps
+Google Cloud Console — OAuth consent screen + API enablement for Sheets, Gmail, Drive, Calendar
+Microsoft 365 apps
+Azure AD App Registrations — for Outlook, Excel, Teams, SharePoint, OneDrive
+Slack
+api.slack.com/apps — create app, request scopes, submit for directory listing
+Salesforce
+Salesforce Connected App setup in a Developer Org
+HubSpot
+HubSpot Developer Account — create a public/private app, request scopes
+Stripe / PayPal / Square
+Each provider's developer dashboard for API keys and OAuth (Stripe Connect, PayPal Developer, Square Developer)
+Shopify
+Shopify Partner account — create a public or custom app
+Twilio
+Twilio Console — account SID and auth token
+OpenAI / Anthropic / Google AI
+Each provider's API console for model access keys
+Every additional app in your catalog
+Repeat this same per-vendor developer registration for each app you add
+Each OAuth app typically needs: a redirect/callback URL you control, a privacy policy URL, a terms-of-service URL, and — for apps like Google and Microsoft — a formal app verification/security review before you can request sensitive scopes for more than a handful of test users.
+Some platforms (Google, Microsoft, Salesforce) run a manual security review that can take days to weeks; budget for this lead time per integration.
+12.3 AI Model Provider Accounts
+OpenAI platform account + billing, for GPT-class model API access.
+Anthropic Console account + billing, for Claude-class model API access.
+Google AI Studio / Vertex AI account, for Gemini-class model API access.
+(Optional) A hosted open-weight model provider (e.g., a GPU inference host) if you want a self-hosted/BYO-model option.
+12.4 Communications & Notifications
+Transactional email provider (SendGrid, Postmark, SES, or Resend) Account confirmation, error alerts, digest emails, password resets
+SMS/voice provider (Twilio) Optional SMS-based alerts or two-factor authentication
+Inbound email parsing domain/mailbox If replicating the Email Parser feature — a dedicated receiving domain with MX records pointed at your parsing service
+12.5 Payments & Billing
+Payment processor account (Stripe or Braintree) for subscription billing and metered task usage.
+Business bank account linked to the payment processor for payouts.
+Tax/VAT compliance tooling account (e.g., Stripe Tax, Avalara) if selling internationally.
+12.6 Security, Monitoring & DevOps Tooling
+Error tracking (Sentry or similar) Exception monitoring across web, API, and worker services
+Metrics & logging (Datadog, Grafana Cloud, or provider-native) Dashboards and alerting for the Execution Engine and queues
+Secrets manager (HashiCorp Vault, AWS Secrets Manager, or GCP Secret Manager) Storage of your own service credentials, separate from customer OAuth tokens
+Status page provider (Statuspage, Better Stack) Public uptime/incident communication
+Penetration-testing / SOC 2 audit firm Required before you can legitimately claim SOC 2 compliance to enterprise customers
+12.7 Legal & Corporate
+Business entity registration (LLC/Inc. or local equivalent) — required before you can open a business bank account or sign vendor/customer contracts.
+Registered agent / company formation service if incorporating outside your home jurisdiction.
+Trademark search and registration for your product name/logo before public launch.
+Data Processing Agreement (DPA) and Terms of Service / Privacy Policy drafted by counsel — required inputs to nearly every OAuth app review above.
+Cyber-liability insurance policy, typically required by enterprise customers during procurement.
+12.8 Developer & Distribution Accounts
+GitHub or GitLab organization account for source control and CI/CD.
+npm organization account if publishing an open Piece SDK or public packages.
+Domain-verified sender accounts (Google Postmaster Tools, Microsoft SNDS) to protect email deliverability at scale.
+App marketplace listings if you want inbound distribution (e.g., a Slack App Directory listing, a Chrome Web Store developer account for a browser extension).
+24. Manual Setup Checklist (Ordered, Step-by-Step)
+Follow this order — later steps depend on earlier ones (e.g., you cannot request OAuth scopes before your privacy policy URL exists and resolves).
+Register the business entity and obtain an EIN/company registration number.
+Draft and publish Terms of Service, Privacy Policy, and DPA pages at permanent URLs.
+Register your domain and configure DNS (apex domain, api subdomain, app subdomain, and a wildcard or per-customer pattern for Interfaces).
+Provision the cloud provider account, then the managed database, cache, queue, and object storage within it.
+Set up the secrets manager and CI/CD pipeline before writing application code that needs credentials.
+Stand up the core services: API gateway, Trigger Service, Execution Engine, worker pool, connector runtime, and Tables/Interfaces services.
+Create the payment processor account and connect your business bank account; implement metered billing against the Usage/Task model.
+Create developer accounts and register OAuth apps one by one for your initial launch integrations (start with 10–20 high-demand apps, not all 8,000+ at once).
+Submit any apps requiring formal security review (Google, Microsoft, Salesforce) as early as possible given multi-week review lead times.
+Create AI provider accounts (OpenAI, Anthropic, Google AI) and wire the model-routing layer to them.
+Set up transactional email and, if replicating Email Parser, configure inbound mail routing on a dedicated subdomain.
+Configure error tracking, metrics, logging, and a public status page before inviting real users.
+Implement SSO/SAML and audit logging ahead of any enterprise sales conversations, since procurement teams will ask for both immediately.
+Engage a security firm for a penetration test and begin the SOC 2 Type II audit process in parallel with beta testing.
+Publish initial Zap/Agent templates and app directory pages, then open the Platform CLI/Visual Builder so early partners can contribute additional integrations.
+Launch the Free/Professional/Team plan tiers with metered task billing live end-to-end before opening Enterprise sales conversations that require custom contracts.
+25. Pricing & Plan Design Reference
+A pricing structure modeled directly on Zapier's own tiering, for use as a starting point and then adjusted to your own cost basis.
+Plan
+Monthly Price (indicative)
+Included
+Free
+$0
+100 tasks/mo, 2-step Zaps, basic Tables/Interfaces/Chatbots, core AI features
+Professional
+~$20–30/mo (annual)
+Multi-step Zaps, Paths, premium apps, webhooks, unlimited Zaps, higher task tiers
+Team
+~$70–105/mo (annual, per-seat scaling)
+Shared workspace, shared app connections, SAML SSO, Premier support
+Enterprise
+Custom
+Negotiated task pools, SCIM, advanced governance/audit, dedicated support, compliance add-ons (e.g., HIPAA)
+Meter tasks (one per completed action step) as the primary billable unit; keep Filters, Paths evaluation, and Formatter steps free of charge to reduce friction on logic-heavy workflows, matching market expectation.
+Price Tables, Interfaces, Chatbots, and Agents as separate add-on meters with a free/basic allotment bundled into every paid plan, and advanced usage billed independently — this lets each product's cost-to-serve be tracked and adjusted on its own curve.
+Reserve polling-interval improvements (faster non-instant triggers) as a paid-tier lever; instant/webhook triggers can remain uniformly fast across all tiers since they cost the platform little regardless of plan.
+26. Delivery Roadmap
+Phase
+Scope
+Exit Criteria
+Phase 0 — Foundations
+Legal entity, domain, cloud accounts, CI/CD, secrets manager
+Infra provisioned; empty services deploy end to end
+Phase 1 — Core Engine
+Trigger Service, Execution Engine, worker pool, 10–20 launch Pieces, Zap editor UI
+A user can build, test, and run a real multi-step Zap
+Phase 2 — Logic & Reliability
+Filters, Paths, Formatter, Delay, Code steps, retries, Zap History, error alerts
+Feature parity with core Zapier logic tooling
+Phase 3 — Data & Front End
+Tables, Interfaces (forms/pages), Storage, Digest
+Users can store data and build a front end without leaving the platform
+Phase 4 — AI Suite
+AI Actions, Copilot, Chatbots, Agents, MCP server
+AI-driven building and autonomous agents are usable end to end
+Phase 5 — Governance & Scale
+SSO/SAML, SCIM, RBAC, audit log, billing/metering, Canvas
+Enterprise-sellable: security review passes, billing is fully automated
+Phase 6 — Ecosystem
+Public Piece SDK, Partner Program, Templates hub, Experts marketplace
+Third parties can extend the catalog without your team building every integration
+27. Appendix — Glossary of Terms
+Term
+Definition
+Zap
+A single automated workflow: one trigger followed by one or more actions
+Trigger
+The event that starts a Zap
+Action
+An operation performed in an app when a Zap runs
+Search
+A lookup for existing data in a connected app
+Task
+One completed action step in one Zap run; the primary billing unit
+Piece / Connector
+An app's integration definition: its auth method plus its triggers, actions, and searches
+Path
+A multi-branch conditional router inside a Zap
+Filter
+A single-branch gatekeeper that stops a Zap unless conditions are met
+Formatter
+A built-in, task-free data-transformation step
+Sub-Zap
+A reusable Zap called by another Zap as a sub-routine
+Table
+Zapier's built-in automation-native database
+Interface
+A no-code form, page, or mini-app connected to Zaps/Tables
+Canvas
+An AI-assisted visual diagramming tool that can generate real Zaps/Agents/Tables/Interfaces
+Chatbot
+A no-code AI chatbot trained on your content and connected to automation
+Agent (Central)
+A goal-driven, autonomous AI teammate with a scoped tool allow-list
+Copilot
+The natural-language AI build-assistant embedded across every product
+MCP (Model Context Protocol)
+A standard exposing app actions as callable tools to external AI assistants
+Run
+One execution of a Zap from trigger to final step
+Zap History
+The per-run, per-step execution log and audit trail
+Digest
+A step that batches multiple trigger events into one periodic summary
+Transfer
+A bulk, one-time migration tool for existing historical records
+SCIM
+System for Cross-domain Identity Management; automated user provisioning from an identity provider
+SSO/SAML
+Single sign-on via a corporate identity provider
+RBAC
+Role-Based Access Control
+OAuth 2.0
+The delegated-authorization protocol most app connections use to grant access without sharing a password
+Webhook
+An HTTP callback that pushes an event to a URL the instant it happens, powering instant triggers
+Polling
+Checking an app's API on a fixed interval to detect new data, used when no webhook is available
+Sandbox / Piece Runtime
+The isolated execution environment that runs a connector's or Code step's logic safely per tenant
+Idempotency Key
+A unique identifier attached to an action call so a retried request cannot cause a duplicate side effect
+Dead-Letter Queue
+A holding queue for Runs that exhausted all retries, used for manual or automated follow-up
+Row-Level Security
+A database access-control technique that restricts each query to only the requesting tenant's rows
+Envelope Encryption
+Encrypting a data key with a master key, so credentials can be rotated without re-encrypting all data
+SOC 2 Type II
+An audit certifying an organization's security controls operated effectively over a period of time
+DPA (Data Processing Agreement)
+A legal contract governing how a vendor processes a customer's personal data
+BAA (Business Associate Agreement)
+A HIPAA-required contract between a covered healthcare entity and its vendor
+Line Item
+A repeating sub-field structure (e.g., order items) represented as an array within trigger data
+Sample Data
+The example payload pulled during a step test, used to power the field-mapping picker
+Draft State
+A Zap's unpublished, in-progress configuration that has not yet gone live
+Published State
+A Zap's live, currently running configuration
+Custom/Private App
+An integration built for internal use only, not submitted to the public directory
+Shared App Connection
+One authenticated connection reused across many users within a workspace
+Guardrail (AI)
+A policy constraint that bounds what an AI Action or Agent is allowed to do at runtime

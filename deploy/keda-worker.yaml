@@ -1,0 +1,54 @@
+# ============================================================================
+# Orchestra Part 13 — KEDA ScaledObject for Worker
+# Source of truth: Part 13 § "Production topology"
+# Autoscaling metric: queue depth (oldest job age, not total size)
+# ============================================================================
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: orchestra-worker
+  namespace: orchestra
+spec:
+  scaleTargetRef:
+    name: orchestra-worker
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 2
+  maxReplicaCount: 60
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis.orchestra.svc.cluster.local:6379
+        stream: executions
+        consumerGroup: orchestra-worker
+        lagCount: "100"
+        activationLagCount: "10"
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.orchestra.svc.cluster.local:9090
+        metricName: orchestra_queue_depth
+        query: orchestra_queue_depth{queue="executions",state="active"}
+        threshold: "50"
+        activationThreshold: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: orchestra-ai-service
+  namespace: orchestra
+spec:
+  scaleTargetRef:
+    name: orchestra-ai
+  pollingInterval: 15
+  cooldownPeriod: 120
+  minReplicaCount: 2
+  maxReplicaCount: 12
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.orchestra.svc.cluster.local:9090
+        metricName: orchestra_ai_inflight_calls
+        query: orchestra_ai_inflight_calls
+        threshold: "8"
+        activationThreshold: "1"

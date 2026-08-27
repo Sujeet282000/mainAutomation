@@ -1,0 +1,132 @@
+# ============================================================================
+# Orchestra — Local Development Stack (Part 13)
+# Source of truth: Part 13 § "Local development"
+# ============================================================================
+
+services:
+  # ── PostgreSQL (Supabase-compatible) ──────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "54322:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 20
+
+  # ── Auth (GoTrue) ────────────────────────────────────────────────────────
+  auth:
+    image: supabase/gotrue:v2.158.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres
+      GOTRUE_JWT_SECRET: local-dev-jwt-secret-change-me-please-32
+      GOTRUE_SITE_URL: http://localhost:3000
+    ports:
+      - "54321:9999"
+
+  # ── Storage ───────────────────────────────────────────────────────────────
+  storage:
+    image: supabase/storage-api:v1.11.6
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres
+      PGRST_JWT_SECRET: local-dev-jwt-secret-change-me-please-32
+      STORAGE_BACKEND: file
+    ports:
+      - "54324:5000"
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 512mb
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  # ── API (Node.js) ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: dev
+    command: pnpm --filter @algoverge/api dev
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    env_file: [.env.local]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ".:/app"
+      - "/app/node_modules"
+
+  # ── Worker (Node.js) ─────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      target: dev
+    command: pnpm --filter @algoverge/worker dev
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: [.env.local]
+    volumes:
+      - ".:/app"
+      - "/app/node_modules"
+    deploy:
+      replicas: 2
+
+  # ── Scheduler (Node.js) ──────────────────────────────────────────────────
+  scheduler:
+    build:
+      context: .
+      dockerfile: apps/scheduler/Dockerfile
+      target: dev
+    command: pnpm --filter @algoverge/scheduler dev
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: [.env.local]
+
+  # ── AI Service (Python) ──────────────────────────────────────────────────
+  ai:
+    build:
+      context: .
+      dockerfile: apps/ai/Dockerfile
+      target: dev
+    command: uvicorn main:app --reload --port 8000 --host 0.0.0.0
+    working_dir: /app/apps/ai
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    env_file: [.env.local]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ".:/app"
+      - "/app/apps/ai/venv"
+
+volumes:
+  pgdata:
+  redisdata:

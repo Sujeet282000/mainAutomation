@@ -1,0 +1,17 @@
+{
+  "name": "@algoverge/engine",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test src/executor.test.ts"
+  },
+  "dependencies": {
+    "@algoverge/core": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

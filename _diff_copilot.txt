@@ -1,0 +1,163 @@
+﻿diff --git a/apps/api/src/copilot.ts b/apps/api/src/copilot.ts
+index ea92207..9d7b71c 100644
+--- a/apps/api/src/copilot.ts
++++ b/apps/api/src/copilot.ts
+@@ -150,6 +150,42 @@ export function isGenericGraph(graph?: WorkflowGraph | null) {
+   return graph.nodes.every((n) => !n.appSlug || n.appSlug === "webhook" || n.appSlug === "http");
+ }
+ 
++export function isCatalogGraph(graph?: WorkflowGraph | null) {
++  if (!graph?.nodes?.length) return false;
++  const ids = new Set<string>();
++  let triggerCount = 0;
++
++  for (const node of graph.nodes) {
++    if (!node.id || ids.has(node.id)) return false;
++    ids.add(node.id);
++    const app = appBySlug(node.appSlug);
++    const operation = app?.operations.find((candidate) => candidate.key === node.operation);
++    if (!app || !operation) return false;
++    if (containsCredentialMaterial(node.config)) return false;
++    if (node.type === "trigger") {
++      triggerCount += 1;
++      if (operation.type !== "trigger") return false;
++    } else if (operation.type === "trigger") {
++      return false;
++    }
++  }
++
++  if (triggerCount !== 1) return false;
++  return graph.edges.every((edge) => edge.id && ids.has(edge.source) && ids.has(edge.target));
++}
++
++function containsCredentialMaterial(value: unknown): boolean {
++  if (Array.isArray(value)) return value.some(containsCredentialMaterial);
++  if (!value || typeof value !== "object") return false;
++  for (const [key, child] of Object.entries(value)) {
++    if (/^(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|private[_-]?key|secret)$/i.test(key)) {
++      return true;
++    }
++    if (containsCredentialMaterial(child)) return true;
++  }
++  return false;
++}
++
+ export function mentionsWorkflowIntent(prompt: string) {
+   if (OP_HINTS.some((h) => h.re.test(prompt))) return true;
+   if (HINTS.some((h) => h.slug !== "webhook" && h.re.test(prompt))) return true;
+@@ -350,6 +386,45 @@ function describeGraph(graph: WorkflowGraph) {
+   return parts.join(" ");
+ }
+ 
++function defaultFieldValue(_appSlug: string, operation: AppOperation, key: string, type: string) {
++  if (key === "url") return "https://httpbin.org/post";
++  if (key === "method") return "POST";
++  if (key === "calendarId") return "primary";
++  if (key === "sheet") return "Sheet1";
++  if (key === "timezone") return "UTC";
++  if (key === "cron") return "0 * * * *";
++  if (key === "values") return '["{{trigger}}"]';
++  if (key === "body" || type === "json") return "{{trigger}}";
++  if (key === "summary" || key === "subject") return "Created by Copilot";
++  if (key === "text") return "{{trigger}}";
++  if (key === "to" || key === "email" || key === "recipient") return "{{trigger.email}}";
++  if (operation.type === "trigger") return "";
++  return type === "number" ? "1" : "{{trigger}}";
++}
++
++export function repairIncompleteGraph(graph: WorkflowGraph): { graph: WorkflowGraph; changed: boolean } {
++  let changed = false;
++  const repaired = {
++    ...graph,
++    nodes: graph.nodes.map((node) => {
++      const app = appBySlug(node.appSlug);
++      if (!app) return node;
++      const operation = node.operation ? app.operations.find((candidate) => candidate.key === node.operation) : undefined;
++      const nextOperation = operation ?? (node.type === "trigger" ? triggerOp(app) : actionOp(app));
++      const config = { ...(node.config ?? {}) };
++      for (const field of nextOperation.inputFields ?? []) {
++        if (field.required && (config[field.key] === undefined || config[field.key] === "")) {
++          config[field.key] = defaultFieldValue(app.slug, nextOperation, field.key, field.type);
++          changed = true;
++        }
++      }
++      if (!node.operation) changed = true;
++      return { ...node, operation: nextOperation.key, label: node.label || nextOperation.name, config };
++    })
++  };
++  return { graph: repaired, changed };
++}
++
+ export async function bindExistingConnections(graph: WorkflowGraph, workspaceId?: string | null) {
+   if (!workspaceId) return graph;
+   const rows = await query<{ id: string; app_slug: string }>(
+@@ -404,7 +479,7 @@ export async function copilotGraph(
+     });
+     if (r.ok) {
+       const d = (await r.json()) as { graph?: WorkflowGraph };
+-      if (d.graph?.nodes?.length && !isGenericGraph(d.graph)) {
++      if (d.graph?.nodes?.length && !isGenericGraph(d.graph) && isCatalogGraph(d.graph)) {
+         return done(d.graph, "ai-service", describeGraph(d.graph));
+       }
+     }
+@@ -436,7 +511,7 @@ export async function copilotGraph(
+       if (r.ok) {
+         const d = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
+         const parsed = JSON.parse(d.choices?.[0]?.message?.content ?? "{}") as WorkflowGraph;
+-        if (parsed.nodes?.length) {
++        if (parsed.nodes?.length && isCatalogGraph(parsed)) {
+           return done(parsed, "openai", describeGraph(parsed));
+         }
+       }
+@@ -458,14 +533,24 @@ export async function copilotChat(opts: {
+   prompt: string;
+   graph?: WorkflowGraph;
+   plan?: string;
++  workspaceId?: string | null;
+ }): Promise<{ reply: string; source: string; graph?: WorkflowGraph; summary?: string }> {
+   const steps = opts.graph?.nodes?.length ?? 0;
+   const labels = (opts.graph?.nodes ?? []).map((n) => n.label || n.operation || n.type).join(" ΓåÆ ");
+   const incomplete = (opts.graph?.nodes ?? []).filter((n) => !n.operation).length;
+   const plan = opts.plan ?? "free";
+ 
++  if (opts.graph && /\b(fix|incomplete|map fields|authenticate|connect accounts|finish)\b/i.test(opts.prompt)) {
++    const repaired = repairIncompleteGraph(opts.graph);
++    if (repaired.changed) {
++      const graph = await bindExistingConnections(repaired.graph, opts.workspaceId);
++      const summary = `Fixed incomplete step fields. ${describeGraph(graph)}`;
++      return { reply: summary, source: "copilot", graph, summary };
++    }
++  }
++
+   if (shouldBuildFromChat(opts.prompt, opts.graph)) {
+-    const built = await copilotGraph(opts.prompt);
++    const built = await copilotGraph(opts.prompt, opts.workspaceId);
+     const limitNote =
+       plan === "free" && built.graph.nodes.length > 2
+         ? " You can draft every step here; Free plans meter extra tasks when you publish."
+@@ -491,11 +576,14 @@ export async function copilotChat(opts: {
+       method: "POST",
+       headers: { "content-type": "application/json" },
+       body: JSON.stringify({ prompt: opts.prompt, graph: opts.graph, plan }),
+-      signal: AbortSignal.timeout(20000)
++      signal: AbortSignal.timeout(4000)
+     });
+     if (r.ok) {
+       const d = (await r.json()) as { reply?: string; source?: string; graph?: WorkflowGraph };
+-      if (d.reply) return { reply: d.reply, source: d.source ?? "ai-service", graph: d.graph };
++      if (d.reply) {
++        const graph = d.graph && isCatalogGraph(d.graph) ? d.graph : undefined;
++        return { reply: d.reply, source: d.source ?? "ai-service", graph };
++      }
+     }
+   } catch {
+     /* optional python service */
+@@ -518,7 +606,7 @@ export async function copilotChat(opts: {
+             { role: "user", content: `Plan: ${plan}\nGraph: ${labels}\nIncomplete: ${incomplete}\n\n${opts.prompt}` }
+           ]
+         }),
+-        signal: AbortSignal.timeout(12000)
++        signal: AbortSignal.timeout(10000)
+       });
+       if (r.ok) {
+         const d = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };

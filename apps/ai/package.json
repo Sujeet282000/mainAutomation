@@ -1,0 +1,7 @@
+{
+  "name": "@algoverge/ai",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "python -m uvicorn main:app --reload --port 8000 --app-dir ."
+  }
+}

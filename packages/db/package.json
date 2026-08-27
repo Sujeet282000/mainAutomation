@@ -1,0 +1,14 @@
+{
+  "name": "@algoverge/db",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "pg": "^8.13.3",
+    "ioredis": "^5.6.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.11",
+    "typescript": "^5.8.2"
+  }
+}

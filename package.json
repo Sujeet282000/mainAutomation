@@ -1,0 +1,32 @@
+{
+  "name": "orchestra",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Orchestra — AI-Native Workflow Automation and Orchestration Platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web,worker,ai -c blue,green,magenta,cyan \"npm run dev -w @algoverge/api\" \"npm run dev -w @algoverge/web\" \"npm run dev -w @algoverge/worker\" \"npm run dev:ai\"",
+    "dev:api": "npm run dev -w @algoverge/api",
+    "dev:web": "npm run dev -w @algoverge/web",
+    "dev:worker": "npm run dev -w @algoverge/worker",
+    "dev:ai": "cd apps/ai && python -m uvicorn main:app --reload --port 8000",
+    "migrate": "npm run migrate -w @orchestra/api",
+    "seed": "npm run seed -w @orchestra/api",
+    "docker:up": "docker compose up -d postgres redis",
+    "docker:down": "docker compose down",
+    "build": "npm run build -w @orchestra/shared && npm run build -w @orchestra/api",
+    "test": "npm run test -w @orchestra/api",
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "turbo": "^2.4.4",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
