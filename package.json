@@ -9,15 +9,15 @@
     "dev:api": "npm run dev -w @algoverge/api",
     "dev:web": "npm run dev -w @algoverge/web",
     "dev:worker": "npm run dev -w @algoverge/worker",
-    "dev:scheduler": "npm run dev -w @algoverge/scheduler",
+    "dev:scheduler": "npm run dev:scheduler",
     "dev:ai": "cd apps/ai && python -m uvicorn main:app --reload --port 8000",
     "migrate": "npm run migrate -w @algoverge/api",
     "seed": "npm run seed -w @algoverge/api",
     "docker:up": "docker compose up -d postgres redis",
     "docker:down": "docker compose down",
-    "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/engine && npm run build -w @algoverge/api && npm run build -w @algoverge/web && npm run build -w @algoverge/worker && npm run build -w @algoverge/scheduler",
+    "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/core && npm run build -w @algoverge/ai-agent && npm run build -w @algoverge/engine && npm run build -w @algoverge/api && npm run build -w @algoverge/web && npm run build -w @algoverge/worker && npm run build -w @algoverge/scheduler",
     "test": "npm run test -w @algoverge/api && npm run test -w @algoverge/engine",
-    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p packages/engine/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && tsc -p apps/scheduler/tsconfig.json --noEmit"
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p packages/engine/tsconfig.json --noEmit && tsc -p packages/ai-agent/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && tsc -p apps/scheduler/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
