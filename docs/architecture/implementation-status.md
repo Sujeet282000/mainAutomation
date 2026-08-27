@@ -4,23 +4,26 @@ Branch: `architecture-refactor-2026-08`
 
 This is a controlled refactor branch. `main` is not modified by this work.
 
-## Phase 1 — Foundation / safety
+## Phase 1 — Repository foundation / cleanup
 
 - [x] Create isolated architecture-refactor branch.
 - [x] Add target architecture and service boundaries.
 - [x] Harden `.gitignore` for generated artifacts and TypeScript build info.
-- [x] Remove generated repository snapshots and `.freebuff` logs from the refactor branch.
+- [x] Remove generated repository snapshots and `.freebuff` artifacts from the refactor branch.
 - [x] Align root workspace scripts with the actual `@algoverge/*` package names.
-- [ ] Remove the remaining `.kilo` gitlink after verifying it is not required by the development workflow.
-- [ ] Remove already-tracked `tsconfig.tsbuildinfo` after obtaining its exact blob reference; it is ignored for future commits.
+- [x] Remove generated documentation extraction files (`docs/_*_extract.txt`).
+- [x] Remove the unused `packages/types` workspace package after repository-wide reference review.
+- [x] Remove the unused `packages/validation` workspace package after repository-wide reference review.
 
 ## Phase 2 — Runtime boundaries
 
-- [ ] Move the DB-aware execution orchestration currently living under `apps/api/src/engine.ts` behind the canonical `packages/engine` boundary without changing behavior.
-- [ ] Make worker depend on the canonical execution boundary rather than importing `apps/api/src/*`.
-- [ ] Move schedule/poll discovery out of worker into the scheduler process.
-- [ ] Give scheduler the DB/queue dependencies it needs and add leader/overlap protection.
-- [ ] Preserve manual builder execution (`enqueue: false`).
+- [x] Establish `apps/worker` as the execution consumer.
+- [x] Establish `packages/engine` as the canonical execution boundary.
+- [x] Establish `apps/scheduler` as a separate scheduling/poll-discovery service.
+- [x] Add authenticated scheduler -> API control-plane dispatch.
+- [ ] Complete migration of all legacy execution orchestration from `apps/api/src/*` into `packages/engine`.
+- [ ] Add scheduler leader/overlap protection.
+- [ ] Preserve and verify manual builder execution (`enqueue: false`).
 
 ## Phase 3 — Integrations
 
@@ -30,7 +33,7 @@ This is a controlled refactor branch. `main` is not modified by this work.
 
 ## Phase 4 — Builder/UI
 
-- [ ] Audit every frontend route and feature against the product specification.
+- [ ] Audit every frontend route and feature against the production specification.
 - [ ] Verify create/configure/test/publish execution flow end-to-end.
 - [ ] Verify dynamic mapping, filters, paths, loops, delays, AI, code, webhooks, API requests, approvals and subflows.
 - [ ] Verify connections/OAuth and secret redaction.
@@ -43,6 +46,7 @@ This is a controlled refactor branch. `main` is not modified by this work.
 - [ ] Developer platform/API/SDK/custom integrations.
 - [ ] Billing and usage.
 - [ ] Security/RBAC/audit/enterprise governance.
+- [ ] MCP server/client capabilities.
 
 ## Phase 6 — Verification
 
@@ -54,6 +58,6 @@ This is a controlled refactor branch. `main` is not modified by this work.
 - [ ] Python service tests.
 - [ ] Fix every failure before merge.
 
-## Deletion policy
+## Cleanup policy
 
-No dependency is removed as part of this refactor. A file/folder may only be deleted when its repository-wide references have been checked and the replacement/compatibility path is known. Existing production features are not deleted merely because the target architecture is different.
+Only generated artifacts or repository-wide verified dead code are removed. Core architecture packages such as engine, DB, pieces SDK/framework, observability, AI, MCP, scheduler and worker are retained because they correspond to required platform boundaries. The production specification requires modular, multi-tenant, queue-based, observable and extensible architecture.
