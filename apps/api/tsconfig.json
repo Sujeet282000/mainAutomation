@@ -9,6 +9,6 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "../../packages/core/src", "../../packages/shared/src", "../../packages/crypto/src", "../../packages/model-gateway/src", "../../packages/engine/src"],
+  "include": ["src"],
   "exclude": ["src/**/*.test.ts"]
 }
