@@ -20,6 +20,12 @@ export type CopilotDraft = {
   rebuilt?: boolean;
   changed?: boolean;
   source?: string;
+  operations?: CopilotOperation[];
+  applied_operations?: CopilotOperation[];
+  rejected_operations?: Array<{ operation: CopilotOperation; reason: string }>;
+  needs_confirmation?: CopilotOperation[];
+  needs_input?: string[];
+  issues?: Array<{ code?: string; message: string; nodeId?: string }>;
 };
 
 export async function createCopilotSession(opts: {
@@ -45,6 +51,12 @@ function applyEvent(out: CopilotDraft, ev: Record<string, unknown>) {
   if ("rebuilt" in ev) out.rebuilt = Boolean(ev.rebuilt);
   if ("changed" in ev) out.changed = Boolean(ev.changed);
   if (ev.source) out.source = String(ev.source);
+  if (Array.isArray(ev.operations)) out.operations = ev.operations as CopilotOperation[];
+  if (Array.isArray(ev.applied_operations)) out.applied_operations = ev.applied_operations as CopilotOperation[];
+  if (Array.isArray(ev.rejected_operations)) out.rejected_operations = ev.rejected_operations as CopilotDraft['rejected_operations'];
+  if (Array.isArray(ev.needs_confirmation)) out.needs_confirmation = ev.needs_confirmation as CopilotOperation[];
+  if (Array.isArray(ev.needs_input)) out.needs_input = ev.needs_input as string[];
+  if (Array.isArray(ev.issues)) out.issues = ev.issues as CopilotDraft['issues'];
 }
 
 export async function generateCopilotDraft(
@@ -89,6 +101,30 @@ export async function persistCopilotSession(sessionId: string, flowId: string) {
   });
 }
 
+export type CopilotOperation = {
+  kind: string;
+  arguments: Record<string, unknown>;
+  requires_confirmation?: boolean;
+};
+
+export type CopilotRefineResult = {
+  reply: string;
+  graph?: unknown;
+  applied?: boolean;
+  changed?: boolean;
+  summary?: string;
+  youDoFirst?: string[];
+  iCan?: string[];
+  events?: Array<{ type: string; stage?: string; label?: string; text?: string; kind?: string; message?: string }>;
+  operations?: CopilotOperation[];
+  applied_operations?: CopilotOperation[];
+  rejected_operations?: Array<{ operation: CopilotOperation; reason: string }>;
+  needs_confirmation?: CopilotOperation[];
+  needs_input?: string[];
+  issues?: Array<{ code?: string; message: string; nodeId?: string }>;
+  publishable?: boolean;
+};
+
 export async function refineCopilotSession(
   sessionId: string,
   opts: {
@@ -99,15 +135,7 @@ export async function refineCopilotSession(
     flowId?: string;
   },
 ) {
-  return api<{
-    reply: string;
-    graph?: unknown;
-    applied?: boolean;
-    summary?: string;
-    youDoFirst?: string[];
-    iCan?: string[];
-    events?: Array<{ type: string; stage?: string; label?: string; text?: string; kind?: string; message?: string }>;
-  }>(`/copilot/sessions/${sessionId}/refine`, {
+  return api<CopilotRefineResult>(`/copilot/sessions/${sessionId}/refine`, {
     method: "POST",
     body: JSON.stringify({
       prompt: opts.prompt,

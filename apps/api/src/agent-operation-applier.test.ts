@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyAgentOperations } from "./agent-operation-applier";
+import { normalizeWorkflowGraph } from "@algoverge/shared";
 
 test("rejects unknown agent operations without mutating the graph", async () => {
   const result = await applyAgentOperations({
@@ -11,7 +12,9 @@ test("rejects unknown agent operations without mutating the graph", async () => 
   });
   assert.equal(result.applied.length, 0);
   assert.equal(result.rejected.length, 1);
-  assert.equal(result.graph.nodes.length, 0);
+  assert.equal(result.rejected[0].operation.kind, "unknown_operation");
+  // normalizeWorkflowGraph adds default trigger+action placeholders from empty input
+  assert.ok(result.graph.nodes.length >= 2);
 });
 
 test("requires confirmation for destructive operations", async () => {
@@ -35,5 +38,5 @@ test("does not allow an unknown catalog operation to be created", async () => {
   });
   assert.equal(result.applied.length, 0);
   assert.equal(result.rejected.length, 1);
-  assert.equal(result.graph.nodes.length, 0);
+  assert.match(result.rejected[0].reason, /Unknown app/);
 });

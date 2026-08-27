@@ -63,7 +63,7 @@ export class Executor {
     return last;
   }
 
-  private async executeContainer(run: { id: string; orgId: string; contextJson?: unknown }, definition: TFlowDefinition, step: Step, cursor: number, context: Record<string, unknown>): Promise<void> {
+  private async executeContainer(run: { id: string; orgId: string; contextJson?: Record<string, unknown> }, definition: TFlowDefinition, step: Step, cursor: number, context: Record<string, unknown>): Promise<void> {
     const totalSteps = definition.steps.length;
     if (step.type === "branch") { const selected = evaluateFlowCondition(step.condition as any, context) ? step.onTrue : step.onFalse; const inline = await this.runInline(run, definition, selected as Step[], context); return this.advance(run, cursor, inline, totalSteps); }
     if (step.type === "router") { const branches = (step as any).branches; const selected = branches.find((b: any) => b.condition && evaluateFlowCondition(b.condition, context)) ?? branches.find((b: any) => b.default); const output = selected ? await this.runInline(run, definition, selected.steps, context) : {}; return this.advance(run, cursor, { [step.id]: { branchId: selected?.id ?? null, ...output } }, totalSteps); }

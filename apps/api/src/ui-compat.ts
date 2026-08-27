@@ -359,21 +359,29 @@ export function registerUiCompat(authed: Router) {
           req.orgId!,
         );
         if (agentReply?.message) {
-          // If the AI agent proposed workflow operations, resolve them locally
+          // Apply Python agent operations through the authoritative applier,
+          // rather than discarding them and re-parsing via the local orchestrator.
           let appliedGraph = graph;
           let applied = false;
+          let appliedOps: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
+          let rejectedOps: Array<{ operation: unknown; reason: string }> = [];
+          let needsConfirmation: unknown[] = [];
           if (agentReply.operations?.length && graph) {
-            const { orchestrateCopilot } = await import("./copilot-orchestrator");
-            const turn = orchestrateCopilot({
-              prompt: body.prompt,
+            const { applyAgentOperations } = await import("./agent-operation-applier");
+            const opResult = await applyAgentOperations({
               graph,
-              selectedStepId: body.selectedStepId,
-              mode: parseCopilotMode(body.mode),
+              operations: agentReply.operations,
+              workspaceId: req.orgId!,
+              organizationId: req.orgId!,
+              allowDestructive: parseCopilotMode(body.mode) === "auto_build",
             });
-            if (turn.graph && turn.changed) {
-              appliedGraph = turn.graph;
+            if (opResult.applied.length > 0) {
+              appliedGraph = opResult.graph;
               applied = true;
             }
+            appliedOps = opResult.applied;
+            rejectedOps = opResult.rejected;
+            needsConfirmation = opResult.needsConfirmation;
           }
           res.json({
             reply: agentReply.message,
@@ -382,6 +390,10 @@ export function registerUiCompat(authed: Router) {
             source: "python-agent",
             youDoFirst: [],
             iCan: agentReply.needs_input?.length ? ["Answer: " + agentReply.needs_input.join(", ")] : [],
+            operations: agentReply.operations ?? [],
+            applied_operations: appliedOps,
+            rejected_operations: rejectedOps,
+            needs_confirmation: needsConfirmation,
           });
           return;
         }

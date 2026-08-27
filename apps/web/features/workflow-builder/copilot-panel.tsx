@@ -19,6 +19,10 @@ type ChatResult = {
   chapter?: string;
   youDoFirst?: string[];
   iCan?: string[];
+  operations?: Array<{ kind: string; arguments: Record<string, unknown>; requires_confirmation?: boolean }>;
+  applied_operations?: Array<{ kind: string; arguments: Record<string, unknown> }>;
+  rejected_operations?: Array<{ operation: unknown; reason: string }>;
+  needs_confirmation?: Array<{ kind: string; arguments: Record<string, unknown> }>;
 };
 type Activity = { label: string; detail?: string; state: "done" | "active" };
 export type CopilotTodo = { kind: string; message: string };
