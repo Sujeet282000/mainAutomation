@@ -1,6 +1,5 @@
 # ============================================================================
 # Orchestra — Python AI Service (FastAPI)
-# Source of truth: Parts 7, 8, 9, 10
 # ============================================================================
 
 from __future__ import annotations
@@ -10,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from orchestra_ai.api.agent_routes import router as agent_router
 from orchestra_ai.api.routes import router as copilot_router
 from orchestra_ai.api.runtime import router as runtime_router
 from orchestra_ai.gateway.gateway import (
@@ -29,6 +29,7 @@ class GenerateWorkflowBody(BaseModel):
 
 
 def _keyword_graph(prompt: str) -> dict:
+    """Legacy compatibility endpoint. New Copilot uses the agent pipeline."""
     text = prompt.lower()
     trigger = {"id": "t1", "type": "trigger", "appSlug": "webhook", "operation": "catch_hook", "label": "Catch Hook", "position": {"x": 280, "y": 40}, "config": {}, "connectionId": None}
     if any(w in text for w in ("gmail", "inbox", "email")):
@@ -59,24 +60,17 @@ async def lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(
-    title="Orchestra AI Service",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-# Include all copilot routes
+app = FastAPI(title="Orchestra AI Service", version="1.0.0", lifespan=lifespan)
 app.include_router(copilot_router)
+app.include_router(agent_router)
 app.include_router(runtime_router)
 
 
 @app.post("/v1/generate-workflow")
 async def generate_workflow(body: GenerateWorkflowBody):
-    """Node control-plane alias. Returns a catalog-valid draft graph."""
-    return {"graph": _keyword_graph(body.prompt), "source": "ai-service"}
+    """Legacy Node alias. Kept for backwards compatibility."""
+    return {"graph": _keyword_graph(body.prompt), "source": "ai-service-legacy"}
 
-
-# ── Health ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -86,23 +80,14 @@ async def health():
 
 @app.get("/health/ready")
 async def health_ready():
-    """Readiness probe — does NOT call model providers."""
     return {"ok": True, "status": "ready", **provider_status()}
 
 
-# ── Error handlers ──────────────────────────────────────────────────────────
-
 @app.exception_handler(AiBudgetExceeded)
 async def budget_exceeded_handler(request, exc):
-    return JSONResponse(
-        status_code=429,
-        content={"error": "AI_BUDGET_EXCEEDED", "message": str(exc)},
-    )
+    return JSONResponse(status_code=429, content={"error": "AI_BUDGET_EXCEEDED", "message": str(exc)})
 
 
 @app.exception_handler(AiSchemaInvalid)
 async def schema_invalid_handler(request, exc):
-    return JSONResponse(
-        status_code=422,
-        content={"error": "AI_SCHEMA_INVALID", "message": str(exc)},
-    )
+    return JSONResponse(status_code=422, content={"error": "AI_SCHEMA_INVALID", "message": str(exc)})
