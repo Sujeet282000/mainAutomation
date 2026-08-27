@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { WorkflowGraph, GraphNode, GraphEdge } from "@algoverge/shared";
 import { normalizeWorkflowGraph } from "@algoverge/shared";
 import { getApp } from "./catalog";
@@ -6,15 +7,34 @@ import { invokeTool } from "./tool-registry";
 import { validateWorkflowGraph } from "./workflow-validation";
 import { queryOne } from "./db";
 
-export type AgentOperation = {
-  kind: string;
-  arguments: Record<string, unknown>;
-  requires_confirmation?: boolean;
-};
+const nodePatchSchema = z.object({
+  label: z.string().min(1).optional(),
+  appSlug: z.string().min(1).optional(),
+  operation: z.string().min(1).optional(),
+  type: z.enum(["trigger", "action", "logic"]).optional(),
+  position: z.object({ x: z.number(), y: z.number() }).optional(),
+  config: z.record(z.unknown()).optional(),
+  connectionId: z.string().nullable().optional(),
+});
+
+/** Canonical, LLM-safe vocabulary. Unknown operation kinds are rejected before mutation. */
+export const AgentOperation = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("add_node"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("remove_node"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("update_node"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("configure_node"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("connect_nodes"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("disconnect_nodes"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("map_field"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("validate_workflow"), arguments: z.record(z.unknown()).default({}), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("test_action"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+  z.object({ kind: z.literal("explain_run"), arguments: z.record(z.unknown()), requires_confirmation: z.boolean().optional() }),
+]);
+export type AgentOperation = z.infer<typeof AgentOperation>;
 
 export type ApplyAgentOperationsOptions = {
   graph: unknown;
-  operations: AgentOperation[];
+  operations: unknown[];
   workspaceId: string;
   organizationId: string;
   executionId?: string;
@@ -24,9 +44,10 @@ export type ApplyAgentOperationsOptions = {
 export type ApplyAgentOperationsResult = {
   graph: WorkflowGraph;
   applied: AgentOperation[];
-  rejected: Array<{ operation: AgentOperation; reason: string }>;
+  rejected: Array<{ operation: AgentOperation | unknown; reason: string }>;
   needsConfirmation: AgentOperation[];
   issues: Array<{ code: string; message: string; nodeId?: string; edgeId?: string }>;
+  testResults: Array<{ nodeId: string; result: unknown }>;
 };
 
 function stringArg(args: Record<string, unknown>, key: string): string | undefined {
@@ -57,19 +78,14 @@ function addNode(graph: WorkflowGraph, args: Record<string, unknown>): WorkflowG
   if (!appSlug || !operation) throw new Error("add_node requires appSlug and operation");
   const { op } = assertOperation(appSlug, operation);
   const type = op.type === "trigger" ? "trigger" : "action";
-  if (type === "trigger" && graph.nodes.some((node) => node.type === "trigger")) {
-    throw new Error("Workflow already has a trigger");
-  }
+  if (type === "trigger" && graph.nodes.some((node) => node.type === "trigger")) throw new Error("Workflow already has a trigger");
   const node: GraphNode = {
     id: stringArg(args, "nodeId") ?? randomUUID(),
     type,
     appSlug,
     operation,
     label: stringArg(args, "label") ?? op.name,
-    position: {
-      x: typeof args.x === "number" ? args.x : 420,
-      y: typeof args.y === "number" ? args.y : 180 + graph.nodes.length * 140,
-    },
+    position: { x: typeof args.x === "number" ? args.x : 420, y: typeof args.y === "number" ? args.y : 180 + graph.nodes.length * 140 },
     config: recordArg(args, "config"),
     connectionId: stringArg(args, "connectionId") ?? null,
   };
@@ -80,33 +96,35 @@ function removeNode(graph: WorkflowGraph, args: Record<string, unknown>): Workfl
   const nodeId = stringArg(args, "nodeId");
   if (!nodeId) throw new Error("remove_node requires nodeId");
   if (!findNode(graph, nodeId)) throw new Error(`Step not found: ${nodeId}`);
-  return {
-    nodes: graph.nodes.filter((node) => node.id !== nodeId),
-    edges: graph.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
-  };
+  return { nodes: graph.nodes.filter((node) => node.id !== nodeId), edges: graph.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId) };
 }
 
 function updateNode(graph: WorkflowGraph, args: Record<string, unknown>): WorkflowGraph {
   const nodeId = stringArg(args, "nodeId");
   const node = findNode(graph, nodeId);
   if (!node) throw new Error(`Step not found: ${nodeId ?? "unknown"}`);
+  const patch = nodePatchSchema.parse({
+    label: args.label, appSlug: args.appSlug, operation: args.operation, type: args.type,
+    position: args.position, config: args.config, connectionId: args.connectionId,
+  });
   const next = { ...node };
-  const appSlug = stringArg(args, "appSlug");
-  const operation = stringArg(args, "operation");
-  if (appSlug || operation) {
-    const nextApp = appSlug ?? node.appSlug;
-    const nextOperation = operation ?? node.operation;
+  const nextApp = patch.appSlug ?? node.appSlug;
+  const nextOperation = patch.operation ?? node.operation;
+  if (patch.appSlug || patch.operation || patch.type) {
     const { op } = assertOperation(nextApp, nextOperation);
     next.appSlug = nextApp;
     next.operation = nextOperation;
-    next.type = op.type === "trigger" ? "trigger" : "action";
-    next.label = stringArg(args, "label") ?? op.name;
-  } else if (stringArg(args, "label")) {
-    next.label = stringArg(args, "label")!;
+    next.type = patch.type ?? (op.type === "trigger" ? "trigger" : "action");
+    next.label = patch.label ?? op.name;
+    if (next.type === "trigger" && graph.nodes.some((candidate) => candidate.id !== node.id && candidate.type === "trigger")) {
+      throw new Error("Cannot create a second trigger node");
+    }
+  } else if (patch.label) {
+    next.label = patch.label;
   }
-  if (stringArg(args, "connectionId")) next.connectionId = stringArg(args, "connectionId");
-  if (args.connectionId === null) next.connectionId = null;
-  if (args.config && typeof args.config === "object") next.config = { ...node.config, ...recordArg(args, "config") };
+  if (patch.position) next.position = patch.position;
+  if (patch.connectionId !== undefined) next.connectionId = patch.connectionId;
+  if (patch.config) next.config = { ...node.config, ...patch.config };
   return { ...graph, nodes: graph.nodes.map((candidate) => candidate.id === node.id ? next : candidate) };
 }
 
@@ -116,7 +134,7 @@ function connectNodes(graph: WorkflowGraph, args: Record<string, unknown>): Work
   if (!source || !target) throw new Error("connect_nodes requires source and target");
   if (!findNode(graph, source) || !findNode(graph, target)) throw new Error("Both edge endpoints must exist");
   if (source === target) throw new Error("A node cannot connect to itself");
-  if (graph.edges.some((edge) => edge.source === source && edge.target === target)) return graph;
+  if (graph.edges.some((edge) => edge.source === source && edge.target === target && edge.sourceHandle === (stringArg(args, "sourceHandle") ?? null))) return graph;
   const edge: GraphEdge = {
     id: stringArg(args, "edgeId") ?? randomUUID(),
     source,
@@ -127,13 +145,29 @@ function connectNodes(graph: WorkflowGraph, args: Record<string, unknown>): Work
   return { ...graph, edges: [...graph.edges, edge] };
 }
 
+function disconnectNodes(graph: WorkflowGraph, args: Record<string, unknown>): WorkflowGraph {
+  const source = stringArg(args, "source") ?? stringArg(args, "sourceNodeId");
+  const target = stringArg(args, "target") ?? stringArg(args, "targetNodeId");
+  if (!source || !target) throw new Error("disconnect_nodes requires source and target");
+  return { ...graph, edges: graph.edges.filter((edge) => !(edge.source === source && edge.target === target)) };
+}
+
+function mapField(graph: WorkflowGraph, args: Record<string, unknown>): WorkflowGraph {
+  const nodeId = stringArg(args, "nodeId");
+  const field = stringArg(args, "field");
+  if (!nodeId || !field) throw new Error("map_field requires nodeId and field");
+  const node = findNode(graph, nodeId);
+  if (!node) throw new Error(`Step not found: ${nodeId}`);
+  return { ...graph, nodes: graph.nodes.map((candidate) => candidate.id === nodeId ? { ...candidate, config: { ...candidate.config, [field]: args.value } } : candidate) };
+}
+
 async function executeTestAction(opts: ApplyAgentOperationsOptions, graph: WorkflowGraph, args: Record<string, unknown>) {
   const nodeId = stringArg(args, "nodeId");
   const node = findNode(graph, nodeId);
   if (!node) throw new Error(`Step not found: ${nodeId ?? "unknown"}`);
   if (node.type === "trigger" || !node.operation) throw new Error("test_action requires an executable action step");
   const executionId = opts.executionId ?? randomUUID();
-  const result = await invokeTool({
+  return { nodeId: node.id, result: await invokeTool({
     piece: node.appSlug,
     operation: node.operation,
     connectionId: node.connectionId,
@@ -144,69 +178,57 @@ async function executeTestAction(opts: ApplyAgentOperationsOptions, graph: Workf
     idempotencyKey: `${executionId}:${node.id}:agent-test`,
     allowDestructive: opts.allowDestructive === true,
     source: "agent",
-  });
-  return { nodeId: node.id, result };
+  }) };
+}
+
+function requiresConfirmation(operation: AgentOperation): boolean {
+  if (operation.requires_confirmation === true) return true;
+  return operation.kind === "remove_node" || operation.kind === "test_action";
 }
 
 export async function applyAgentOperations(opts: ApplyAgentOperationsOptions): Promise<ApplyAgentOperationsResult> {
   let graph = normalizeWorkflowGraph(opts.graph);
   const applied: AgentOperation[] = [];
-  const rejected: Array<{ operation: AgentOperation; reason: string }> = [];
+  const rejected: Array<{ operation: AgentOperation | unknown; reason: string }> = [];
   const needsConfirmation: AgentOperation[] = [];
+  const testResults: Array<{ nodeId: string; result: unknown }> = [];
 
-  for (const operation of opts.operations) {
+  for (const rawOperation of opts.operations) {
+    const parsed = AgentOperation.safeParse(rawOperation);
+    if (!parsed.success) {
+      rejected.push({ operation: rawOperation, reason: `Invalid AgentOperation: ${parsed.error.message}` });
+      continue;
+    }
+    const operation = parsed.data;
     try {
-      if (operation.requires_confirmation && !opts.allowDestructive) {
+      if (requiresConfirmation(operation) && !opts.allowDestructive) {
         needsConfirmation.push(operation);
         continue;
       }
       switch (operation.kind) {
-        case "add_node":
-          graph = addNode(graph, operation.arguments);
-          break;
-        case "remove_node":
-          graph = removeNode(graph, operation.arguments);
-          break;
+        case "add_node": graph = addNode(graph, operation.arguments); break;
+        case "remove_node": graph = removeNode(graph, operation.arguments); break;
         case "update_node":
-        case "configure_node":
-          graph = updateNode(graph, operation.arguments);
-          break;
-        case "connect_nodes":
-          graph = connectNodes(graph, operation.arguments);
-          break;
-        case "validate_workflow":
-          break;
-        case "test_action":
-          await executeTestAction(opts, graph, operation.arguments);
-          break;
+        case "configure_node": graph = updateNode(graph, operation.arguments); break;
+        case "connect_nodes": graph = connectNodes(graph, operation.arguments); break;
+        case "disconnect_nodes": graph = disconnectNodes(graph, operation.arguments); break;
+        case "map_field": graph = mapField(graph, operation.arguments); break;
+        case "validate_workflow": break;
+        case "test_action": testResults.push(await executeTestAction(opts, graph, operation.arguments)); break;
         case "explain_run": {
           const runId = stringArg(operation.arguments, "runId");
           if (!runId) throw new Error("explain_run requires runId");
-          const run = await queryOne<{ status: string; context: unknown }>(
-            `SELECT status, context FROM flow_runs WHERE id = $1 AND org_id = $2`,
-            [runId, opts.workspaceId],
-          );
+          const run = await queryOne<{ status: string; context: unknown }>(`SELECT status, context FROM flow_runs WHERE id = $1 AND org_id = $2`, [runId, opts.workspaceId]);
           if (!run) throw new Error("Run not found in this workspace");
           break;
         }
-        default:
-          throw new Error(`Unsupported agent operation: ${operation.kind}`);
       }
       applied.push(operation);
     } catch (error) {
-      rejected.push({
-        operation,
-        reason: error instanceof Error ? error.message : "operation_failed",
-      });
+      rejected.push({ operation, reason: error instanceof Error ? error.message : "operation_failed" });
     }
   }
 
   const validation = await validateWorkflowGraph(graph, { workspaceId: opts.workspaceId, strict: false });
-  return {
-    graph: validation.graph,
-    applied,
-    rejected,
-    needsConfirmation,
-    issues: validation.issues,
-  };
+  return { graph: validation.graph, applied, rejected, needsConfirmation, issues: validation.issues, testResults };
 }
