@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, History, PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Send, Settings, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, History, Maximize2, PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Send, Settings, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { CopilotMode } from "./copilot-types";
@@ -31,6 +31,8 @@ const DEFAULT_W = 340;
 export function CopilotPanel({
   automationId,
   open,
+  modal,
+  onOpenModal,
   building,
   draftConfigured,
   draftOutline: _draftOutline,
@@ -67,6 +69,8 @@ export function CopilotPanel({
   onToggleReasoning: () => void;
   stages: Activity[];
   todos: CopilotTodo[];
+  modal?: boolean;
+  onOpenModal?: () => void;
   planeHint?: string;
   onClose: () => void;
   onExpand: () => void;
@@ -256,14 +260,26 @@ export function CopilotPanel({
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold leading-none">Copilot</p>
         </div>
-        <button
-          type="button"
-          className="rounded-lg p-1.5 text-ink-muted hover:bg-muted"
-          title="Minimize"
-          onClick={() => setMin(true)}
-        >
-          <PanelLeftClose className="h-4 w-4" />
+        {!modal && (
+          <button
+            type="button"
+            className="rounded-lg p-1.5 text-ink-muted hover:bg-muted"
+            title="Open Copilot in overlay"
+            onClick={() => onOpenModal?.()}
+          >
+            <Maximize2 className="h-4 w-4" />
+          </button>
+        )}
+        {!modal && (
+          <button
+            type="button"
+            className="rounded-lg p-1.5 text-ink-muted hover:bg-muted"
+            title="Minimize"
+            onClick={() => setMin(true)}
+          >
+            <PanelLeftClose className="h-4 w-4" />
         </button>
+        )}
         <button
           type="button"
           className="rounded-lg p-1.5 text-ink-muted hover:bg-muted"

@@ -179,6 +179,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const [valueOpen, setValueOpen] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(true);
+  const [copilotModal, setCopilotModal] = useState(false);
+  const [msgModal, setMsgModal] = useState<{ title: string; body: string } | null>(null);
   const [copilotPrompt, setCopilotPrompt] = useState("");
   const [copilotBanner, setCopilotBanner] = useState(false);
   const [copilotMode, setCopilotMode] = useState<CopilotMode>("auto_build");
@@ -961,7 +963,17 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-ink-muted">
           {published ? "On" : "Draft"}
         </span>
-        {msg && <span className="truncate text-xs text-ink-muted">{msg}</span>}
+        {msg && (
+          <button
+            type="button"
+            className="flex items-center gap-1 rounded-lg bg-violet-50 px-2 py-0.5 text-xs text-violet-700 hover:bg-violet-100 transition-colors cursor-pointer"
+            title="View message"
+            onClick={() => setMsgModal({ title: "Notification", body: msg })}
+          >
+            <span className="truncate max-w-[220px]">{msg}</span>
+            <span className="shrink-0 rounded-full bg-violet-200 px-1.5 py-0.5 text-[10px] font-semibold">View</span>
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           <Button variant="ghost" size="sm" onClick={() => undo()} aria-label="Undo">
             <Undo2 className="h-3.5 w-3.5" />
@@ -988,6 +1000,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         <CopilotPanel
           automationId={automationId}
           open={copilotOpen}
+          modal={copilotModal}
+          onOpenModal={() => setCopilotModal(true)}
           building={busy === "copilot"}
           draftConfigured={nodes.some((n) => Boolean(n.data.appSlug && n.data.operation))}
           draftOutline={nodes
@@ -1723,6 +1737,148 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           }}
         />
       )}
+      {msgModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/50 p-4" onClick={() => setMsgModal(null)}>
+          <div className="w-full max-w-md rounded-2xl border border-line bg-elevated p-5 shadow-card" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-violet-100">
+                <Sparkles className="h-4 w-4 text-violet-600" />
+              </span>
+              <h2 className="text-base font-semibold">{msgModal.title}</h2>
+            </div>
+            <p className="text-sm text-ink leading-relaxed">{msgModal.body}</p>
+            <div className="mt-5 flex justify-end">
+              <Button size="sm" onClick={() => setMsgModal(null)}>OK</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Copilot Modal Overlay */}
+      {copilotModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/50 p-4" onClick={() => setCopilotModal(false)}>
+          <div className="flex h-[85vh] w-[min(640px,96vw)] rounded-2xl border border-line bg-elevated shadow-card overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <CopilotPanel
+              automationId={automationId}
+              open={true}
+              modal={true}
+              onOpenModal={() => {}}
+              building={busy === "copilot"}
+              draftConfigured={nodes.some((n) => Boolean(n.data.appSlug && n.data.operation))}
+              draftOutline={nodes
+                .filter((n) => n.data.appSlug && n.data.operation)
+                .map((n, i) => `${i + 1}. ${n.data.label || n.data.operation}`)
+                .join(" → ")}
+              firstHumanAction={firstHumanAction}
+              mode={copilotMode}
+              onModeChange={(next) => {
+                setCopilotMode(next);
+                try {
+                  localStorage.setItem("orchestra-copilot-mode", next);
+                } catch {
+                  /* ignore */
+                }
+              }}
+              reasoning={copilotReasoning}
+              showReasoning={showReasoning}
+              onToggleReasoning={() => setShowReasoning((v) => !v)}
+              stages={copilotStages}
+              todos={copilotTodos}
+              onClose={() => setCopilotModal(false)}
+              onExpand={() => {}}
+              onCheckpoint={() => {
+                copilotCheckpoint.current = toApi(nodes, edges);
+                setMsg("Copilot checkpoint saved. Revert restores this draft.");
+              }}
+              onBuild={async (prompt) => {
+                setCopilotPrompt(prompt);
+                return runCopilot(prompt);
+              }}
+              onStop={() => {
+                copilotAbort.current = true;
+                copilotAbortCtl.current?.abort();
+                setBusy(null);
+              }}
+              onChat={async (prompt) => {
+                let d;
+                try {
+                  d = await api<{
+                    reply: string;
+                    graph?: GraphPayload;
+                    applied?: boolean;
+                    summary?: string;
+                    youDoFirst?: string[];
+                    iCan?: string[];
+                    events?: Array<{ type: string; stage?: string; label?: string; text?: string; kind?: string; message?: string }>;
+                  }>("/ai/copilot/chat", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      prompt,
+                      graph: toApi(nodes, edges),
+                      plan: "free",
+                      automationId,
+                      mode: copilotMode,
+                      selectedStepId: selectedId,
+                      lastTest: testResultRef.current
+                    })
+                  });
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : "";
+                  if (msg.includes("timeout") || msg.includes("TIMEOUT")) {
+                    throw new Error("Copilot took too long to respond. The AI service may be overloaded — try a shorter instruction.");
+                  }
+                  if (msg.includes("ECONNREFUSED") || msg.includes("fetch")) {
+                    throw new Error("Cannot reach the Copilot service. Make sure the API and AI services are running.");
+                  }
+                  throw new Error(`Copilot could not process that request: ${msg || "unknown error"}. Try rephrasing or starting a new session.`);
+                }
+                if (!d) throw new Error("Copilot returned no response.");
+                const stageEvents = (d.events ?? []).filter((e) => e.type === "stage");
+                if (stageEvents.length) {
+                  setCopilotStages(stageEvents.map((e) => ({ label: e.label ?? e.stage ?? "stage", state: "done" as const })));
+                }
+                const reasoning = (d.events ?? []).find((e) => e.type === "reasoning")?.text;
+                if (reasoning) setCopilotReasoning(reasoning);
+                if (d.events?.some((e) => e.type === "todo")) {
+                  setCopilotTodos(
+                    (d.events ?? []).filter((e) => e.type === "todo" && e.message).map((e) => ({ kind: e.kind ?? "confirm", message: e.message! }))
+                  );
+                }
+                if (d.graph && d.applied) {
+                  copilotCheckpoint.current = toApi(nodes, edges);
+                  const g = fromApi(d.graph);
+                  hydrate(g.nodes, g.edges);
+                  setGraph(g.nodes, g.edges);
+                  setMsg(d.summary ?? "Copilot updated the draft. Test, then publish yourself.");
+                }
+                return d;
+              }}
+              onApply={(graph) => {
+                copilotCheckpoint.current = toApi(nodes, edges);
+                const g = fromApi(graph as GraphPayload);
+                hydrate(g.nodes, g.edges);
+                setGraph(g.nodes, g.edges);
+                void api("/ai/copilot/accept", {
+                  method: "POST",
+                  body: JSON.stringify({ automationId, graph })
+                }).catch(() => undefined);
+                setMsg("Copilot change applied to the draft. Test before publishing.");
+              }}
+              onRevert={() => {
+                if (!copilotCheckpoint.current) return;
+                const g = fromApi(copilotCheckpoint.current);
+                hydrate(g.nodes, g.edges);
+                setGraph(g.nodes, g.edges);
+                copilotCheckpoint.current = null;
+                setMsg("Copilot change reverted.");
+              }}
+              incomingPrompt={injectPrompt}
+              onIncomingPromptHandled={() => setInjectPrompt(null)}
+            />
+          </div>
+        </div>
+      )}
+
       {publishOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={() => setPublishOpen(false)}>
           <div className="w-full max-w-md rounded-2xl border border-line bg-elevated p-5 shadow-card" onClick={(e) => e.stopPropagation()}>
