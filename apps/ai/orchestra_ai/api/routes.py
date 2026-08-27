@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from orchestra_ai.api.deps import Ctx, require_service_token
+from orchestra_ai.copilot.agent import chat as agent_chat
 from orchestra_ai.copilot.capabilities import require
 from orchestra_ai.copilot.diagnose import Diagnosis, RunDiagnoser
 from orchestra_ai.copilot.models import Autonomy, GenerationResult
@@ -22,8 +23,6 @@ from orchestra_ai.schemas.contracts import Attribution
 
 router = APIRouter(prefix="/copilot", tags=["copilot"])
 
-
-# ── Dependencies ────────────────────────────────────────────────────────────
 
 def get_prompts() -> PromptRegistry:
     return PromptRegistry()
@@ -39,8 +38,6 @@ def get_diagnoser() -> RunDiagnoser:
     return RunDiagnoser(gateway=get_gateway())
 
 
-# ── Generation request ──────────────────────────────────────────────────────
-
 class GenerateRequest(BaseModel):
     session_id: str
     flow_id: str = ""
@@ -53,15 +50,12 @@ class GenerateRequest(BaseModel):
     request_id: str = ""
 
 
-# ── Generation endpoint ────────────────────────────────────────────────────
-
 @router.post("/generate")
 async def generate(
     body: GenerateRequest,
     ctx: Annotated[Ctx, Depends(require_service_token)],
     orchestrator: CopilotOrchestrator = Depends(get_orchestrator),
 ) -> StreamingResponse:
-    """Full 10-stage Copilot generation pipeline."""
     require("write_draft")
 
     async def stream_events():
@@ -80,14 +74,9 @@ async def generate(
     return StreamingResponse(
         stream_events(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
-
-# ── Refinement request ──────────────────────────────────────────────────────
 
 class RefineRequest(BaseModel):
     definition: dict[str, Any]
@@ -111,15 +100,38 @@ async def refine(
     ctx: Annotated[Ctx, Depends(require_service_token)],
     orchestrator: CopilotOrchestrator = Depends(get_orchestrator),
 ) -> RefineResponse:
-    """Apply a plain-language refinement to an existing draft."""
+    """Handle both ordinary Copilot questions and workflow refinements.
+
+    The conversational agent gets first chance to answer. This fixes the old
+    behavior where every refinement was forced through graph assembly, which
+    could return no useful answer for questions such as "what is this step?".
+    Workflow mutations still go through the existing orchestrator and remain
+    server-authorized; the model never writes the database directly.
+    """
     require("refine_draft")
     try:
+        agent = await agent_chat(
+            get_gateway(),
+            message=body.instruction,
+            workflow=body.definition,
+            catalog=[],
+            history=[],
+            attribution=ctx.attribution,
+        )
+        if not agent.operations:
+            return RefineResponse(
+                applied=False,
+                definition=body.definition,
+                summary=agent.message,
+                publishable=False,
+            )
+
         spec = await orchestrator._parse_intent(body.instruction, ctx.attribution)
         definition = orchestrator._assemble_definition(spec)
         return RefineResponse(
             applied=True,
             definition=definition,
-            summary=spec.summary,
+            summary=agent.message or spec.summary,
             publishable=False,
         )
     except Exception as exc:
@@ -129,8 +141,6 @@ async def refine(
             summary=str(exc)[:240],
         )
 
-
-# ── Diagnosis endpoint ──────────────────────────────────────────────────────
 
 class DiagnoseRequest(BaseModel):
     run_context: dict[str, Any]
@@ -144,14 +154,8 @@ async def diagnose(
     ctx: Annotated[Ctx, Depends(require_service_token)],
     diagnoser: RunDiagnoser = Depends(get_diagnoser),
 ) -> Diagnosis:
-    """Ops Copilot: diagnose a failed run."""
-    return await diagnoser.diagnose(
-        run_context=body.run_context,
-        attribution=ctx.attribution,
-    )
+    return await diagnoser.diagnose(run_context=body.run_context, attribution=ctx.attribution)
 
-
-# ── Assist endpoints (in-builder assistance) ────────────────────────────────
 
 class SuggestNextRequest(BaseModel):
     definition: dict[str, Any]
@@ -191,7 +195,6 @@ async def suggest_next(
     ctx: Annotated[Ctx, Depends(require_service_token)],
     orchestrator: CopilotOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, Any]:
-    """Propose the most likely next steps given the graph so far."""
     require("suggest_next_steps")
     hint = body.goal_hint or "next action"
     cards = await orchestrator._node.search_catalog(hint, "action")
@@ -208,7 +211,6 @@ async def fill_step(
     body: FillStepRequest,
     ctx: Annotated[Ctx, Depends(require_service_token)],
 ) -> dict[str, Any]:
-    """Map every field of ONE step. Returns a JSON Patch."""
     require("set_field")
     return {"patch": [], "note": "Fill remaining required fields in Setup. Copilot will not invent resource IDs."}
 
@@ -218,7 +220,6 @@ async def map_field(
     body: MapFieldRequest,
     ctx: Annotated[Ctx, Depends(require_service_token)],
 ) -> dict[str, Any]:
-    """Suggest up to three ranked expressions for ONE workflow field."""
     require("set_field")
     return {
         "suggestions": [
@@ -233,7 +234,6 @@ async def write_condition(
     ctx: Annotated[Ctx, Depends(require_service_token)],
     orchestrator: CopilotOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, Any]:
-    """Convert a plain-language condition into a typed condition object."""
     require("compile_condition")
     try:
         from pydantic import BaseModel as _M
@@ -270,7 +270,6 @@ async def explain_error(
     body: ExplainErrorRequest,
     ctx: Annotated[Ctx, Depends(require_service_token)],
 ) -> dict[str, Any]:
-    """Explain a failed workflow step to the person who built it."""
     return {
         "explanation": "Open the failed step, read the error, reconnect if it is auth, and test that step before publishing."
     }
