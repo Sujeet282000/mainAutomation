@@ -1,21 +1,16 @@
 import { Queue, Worker } from "bullmq";
-import { Db, createRepositories } from "@algoverge/db";
+import { Db } from "@algoverge/db";
 import { Executor } from "@algoverge/engine";
 import { connection } from "./redis";
 import { adapterStepHandler } from "./adapter-handler";
+import { createEngineDb } from "./engine-db";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for the worker");
 
 const db = new Db(databaseUrl);
-const repositories = createRepositories(db);
 const transitionQueue = new Queue("flow-steps", { connection });
-const engineDb = {
-  flowRuns: repositories.runs,
-  flowVersions: repositories.flowVersions,
-  runSteps: repositories.runSteps,
-  todos: repositories.todos,
-};
+const engineDb = createEngineDb(db);
 const executor = new Executor(engineDb, { flowStep: transitionQueue }, new Map([
   ["piece_action", adapterStepHandler],
 ]));
