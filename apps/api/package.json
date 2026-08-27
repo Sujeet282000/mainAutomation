@@ -8,7 +8,7 @@
     "migrate": "tsx src/migrate.ts",
     "seed": "tsx src/seed.ts",
     "test": "npm run test:core && npm run test:guards && npm run test:orchestra",
-    "test:core": "tsx --test src/adapters.test.ts src/agent-runtime.test.ts src/ai-service.test.ts src/catalog.test.ts src/copilot.test.ts src/copilot-orchestrator.test.ts src/copilot-engine.test.ts src/cron.test.ts src/graph-normalize.test.ts src/interpolate.test.ts src/mcp.test.ts src/metering.test.ts",
+    "test:core": "tsx --test src/adapters.test.ts src/agent-runtime.test.ts src/ai-service.test.ts src/catalog.test.ts src/copilot.test.ts src/copilot-orchestrator.test.ts src/copilot-engine.test.ts src/agent-operation-applier.test.ts src/cron.test.ts src/graph-normalize.test.ts src/interpolate.test.ts src/mcp.test.ts src/metering.test.ts",
     "test:orchestra": "tsx --test src/orchestra-core.test.ts && npm run test -w @algoverge/engine",
     "test:guards": "tsx --test src/runtime-guards.test.ts src/workflow-validation.test.ts"
   },
@@ -24,8 +24,8 @@
     "bullmq": "^5.52.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2",
     "helmet": "^8.0.0",
+    "express": "^4.21.2",
     "ioredis": "^5.6.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.13.3",
