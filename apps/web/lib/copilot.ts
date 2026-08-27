@@ -147,3 +147,32 @@ export async function refineCopilotSession(
     }),
   });
 }
+
+export type CopilotPlanResult = {
+  reply: string;
+  preview?: {
+    summary: string;
+    steps: Array<{ label: string; type: string; app: string }>;
+    apps_used: Array<{ name: string; slug: string }>;
+    missing_connections: string[];
+    missing_information: string[];
+    confidence: number;
+  } | null;
+  operations: CopilotOperation[];
+  needs_input: string[];
+};
+
+export async function planCopilotWorkflow(opts: {
+  prompt: string;
+  automationId?: string;
+  graph?: unknown;
+}) {
+  return api<CopilotPlanResult>("/ai/copilot/plan", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt: opts.prompt,
+      automationId: opts.automationId,
+      graph: opts.graph,
+    }),
+  });
+}

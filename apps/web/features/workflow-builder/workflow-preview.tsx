@@ -1,16 +1,16 @@
 "use client";
 
-import { Bot, Check, ChevronRight, Plug, Sparkles, Zap } from "lucide-react";
+import { Bot, ChevronRight, Plug, Sparkles, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type PreviewStep = {
+export type PreviewStep = {
   label: string;
   type: "trigger" | "action" | "logic";
   app: string;
   connected?: boolean;
 };
 
-type WorkflowPreviewData = {
+export type WorkflowPreviewData = {
   summary?: string;
   steps: PreviewStep[];
   missingConnections?: string[];
