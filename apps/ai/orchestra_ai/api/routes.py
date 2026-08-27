@@ -12,14 +12,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from orchestra_ai.api.deps import Ctx, require_service_token
-from orchestra_ai.copilot.agent import chat as agent_chat
+from orchestra_ai.copilot.agent import AgentOperation, chat as agent_chat
 from orchestra_ai.copilot.capabilities import require
 from orchestra_ai.copilot.diagnose import Diagnosis, RunDiagnoser
-from orchestra_ai.copilot.models import Autonomy, GenerationResult
+from orchestra_ai.copilot.models import Autonomy
 from orchestra_ai.copilot.orchestrator import CopilotOrchestrator
 from orchestra_ai.gateway.gateway import CallSpec, Message, Purpose, get_gateway
 from orchestra_ai.prompts.registry import PromptRegistry
-from orchestra_ai.schemas.contracts import Attribution
 
 router = APIRouter(prefix="/copilot", tags=["copilot"])
 
@@ -89,7 +88,9 @@ class RefineResponse(BaseModel):
     applied: bool
     definition: dict[str, Any] | None = None
     summary: str
-    issues: list[dict[str, Any]] = []
+    operations: list[AgentOperation] = Field(default_factory=list)
+    needs_input: list[str] = Field(default_factory=list)
+    issues: list[dict[str, Any]] = Field(default_factory=list)
     publishable: bool = False
     repair_passes: int = 0
 
@@ -98,15 +99,18 @@ class RefineResponse(BaseModel):
 async def refine(
     body: RefineRequest,
     ctx: Annotated[Ctx, Depends(require_service_token)],
-    orchestrator: CopilotOrchestrator = Depends(get_orchestrator),
 ) -> RefineResponse:
-    """Handle both ordinary Copilot questions and workflow refinements.
+    """Return a single, explicit agent plan for a draft.
 
-    The conversational agent gets first chance to answer. This fixes the old
-    behavior where every refinement was forced through graph assembly, which
-    could return no useful answer for questions such as "what is this step?".
-    Workflow mutations still go through the existing orchestrator and remain
-    server-authorized; the model never writes the database directly.
+    Python is the reasoning boundary. It does not persist or execute workflow
+    changes. The Node control plane remains responsible for validating and
+    applying operations through the authoritative tool/service layer.
+
+    The previous implementation generated an agent operation list and then
+    discarded it before invoking a second intent parser. That created two
+    competing planners and could replace the supplied draft with an unrelated
+    newly assembled definition. This endpoint now preserves the agent plan
+    verbatim and never claims that a mutation was applied.
     """
     require("refine_draft")
     try:
@@ -118,20 +122,12 @@ async def refine(
             history=[],
             attribution=ctx.attribution,
         )
-        if not agent.operations:
-            return RefineResponse(
-                applied=False,
-                definition=body.definition,
-                summary=agent.message,
-                publishable=False,
-            )
-
-        spec = await orchestrator._parse_intent(body.instruction, ctx.attribution)
-        definition = orchestrator._assemble_definition(spec)
         return RefineResponse(
-            applied=True,
-            definition=definition,
-            summary=agent.message or spec.summary,
+            applied=False,
+            definition=body.definition,
+            summary=agent.message,
+            operations=agent.operations,
+            needs_input=agent.needs_input,
             publishable=False,
         )
     except Exception as exc:
