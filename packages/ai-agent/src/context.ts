@@ -7,7 +7,7 @@ export interface WorkflowContextSnapshot {
   flow?: unknown;
   version?: unknown;
   selectedNode?: unknown;
-  connections?: unknown[];
+  connections?: Array<{ id: string; provider: string; name?: string }>;
   recentRuns?: unknown[];
   conversation?: AgentConversationTurn[];
 }
@@ -20,7 +20,16 @@ export class SafeAgentContextBuilder {
   constructor(private readonly loader: AgentContextLoader) {}
 
   async build(context: AgentContext): Promise<AgentContext & { snapshot: WorkflowContextSnapshot }> {
+    if (!context.workspaceId || !context.userId) {
+      throw new Error('workspaceId and userId are required for AI context');
+    }
     const snapshot = await this.loader.load(context);
-    return { ...context, snapshot };
+    return {
+      ...context,
+      snapshot: {
+        ...snapshot,
+        connections: snapshot.connections?.map(({ id, provider, name }) => ({ id, provider, name })),
+      },
+    };
   }
 }
