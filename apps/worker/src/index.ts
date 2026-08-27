@@ -1,11 +1,14 @@
 import { Worker } from "bullmq";
 import { runExecution } from "../../api/src/engine";
 import { connection } from "../../api/src/queue";
-import { tickSchedules } from "../../api/src/schedules";
-import { tickPolling } from "../../api/src/poll";
 import { isNonRetryableError } from "../../api/src/runtime-guards";
 
-new Worker(
+/**
+ * Execution worker only.
+ * Scheduling/polling discovery is owned by apps/scheduler and is dispatched
+ * into the same BullMQ execution queue for the worker to process.
+ */
+const worker = new Worker(
   "executions",
   async (job) => {
     const executionId = String(job.data.executionId);
@@ -16,17 +19,11 @@ new Worker(
       throw err;
     }
   },
-  { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 25) }
+  { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 25) },
 );
 
-async function tick() {
-  await tickSchedules();
-  await tickPolling();
-}
+worker.on("completed", (job) => console.log(`Execution ${job.data.executionId} completed`));
+worker.on("failed", (job, err) => console.error(`Execution ${job?.data?.executionId ?? "unknown"} failed`, err));
+worker.on("error", (err) => console.error("Worker error", err));
 
-setInterval(() => {
-  tick().catch((err) => console.error("schedule/poll tick", err));
-}, 60_000);
-tick().catch((err) => console.error("schedule/poll tick", err));
-
-console.log("Worker listening on executions queue + schedule/poll ticker");
+console.log("Worker listening on executions queue");
