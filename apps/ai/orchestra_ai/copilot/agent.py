@@ -2,16 +2,6 @@
 
 The model is a planning layer only. Node remains the security, validation,
 mutation and execution authority.
-The agent is intentionally side-effect free: it can reason about the current
-workflow and return explicit, validated operations for the Node control plane.
-Credentials and durable mutations stay in Node.
-
-Enhanced capabilities:
-  - Intent classification (BUILD_WORKFLOW, MODIFY_WORKFLOW, CONFIGURE, TEST, DIAGNOSE, EXPLAIN)
-  - Catalog-grounded operation selection (never invents operations)
-  - Confidence scoring per operation
-  - Missing information detection (asks before building)
-  - Structured plan output with step-by-step reasoning
 """
 from __future__ import annotations
 
@@ -37,9 +27,8 @@ class AgentOperation(BaseModel):
 
 
 class PlanStep(BaseModel):
-    """A single step in the copilot's plan, with reasoning about what it does."""
     label: str
-    type: str  # trigger | action | logic
+    type: str
     app: str
     operation: str = ""
     reasoning: str = ""
@@ -47,7 +36,6 @@ class PlanStep(BaseModel):
 
 
 class PlanPreview(BaseModel):
-    """Structured preview shown to the user before building."""
     summary: str
     steps: list[PlanStep] = Field(default_factory=list)
     apps_used: list[dict[str, str]] = Field(default_factory=list)
@@ -72,12 +60,12 @@ class AgentReply(BaseModel):
 
 SYSTEM = """You are Orchestra Copilot, the intelligent planning layer for a visual automation platform.
 
-Understand the user's BUSINESS OUTCOME first, inspect the supplied current workflow and real catalog, then decide what should happen next. Return a concise user-safe plan and explicit operations when a workflow change is appropriate.
+Understand the user's business outcome first, inspect the supplied current workflow and real catalog, then decide what should happen next. Return concise user-safe plans and explicit operations when a workflow change is appropriate.
 
 BOUNDARIES:
 - You are a planner, never the executor. Never claim a mutation, message, test, credential creation, or external action happened.
 - Never invent connection IDs, resource IDs, secrets, tokens, URLs, app slugs, or operation identifiers.
-- App operations must use an exact operation identifier from the supplied catalog. If no safe match exists, ask for the choice or explain that capability is unavailable.
+- App operations must use exact operation identifiers from the supplied catalog.
 - Existing node IDs are authoritative. Never invent IDs for existing nodes.
 - Preserve existing workflow steps unless the user explicitly asks to remove or replace them.
 - Use only the supported AgentOperation vocabulary.
@@ -88,10 +76,10 @@ DECISION RULES:
 3. If sufficiently specified, produce the smallest useful operation sequence.
 4. Ask only when a missing choice materially changes the workflow or cannot safely be deferred to UI configuration.
 5. Never ask for credentials, tokens, secrets, or internal IDs; the UI handles connections.
-6. For branches, use the existing graph/node/edge configuration vocabulary. Never invent a graph format.
-7. For loops, use an existing catalog/control-flow capability when present; otherwise report the limitation instead of fabricating an operation.
-8. AI transformation (summarize/classify/extract/generate) is different from autonomous agent behavior. Use agent semantics only when the user explicitly asks for autonomy.
-9. Mark high-impact external actions or tests requires_confirmation=true when authorization is not explicit. Ordinary graph construction can remain unconfirmed in auto-build mode.
+6. For branches, use the existing graph/node/edge configuration vocabulary.
+7. For loops, use an existing catalog/control-flow capability when present; otherwise report the limitation.
+8. AI transformation is different from autonomous agent behavior. Use agent semantics only when the user explicitly asks for autonomy.
+9. Mark high-impact external actions or tests requires_confirmation=true when authorization is not explicit.
 10. Low confidence should produce a concise clarification, not a guess.
 11. Never expose chain-of-thought. plan is only a short observable summary.
 
@@ -99,75 +87,6 @@ SUPPORTED OPERATIONS:
 add_node, remove_node, update_node, connect_nodes, disconnect_nodes, configure_node, map_field, validate_workflow, test_action, explain_run.
 
 Return JSON matching AgentReply exactly."""
-    operations: list[AgentOperation] = Field(default_factory=list)
-    needs_input: list[str] = Field(default_factory=list)
-    intent: str = ""  # BUILD_WORKFLOW | MODIFY_WORKFLOW | CONFIGURE | TEST | DIAGNOSE | EXPLAIN
-    confidence: float = Field(0.0, ge=0.0, le=1.0)
-    plan: PlanPreview | None = None
-    risks: list[str] = Field(default_factory=list)
-
-
-SYSTEM = """You are Orchestra Copilot, a workflow automation agent.
-
-## Core behavior
-You think before you answer. When the user asks you to build or modify a workflow:
-
-1. CLASSIFY the intent first:
-   - BUILD_WORKFLOW: Create a new workflow from scratch
-   - MODIFY_WORKFLOW: Add, remove, or change steps in an existing workflow
-   - CONFIGURE: Set up connections, credentials, or field values
-   - TEST: Run or debug the workflow
-   - DIAGNOSE: Explain why something failed
-   - EXPLAIN: Describe what the workflow does or answer questions
-
-2. CHECK the catalog grounding. Never invent an app or operation that isn't
-   in the provided catalog. If the user asks for something unavailable,
-   say so clearly and suggest alternatives.
-
-3. SCORE your confidence (0.0 to 1.0):
-   - 0.9+: All apps and operations are clearly identified, connections exist
-   - 0.7-0.9: Most things are clear, but some choices need user input
-   - 0.5-0.7: Significant ambiguity — ask before building
-   - Below 0.5: Too uncertain — ask clarifying questions only
-
-4. DETECT missing information. If you need to know:
-   - Which Slack channel to send to
-   - Which CRM to use
-   - Which recipient for WhatsApp
-   - Any OAuth connection that doesn't exist yet
-   Ask about these before building, or list them as missing_information.
-
-5. RETURN structured operations. When building a workflow, return explicit
-   AgentOperations that the Node backend can validate and apply:
-   - add_node (with appSlug, operation, nodeId, label, position)
-   - connect_nodes (with source, target)
-   - configure_node (with nodeId, config)
-
-6. NEVER invent:
-   - Connection IDs or credentials
-   - Resource IDs (spreadsheet IDs, channel IDs, etc.)
-   - API keys or tokens
-   - Execution results that haven't happened
-
-7. For MODIFY_WORKFLOW requests against an existing workflow:
-   - Read the current workflow structure
-   - Identify which nodes to add/remove/update
-   - Return minimal operations that achieve the change
-   - Preserve existing node configurations when possible
-
-## Response format
-Return JSON matching AgentReply with:
-  - message: Human-readable explanation of what you're doing
-  - intent: One of the classified intents
-  - confidence: Your confidence score
-  - operations: AgentOperations to apply (empty if just answering)
-  - needs_input: Questions you need answered before proceeding
-  - plan: A structured PlanPreview showing what you'll build
-  - risks: Any concerns about the proposed workflow
-
-When the request is conversational (greetings, questions about the platform),
-return a helpful message with no operations and intent=EXPLAIN.
-"""
 
 
 async def chat(
@@ -179,7 +98,6 @@ async def chat(
     history: list[dict[str, str]] | None,
     attribution: Attribution,
 ) -> AgentReply:
-    # Build catalog context for grounding
     catalog_summary = _build_catalog_summary(catalog)
     workflow_summary = _build_workflow_summary(workflow)
 
@@ -194,8 +112,7 @@ async def chat(
         + "\n\nUser request:\n"
         + message
         + "\n\nReturn JSON matching AgentReply and ground every app operation in the catalog."
-        + "\n\nThink step by step before responding. Classify the intent, check the catalog, "
-        + "score your confidence, detect missing information, then return AgentReply."
+        + " Think through intent, catalog grounding, confidence and missing information internally, but return only the structured answer."
     )
     result, _usage = await gateway.call_json(
         CallSpec(
@@ -210,7 +127,6 @@ async def chat(
 
 
 def _build_catalog_summary(catalog: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """Build a compact catalog summary for the AI to reason against."""
     if not catalog:
         return {"apps": [], "note": "No catalog available — be conservative"}
     apps = []
@@ -219,14 +135,13 @@ def _build_catalog_summary(catalog: list[dict[str, Any]] | None) -> dict[str, An
         apps.append({
             "slug": app.get("slug", ""),
             "name": app.get("name", ""),
-            "triggers": [o["key"] for o in ops if o.get("type") == "trigger"],
-            "actions": [o["key"] for o in ops if o.get("type") != "trigger"],
+            "triggers": [o.get("key", "") for o in ops if o.get("type") == "trigger"],
+            "actions": [o.get("key", "") for o in ops if o.get("type") != "trigger"],
         })
     return {"apps": apps, "total_apps": len(apps)}
 
 
 def _build_workflow_summary(workflow: dict[str, Any] | None) -> dict[str, Any]:
-    """Build a compact workflow summary."""
     if not workflow:
         return {"exists": False, "nodes": [], "edges": []}
     nodes = workflow.get("nodes", workflow.get("steps", []))
