@@ -7,6 +7,7 @@ import { runCopilotEngine } from "./copilot-engine";
 import { parseCopilotMode } from "./copilot-pipeline";
 import { probeAiService, signedAiJson, streamAiCopilotGenerate } from "./ai-service";
 import { listCatalogApps } from "./catalog";
+import { applyAgentOperations, type AgentOperation } from "./agent-operation-applier";
 
 const STAGE_FOR_DB: Record<string, string> = {
   connect: "connections",
@@ -262,19 +263,49 @@ export async function refineCopilotSession(opts: {
     );
 
     if (refined) {
-      // Python is the reasoning boundary. It must never claim a durable
-      // mutation here; Node remains responsible for validation and applying
-      // any returned operations through its authoritative service/tool layer.
+      const operations = (refined.operations ?? []) as AgentOperation[];
+      const operationResult = operations.length
+        ? await applyAgentOperations({
+            graph,
+            operations,
+            workspaceId: opts.orgId,
+            organizationId: opts.orgId,
+            allowDestructive: parseCopilotMode(opts.mode ?? session?.mode) === "auto_build",
+          })
+        : {
+            graph,
+            applied: [],
+            rejected: [],
+            needsConfirmation: [],
+            issues: [],
+          };
+
+      const nextGraph = operationResult.graph;
+      const changed = JSON.stringify(nextGraph) !== JSON.stringify(graph);
+      const definition = persistBuilderDraft(nextGraph);
+      const canPersist = operationResult.rejected.length === 0 && operationResult.needsConfirmation.length === 0;
+
+      if (changed && canPersist) {
+        await query(
+          `UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`,
+          [JSON.stringify(definition), opts.sessionId],
+        );
+      }
+
       return {
-        reply: refined.summary ?? "I prepared a plan for the requested change.",
-        graph,
-        definition: persistBuilderDraft(graph),
-        applied: false,
+        reply: refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change."),
+        graph: nextGraph,
+        definition,
+        applied: operationResult.applied.length > 0,
+        changed,
         summary: refined.summary,
-        operations: refined.operations ?? [],
+        operations,
+        applied_operations: operationResult.applied,
+        rejected_operations: operationResult.rejected,
+        needs_confirmation: operationResult.needsConfirmation,
         needs_input: refined.needs_input ?? [],
-        issues: refined.issues ?? [],
-        publishable: false,
+        issues: [...(refined.issues ?? []), ...operationResult.issues],
+        publishable: Boolean(refined.publishable) && operationResult.issues.length === 0 && operationResult.rejected.length === 0,
         source: "python-copilot",
       };
     }
