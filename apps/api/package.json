@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "migrate": "tsx src/migrate.ts",
     "seed": "tsx src/seed.ts",
-    "test": "npm run test:core && npm run test:guards",
+    "test": "npm run test:core && npm run test:guards && npm run test:orchestra",
     "test:core": "tsx --test src/adapters.test.ts src/agent-runtime.test.ts src/ai-service.test.ts src/catalog.test.ts src/copilot.test.ts src/copilot-orchestrator.test.ts src/copilot-engine.test.ts src/agent-operation-applier.test.ts src/app-connection-policy.test.ts src/cron.test.ts src/graph-normalize.test.ts src/interpolate.test.ts src/mcp.test.ts src/metering.test.ts",
     "test:orchestra": "tsx --test src/orchestra-core.test.ts && npm run test -w @algoverge/engine",
     "test:guards": "tsx --test src/runtime-guards.test.ts src/workflow-validation.test.ts"
@@ -29,6 +29,8 @@
     "ioredis": "^5.6.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.13.3",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
     "uuid": "^11.1.0",
     "zod": "^3.24.2"
   },
