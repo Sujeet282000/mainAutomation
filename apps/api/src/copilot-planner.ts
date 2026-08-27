@@ -57,7 +57,6 @@ function normalize(intent: PlannedCopilotIntent): PlannedCopilotIntent {
     steps: [...intent.steps]
       .sort((a, b) => a.order - b.order)
       .map((step, i) => ({ ...step, order: i + 1, appHint: step.appHint?.trim() || null, operation: step.operation?.trim() || null })),
-      .map((step, i) => ({ ...step, order: i + 1 })),
     conditions: (intent.conditions ?? []).map((c) => ({
       ...c,
       branches: c.branches.map((b) => ({ ...b, stepIds: b.stepIds ?? [] }))
@@ -114,15 +113,12 @@ export async function planCopilotIntent(opts: {
       "The catalog is grounding context; appHint should be null when uncertain.",
       "operationConfidence must reflect confidence in the catalog match, not confidence in the user's request.",
       "Ask an ambiguity only when a missing choice materially changes the workflow. Never ask for credentials, tokens, IDs, or secrets that can be selected later by the UI.",
-      "Do not output chain-of-thought. summary is a short user-safe explanation."
+      "Do not output chain-of-thought. summary is a short user-safe explanation.",
       "Return JSON with: summary, goal, trigger, steps, conditions, clarificationQuestions, confidence, ambiguities.",
-      "Each step must describe one meaningful action or control-flow intent in execution order.",
-      "Use intentKind=ai for summarization, classification, extraction, generation or transformation; use agent only when the user explicitly asks an autonomous agent to act.",
-      "Do not invent operation identifiers. The catalog is grounding context; appHint should be null when uncertain.",
       "conditions: if the user describes branching (if/else, qualified/not, yes/no), create conditions with labeled branches mapping to stepIds.",
       "clarificationQuestions: ask ONLY when a missing choice materially changes the workflow. Each question should have concrete options derived from the catalog. Never ask for credentials, tokens, IDs, or secrets that can be selected later by the UI. Empty array if nothing is ambiguous.",
       "confidence: 0.0-1.0 based on how well you understand the request and how many integrations are well-specified.",
-      "Do not output chain-of-thought. summary is a short user-safe explanation. goal is the high-level user objective."
+      "goal is the high-level user objective."
     ].join(" ")
   });
 
