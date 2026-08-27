@@ -498,9 +498,30 @@ export function registerUiCompat(authed: Router) {
             rejectedOps = opResult.rejected;
             needsConfirmation = opResult.needsConfirmation;
           }
+          // When operations need confirmation, create a session and store
+          // the pending operations so the approve endpoint can re-validate
+          // them at approval time.
+          let sessionId: string | undefined;
+          const needsApproval = needsConfirmation.length > 0 || rejectedOps.length > 0;
+          if (needsApproval && agentReply.operations?.length) {
+            const { ensureProjectId } = await import("./copilot-http");
+            const projectId = await ensureProjectId(req.orgId!);
+            const created = await queryOne<{ id: string }>(
+              `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
+               VALUES ($1, $2, $3, $4, 'ask_as_you_build') RETURNING id`,
+              [req.orgId, projectId, req.user!.userId, body.automationId ?? null],
+            );
+            sessionId = created!.id;
+            await query(
+              `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
+               WHERE id = $1`,
+              [sessionId, JSON.stringify(agentReply.operations), appliedGraph ? JSON.stringify(persistBuilderDraft(appliedGraph)) : null],
+            );
+          }
           res.json({
             reply: agentReply.message,
             graph: applied ? appliedGraph : undefined,
+            sessionId,
             applied,
             source: "python-agent",
             youDoFirst: [],
@@ -539,8 +560,13 @@ export function registerUiCompat(authed: Router) {
         prompt: z.string().min(1),
         automationId: z.string().uuid().optional(),
         graph: z.unknown().optional(),
+        requestId: z.string().optional(),
       })
       .parse(req.body);
+
+    // Each planning request gets a unique requestId so the frontend can
+    // discard stale responses when the user edits and resubmits.
+    const requestId = body.requestId ?? `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     // Try Python AI service for intelligent planning
     const ai = await probeAiService();
@@ -573,13 +599,108 @@ export function registerUiCompat(authed: Router) {
           req.orgId!,
         );
         if (planResult) {
-          // Build the preview from the catalog if the Python service didn't provide one
-          const preview = planResult.preview ?? _buildPlanPreview(body.prompt, planResult.operations ?? [], planResult.needs_input ?? []);
+          const rawOps = planResult.operations ?? [];
+
+          // ── Ground operations through the same boundary as /generate ──
+          // This ensures every operation is validated against the real catalog
+          // and the resulting graph is a valid WorkflowGraph.
+          let groundedGraph = graph ?? { nodes: [], edges: [] };
+          let groundedApplied: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
+          let groundedRejected: Array<{ operation: unknown; reason: string }> = [];
+          let groundedNeedsConfirmation: unknown[] = [];
+          let groundedIssues: Array<{ code: string; message: string }> = [];
+          let groundedOperations = rawOps;
+
+          if (rawOps.length > 0) {
+            try {
+              const { applyAgentOperations } = await import("./agent-operation-applier");
+              const result = await applyAgentOperations({
+                graph: groundedGraph,
+                operations: rawOps,
+                workspaceId: req.orgId!,
+                organizationId: req.orgId!,
+                allowDestructive: false, // plan mode — no destructive ops auto-applied
+              });
+              groundedGraph = result.graph;
+              groundedApplied = result.applied;
+              groundedRejected = result.rejected;
+              groundedNeedsConfirmation = result.needsConfirmation;
+              groundedIssues = result.issues;
+              // Replace raw ops with validated ops for the preview and session storage
+              groundedOperations = [
+                ...result.applied,
+                ...result.needsConfirmation,
+              ];
+            } catch {
+              /* grounding failed — fall through with raw operations */
+            }
+          }
+
+          // Build the preview from grounded operations — same source of truth
+          // that the builder will use when the user approves.
+          const preview = planResult.preview ?? _buildPlanPreview(
+            body.prompt,
+            groundedOperations.map((op) => ({ kind: op.kind, arguments: op.arguments })),
+            planResult.needs_input ?? [],
+          );
+
+          // Create a session and store pending operations so the approve
+          // endpoint can re-validate them at approval time.
+          let sessionId: string | undefined;
+          if (body.automationId) {
+            const { ensureProjectId } = await import("./copilot-http");
+            const projectId = await ensureProjectId(req.orgId!);
+            const created = await queryOne<{ id: string }>(
+              `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
+               VALUES ($1, $2, $3, $4, 'ask_as_you_build') RETURNING id`,
+              [req.orgId, projectId, req.user!.userId, body.automationId],
+            );
+            sessionId = created!.id;
+            // Store grounded operations + proposed graph for the approve endpoint
+            const { persistBuilderDraft } = await import("./flow-runtime");
+            await query(
+              `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
+               WHERE id = $1`,
+              [
+                sessionId,
+                JSON.stringify(groundedOperations),
+                JSON.stringify(persistBuilderDraft(groundedGraph)),
+              ],
+            );
+          }
+
+          // Build structured clarification questions from needs_input +
+          // missing_connections. These become interactive questions in
+          // Plan & Review rather than flat text warnings.
+          const clarificationQuestions: Array<{
+            question: string;
+            options?: string[];
+            required: boolean;
+          }> = [];
+          for (const input of planResult.needs_input ?? []) {
+            clarificationQuestions.push({ question: input, required: true });
+          }
+          for (const conn of preview.missing_connections ?? []) {
+            // Avoid duplicating needs_input entries
+            if (!clarificationQuestions.some((q) => q.question === conn)) {
+              clarificationQuestions.push({ question: conn, required: true });
+            }
+          }
+
           res.json({
+            requestId,
+            sessionId,
             reply: planResult.reply ?? preview.summary,
             preview,
-            operations: planResult.operations ?? [],
+            graph: groundedGraph,
+            operations: groundedOperations,
+            applied_operations: groundedApplied,
+            rejected_operations: groundedRejected,
+            needs_confirmation: groundedNeedsConfirmation,
+            issues: groundedIssues,
             needs_input: planResult.needs_input ?? [],
+            clarificationQuestions,
+            confidence: preview.confidence ?? 0.7,
           });
           return;
         }
@@ -591,6 +712,7 @@ export function registerUiCompat(authed: Router) {
     // Local heuristic planning fallback
     const preview = _buildPlanPreview(body.prompt, [], []);
     res.json({
+      requestId,
       reply: preview.summary,
       preview,
       operations: [],

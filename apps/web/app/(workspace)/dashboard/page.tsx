@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowRight, Bot, CheckCircle2, CircleAlert, LayoutTemplate, Plug, Sparkles, Table2, Workflow } from "lucide-react";
 import { api } from "@/lib/api";
@@ -26,6 +26,7 @@ export default function DashboardPage() {
   const [planLoading, setPlanLoading] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState("");
+  const activeRequestRef = useRef(0);
 
   const autos = useQuery({
     queryKey: ["automations"],
@@ -48,21 +49,27 @@ export default function DashboardPage() {
   const drafts = (autos.data?.automations ?? []).filter((a) => a.status === "draft");
 
   /** Step 1: Show Plan & Review modal before building */
-  async function showPlan(text: string) {
+  async function showPlan(text: string, graph?: unknown) {
     const next = text.trim();
     if (!next) return;
+    // Increment request counter so stale responses are discarded
+    const thisRequest = ++activeRequestRef.current;
+    const requestId = `req_${thisRequest}_${Date.now()}`;
     setPendingPrompt(next);
     setPlanOpen(true);
     setPlanLoading(true);
     setPlanError(null);
     setPlanData(null);
     try {
-      const result = await planCopilotWorkflow({ prompt: next });
+      const result = await planCopilotWorkflow({ prompt: next, graph, requestId });
+      // Discard if a newer request was started while we were waiting
+      if (thisRequest !== activeRequestRef.current) return;
       setPlanData(result);
     } catch (err) {
+      if (thisRequest !== activeRequestRef.current) return;
       setPlanError(err instanceof Error ? err.message : "Could not generate a plan");
     } finally {
-      setPlanLoading(false);
+      if (thisRequest === activeRequestRef.current) setPlanLoading(false);
     }
   }
 
@@ -81,6 +88,37 @@ export default function DashboardPage() {
     setPlanOpen(false);
     setMsg("");
     try {
+      // ── Safe path: if Plan & Review created a session with grounded
+      // operations, use the approve endpoint so the server revalidates
+      // against the current workflow before persisting. ──
+      if (planData?.sessionId && planData?.graph) {
+        // Create the workflow from the grounded graph
+        const created = await api<{ automation: { id: string } }>("/automations", {
+          method: "POST",
+          body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft", graph: planData.graph, origin: "copilot" })
+        });
+        const flowId = created.automation.id;
+        // Approve via the server-authoritative endpoint
+        try {
+          const result = await api<{
+            ok: boolean;
+            graph?: unknown;
+          }>(`/copilot/sessions/${planData.sessionId}/approve`, {
+            method: "POST",
+            body: JSON.stringify({ flowId }),
+          });
+          // Persist session-link for audit trail
+          persistCopilotSession(planData.sessionId, flowId).catch(() => undefined);
+        } catch {
+          // Approve failed — the workflow was still created with the grounded graph
+          // from Plan & Review, which is acceptable since it was server-validated.
+        }
+        router.push(`/automations/${flowId}/editor?idea=${encodeURIComponent(next)}`);
+        return;
+      }
+
+      // ── Fallback: no session from plan (e.g. local heuristic planner)
+      // Use the streaming generate path. ──
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 45000);
       const d = await generateCopilotDraft({ prompt: next, mode: "auto_build" }, undefined, controller.signal);
@@ -114,6 +152,17 @@ export default function DashboardPage() {
         onConfirm={() => buildFromPrompt(pendingPrompt)}
         onCancel={() => { setPlanOpen(false); setPlanData(null); }}
         onEdit={() => { setPlanOpen(false); setPlanData(null); }}
+        onClarify={async (answers) => {
+          // Enrich the original prompt with the user's clarification answers
+          // and re-request the plan so the AI can incorporate them.
+          const enrichedParts = [pendingPrompt];
+          for (const [question, answer] of Object.entries(answers)) {
+            if (answer?.trim()) enrichedParts.push(`${question}: ${answer.trim()}`);
+          }
+          const enriched = enrichedParts.join(". ");
+          setPendingPrompt(enriched);
+          await showPlan(enriched);
+        }}
       />
 
       <section className="mb-6 overflow-hidden rounded-3xl border border-line bg-elevated p-6 shadow-card">

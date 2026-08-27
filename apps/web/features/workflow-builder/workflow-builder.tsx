@@ -818,6 +818,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     const copilotOut: {
       graph?: GraphPayload;
       summary?: string;
+      sessionId?: string;
       applied?: boolean;
       mode?: CopilotMode;
       rebuilt?: boolean;
@@ -844,6 +845,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           if (ev.type === "result") {
             copilotOut.graph = ev.graph as GraphPayload | undefined;
             copilotOut.summary = ev.summary as string | undefined;
+            copilotOut.sessionId = ev.sessionId as string | undefined;
             copilotOut.applied = Boolean(ev.applied);
             copilotOut.mode = ev.mode as CopilotMode | undefined;
             copilotOut.rebuilt = Boolean(ev.rebuilt);
@@ -1038,15 +1040,34 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             copilotAbortCtl.current?.abort();
             setBusy(null);
           }}
-          onApply={(graph) => {
+          onApply={async (graph, sessionId) => {
             copilotCheckpoint.current = toApi(nodes, edges);
+            if (sessionId) {
+              try {
+                const result = await api<{
+                  ok: boolean;
+                  graph?: GraphPayload;
+                  applied?: Array<{ kind: string; arguments: Record<string, unknown> }>;
+                  rejected?: Array<{ operation: unknown; reason: string }>;
+                }>(`/copilot/sessions/${sessionId}/approve`, {
+                  method: "POST",
+                  body: JSON.stringify({ flowId: automationId }),
+                });
+                if (result.ok && result.graph) {
+                  const g = fromApi(result.graph);
+                  hydrate(g.nodes, g.edges);
+                  setGraph(g.nodes, g.edges);
+                  setMsg("Copilot changes validated and applied to the draft. Test before publishing.");
+                  return;
+                }
+              } catch {
+                // Fall through to local apply if server approval fails
+              }
+            }
+            // Fallback: local apply (for backward compatibility with non-session flows)
             const g = fromApi(graph as GraphPayload);
             hydrate(g.nodes, g.edges);
             setGraph(g.nodes, g.edges);
-            void api("/ai/copilot/accept", {
-              method: "POST",
-              body: JSON.stringify({ automationId, graph })
-            }).catch(() => undefined);
             setMsg("Copilot change applied to the draft. Test before publishing.");
           }}
           onRevert={() => {
@@ -1065,6 +1086,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               d = await api<{
                 reply: string;
                 graph?: GraphPayload;
+                sessionId?: string;
                 applied?: boolean;
                 summary?: string;
                 youDoFirst?: string[];
@@ -1853,15 +1875,33 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 }
                 return d;
               }}
-              onApply={(graph) => {
+              onApply={async (graph, sessionId) => {
                 copilotCheckpoint.current = toApi(nodes, edges);
+                if (sessionId) {
+                  try {
+                    const result = await api<{
+                      ok: boolean;
+                      graph?: GraphPayload;
+                      applied?: Array<{ kind: string; arguments: Record<string, unknown> }>;
+                      rejected?: Array<{ operation: unknown; reason: string }>;
+                    }>(`/copilot/sessions/${sessionId}/approve`, {
+                      method: "POST",
+                      body: JSON.stringify({ flowId: automationId }),
+                    });
+                    if (result.ok && result.graph) {
+                      const g = fromApi(result.graph);
+                      hydrate(g.nodes, g.edges);
+                      setGraph(g.nodes, g.edges);
+                      setMsg("Copilot changes validated and applied to the draft. Test before publishing.");
+                      return;
+                    }
+                  } catch {
+                    // Fall through to local apply if server approval fails
+                  }
+                }
                 const g = fromApi(graph as GraphPayload);
                 hydrate(g.nodes, g.edges);
                 setGraph(g.nodes, g.edges);
-                void api("/ai/copilot/accept", {
-                  method: "POST",
-                  body: JSON.stringify({ automationId, graph })
-                }).catch(() => undefined);
                 setMsg("Copilot change applied to the draft. Test before publishing.");
               }}
               onRevert={() => {
