@@ -3,30 +3,32 @@
   "private": true,
   "version": "0.1.0",
   "description": "Orchestra — AI-Native Workflow Automation and Orchestration Platform",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "concurrently -n api,web,worker,ai -c blue,green,magenta,cyan \"npm run dev -w @algoverge/api\" \"npm run dev -w @algoverge/web\" \"npm run dev -w @algoverge/worker\" \"npm run dev:ai\"",
     "dev:api": "npm run dev -w @algoverge/api",
     "dev:web": "npm run dev -w @algoverge/web",
     "dev:worker": "npm run dev -w @algoverge/worker",
+    "dev:scheduler": "npm run dev -w @algoverge/scheduler",
     "dev:ai": "cd apps/ai && python -m uvicorn main:app --reload --port 8000",
     "migrate": "npm run migrate -w @algoverge/api",
     "seed": "npm run seed -w @algoverge/api",
     "docker:up": "docker compose up -d postgres redis",
     "docker:down": "docker compose down",
+<<<<<<< HEAD
     "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/api",
     "test": "npm run test -w @algoverge/api",
     "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit"
+=======
+    "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/engine && npm run build -w @algoverge/api && npm run build -w @algoverge/web && npm run build -w @algoverge/worker && npm run build -w @algoverge/scheduler",
+    "test": "npm run test -w @algoverge/api && npm run test -w @algoverge/engine",
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p packages/engine/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && tsc -p apps/scheduler/tsconfig.json --noEmit"
+>>>>>>> 2fc2a3e3137b8aba357a6d1ccb57fda4bb44ce90
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
     "turbo": "^2.4.4",
     "typescript": "^5.8.2"
   },
-  "engines": {
-    "node": ">=20"
-  }
+  "engines": { "node": ">=20" }
 }
