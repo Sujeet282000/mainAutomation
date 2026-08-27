@@ -1,5 +1,5 @@
 import { Queue, Worker } from "bullmq";
-import { connection } from "../../api/src/queue";
+import { connection } from "./redis";
 import { db } from "@algoverge/db";
 import { Executor } from "@algoverge/engine";
 
@@ -26,6 +26,7 @@ console.log("Worker listening on flow-steps queue");
 const shutdown = async () => {
   await worker.close();
   await transitionQueue.close();
+  await connection.quit();
   process.exit(0);
 };
 process.once("SIGTERM", () => void shutdown());
