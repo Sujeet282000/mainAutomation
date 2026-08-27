@@ -17,6 +17,121 @@ function catalogApps() {
   return listCatalogApps();
 }
 
+/**
+ * Build a plan preview from prompt heuristics for the Plan & Review modal.
+ * This is the fallback when the Python AI service is unavailable.
+ */
+function _buildPlanPreview(
+  prompt: string,
+  operations: Array<{ kind: string; arguments: Record<string, unknown> }> = [],
+  needsInput: string[] = [],
+) {
+  const lower = prompt.toLowerCase();
+  const apps = APP_CATALOG;
+  const usedApps: Array<{ name: string; slug: string }> = [];
+  const steps: Array<{ label: string; type: string; app: string }> = [];
+  const missingConnections: string[] = [];
+  const missingInfo = [...needsInput];
+  let confidence = 0.7;
+
+  // Detect apps from prompt
+  const appHints: Array<{ re: RegExp; slug: string }> = [
+    { re: /gmail|inbox|email/i, slug: "gmail" },
+    { re: /google sheet|spreadsheet|sheets/i, slug: "google-sheets" },
+    { re: /calendar|meeting/i, slug: "google-calendar" },
+    { re: /slack/i, slug: "slack" },
+    { re: /hubspot|crm/i, slug: "hubspot" },
+    { re: /whatsapp/i, slug: "whatsapp" },
+    { re: /openai|chatgpt|ai/i, slug: "openai" },
+    { re: /webhook|http post/i, slug: "webhook" },
+    { re: /schedule|cron|every day/i, slug: "schedule" },
+    { re: /form|typeform/i, slug: "typeform" },
+    { re: /github/i, slug: "github" },
+    { re: /discord/i, slug: "discord" },
+    { re: /telegram/i, slug: "telegram" },
+  ];
+
+  const detectedSlugs = new Set<string>();
+  for (const hint of appHints) {
+    if (hint.re.test(lower) && !detectedSlugs.has(hint.slug)) {
+      const app = apps.find((a) => a.slug === hint.slug);
+      if (app) {
+        detectedSlugs.add(hint.slug);
+        usedApps.push({ name: app.name, slug: app.slug });
+      }
+    }
+  }
+
+  // Detect trigger type
+  if (/schedule|cron|every day|every morning|hourly/i.test(lower)) {
+    steps.push({ label: "Schedule Trigger", type: "trigger", app: "schedule" });
+  } else if (/webhook|http post|catch hook/i.test(lower)) {
+    steps.push({ label: "Webhook Trigger", type: "trigger", app: "webhook" });
+  } else if (/form|typeform|submitted/i.test(lower)) {
+    steps.push({ label: "Form Submission", type: "trigger", app: "typeform" });
+  } else {
+    // Find the first app with a trigger
+    const triggerApp = detectedSlugs.size > 0 ? [...detectedSlugs][0] : "manual";
+    const app = apps.find((a) => a.slug === triggerApp);
+    const triggerOp = app?.operations.find((o) => o.type === "trigger");
+    steps.push({
+      label: triggerOp?.name ?? `${app?.name ?? triggerApp} Trigger`,
+      type: "trigger",
+      app: app?.name ?? triggerApp,
+    });
+  }
+
+  // Add actions for detected apps (skip the first one which is the trigger)
+  let actionIndex = 0;
+  for (const slug of detectedSlugs) {
+    if (actionIndex === 0 && steps[0]?.app === slug) {
+      actionIndex++;
+      continue;
+    }
+    const app = apps.find((a) => a.slug === slug);
+    if (!app) continue;
+    const actionOp = app.operations.find((o) => o.type !== "trigger");
+    steps.push({
+      label: actionOp?.name ?? app.name,
+      type: actionOp?.type === "logic" ? "logic" : "action",
+      app: app.name,
+    });
+    actionIndex++;
+  }
+
+  // If no steps detected, add generic ones
+  if (steps.length <= 1) {
+    steps.push({ label: "Action", type: "action", app: "HTTP" });
+  }
+
+  // Check for missing connections
+  const SKIP_AUTH = new Set(["webhook", "http", "manual", "schedule", "forms"]);
+  for (const step of steps) {
+    const app = apps.find((a) => a.name === step.app || a.slug === step.app.toLowerCase().replace(/\s+/g, "-"));
+    if (app && !SKIP_AUTH.has(app.slug) && (app.authType ?? "none") !== "none") {
+      missingConnections.push(`Connect ${app.name} account`);
+    }
+  }
+
+  // Deduplicate missing connections
+  const uniqueMissing = [...new Set(missingConnections)];
+
+  // Calculate confidence based on how many apps were detected
+  if (detectedSlugs.size >= 2) confidence = 0.85;
+  else if (detectedSlugs.size === 1) confidence = 0.7;
+  else confidence = 0.5;
+
+  return {
+    summary: `I'll create a workflow that: ${steps.map((s) => s.label).join(" → ")}`,
+    steps,
+    apps_used: usedApps,
+    missing_connections: uniqueMissing,
+    missing_information: missingInfo,
+    confidence,
+    reasoning: `Detected ${detectedSlugs.size} app(s) from your prompt. ${steps.length} step(s) planned.`,
+  };
+}
+
 function mapConnStatus(status: string) {
   if (status === "active") return "connected";
   return status;
@@ -416,6 +531,71 @@ export function registerUiCompat(authed: Router) {
       lastTest: body.lastTest ?? null,
     });
     res.json(result);
+  });
+
+  authed.post("/ai/copilot/plan", async (req, res) => {
+    const body = z
+      .object({
+        prompt: z.string().min(1),
+        automationId: z.string().uuid().optional(),
+        graph: z.unknown().optional(),
+      })
+      .parse(req.body);
+
+    // Try Python AI service for intelligent planning
+    const ai = await probeAiService();
+    if (ai.reachable) {
+      try {
+        const definition = body.graph ? persistBuilderDraft(body.graph) : {};
+        const planResult = await signedAiJson<{
+          reply?: string;
+          preview?: {
+            summary: string;
+            steps: Array<{ label: string; type: string; app: string }>;
+            apps_used: Array<{ name: string; slug: string }>;
+            missing_connections: string[];
+            missing_information: string[];
+            confidence: number;
+          };
+          operations?: Array<{ kind: string; arguments: Record<string, unknown> }>;
+          needs_input?: string[];
+        }>(
+          "/copilot/plan",
+          {
+            message: body.prompt,
+            workflow: definition,
+            catalog: APP_CATALOG.map((a) => ({
+              slug: a.slug,
+              name: a.name,
+              operations: a.operations.map((o) => ({ key: o.key, name: o.name, type: o.type })),
+            })),
+          },
+          req.orgId!,
+        );
+        if (planResult) {
+          // Build the preview from the catalog if the Python service didn't provide one
+          const preview = planResult.preview ?? _buildPlanPreview(body.prompt, planResult.operations ?? [], planResult.needs_input ?? []);
+          res.json({
+            reply: planResult.reply ?? preview.summary,
+            preview,
+            operations: planResult.operations ?? [],
+            needs_input: planResult.needs_input ?? [],
+          });
+          return;
+        }
+      } catch {
+        /* Python service unavailable — fall through to local planner */
+      }
+    }
+
+    // Local heuristic planning fallback
+    const preview = _buildPlanPreview(body.prompt, [], []);
+    res.json({
+      reply: preview.summary,
+      preview,
+      operations: [],
+      needs_input: [],
+    });
   });
 
   authed.post("/ai/copilot/diagnose-run", async (req, res) => {

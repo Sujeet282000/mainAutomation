@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -6,10 +6,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowRight, Bot, CheckCircle2, CircleAlert, LayoutTemplate, Plug, Sparkles, Table2, Workflow } from "lucide-react";
 import { api } from "@/lib/api";
-import { generateCopilotDraft, persistCopilotSession } from "@/lib/copilot";
+import { generateCopilotDraft, persistCopilotSession, planCopilotWorkflow, type CopilotPlanResult } from "@/lib/copilot";
 import { Card } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
+import { PlanReviewModal } from "@/features/workflow-builder/plan-review-modal";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -18,6 +19,14 @@ export default function DashboardPage() {
   const [msg, setMsg] = useState("");
   const [ask, setAsk] = useState<"idle" | "trigger" | "action">("idle");
   const [triggerHint, setTriggerHint] = useState("");
+
+  // Plan & Review state
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planData, setPlanData] = useState<CopilotPlanResult | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState("");
+
   const autos = useQuery({
     queryKey: ["automations"],
     queryFn: () => api<{ automations: Array<{ id: string; name: string; status: string }> }>("/automations")
@@ -38,6 +47,26 @@ export default function DashboardPage() {
   const failedRuns = (runs.data?.executions ?? []).filter((r) => r.status === "failed").length;
   const drafts = (autos.data?.automations ?? []).filter((a) => a.status === "draft");
 
+  /** Step 1: Show Plan & Review modal before building */
+  async function showPlan(text: string) {
+    const next = text.trim();
+    if (!next) return;
+    setPendingPrompt(next);
+    setPlanOpen(true);
+    setPlanLoading(true);
+    setPlanError(null);
+    setPlanData(null);
+    try {
+      const result = await planCopilotWorkflow({ prompt: next });
+      setPlanData(result);
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : "Could not generate a plan");
+    } finally {
+      setPlanLoading(false);
+    }
+  }
+
+  /** Step 2: User confirms the plan — build the workflow */
   async function buildFromPrompt(text: string) {
     const next = text.trim();
     if (!next) return;
@@ -49,6 +78,7 @@ export default function DashboardPage() {
       return;
     }
     setBuilding(true);
+    setPlanOpen(false);
     setMsg("");
     try {
       const controller = new AbortController();
@@ -75,31 +105,42 @@ export default function DashboardPage() {
 
   return (
     <div>
+      {/* Plan & Review Modal */}
+      <PlanReviewModal
+        open={planOpen}
+        plan={planData}
+        loading={planLoading}
+        error={planError}
+        onConfirm={() => buildFromPrompt(pendingPrompt)}
+        onCancel={() => { setPlanOpen(false); setPlanData(null); }}
+        onEdit={() => { setPlanOpen(false); setPlanData(null); }}
+      />
+
       <section className="mb-6 overflow-hidden rounded-3xl border border-line bg-elevated p-6 shadow-card">
         <p className="inline-flex items-center gap-2 text-xs font-medium text-violet-700">
           <Sparkles className="h-4 w-4" /> Copilot
         </p>
         <h1 className="mt-2 text-2xl font-semibold">What should this workflow do?</h1>
         <p className="mt-1 max-w-2xl text-sm text-ink-muted">
-          Describe a trigger and actions. Copilot outlines the draft, reuses a connected account when one exists, and maps fields it is confident about. You still connect missing apps, test, and publish.
+          Describe a trigger and actions. Copilot will show you a plan before building — review it, then confirm to create the workflow.
         </p>
         <form
           className="mt-4 rounded-2xl border border-line bg-muted/30 p-3"
           onSubmit={(e) => {
             e.preventDefault();
-            void buildFromPrompt(prompt);
+            void showPlan(prompt);
           }}
         >
           <textarea
             className="min-h-[88px] w-full resize-none bg-transparent text-sm outline-none"
-            placeholder="Chat with Copilot — for example: When a Gmail arrives, add a Google Sheets row"
+            placeholder="Describe what you want to automate — for example: When a Gmail arrives, analyze it with AI and send qualified leads to Slack"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
           <div className="mt-2 flex items-center justify-between">
             <p className="text-[10px] text-ink-muted">Copilot is AI and can make mistakes. It cannot sign in or publish.</p>
-            <Button type="submit" disabled={building || !prompt.trim()}>
-              {building ? "Working…" : "Build"}
+            <Button type="submit" disabled={building || planLoading || !prompt.trim()}>
+              {building ? "Working…" : planLoading ? "Planning…" : "Build"}
             </Button>
           </div>
         </form>
@@ -138,7 +179,7 @@ export default function DashboardPage() {
                       return;
                     }
                     setAsk("idle");
-                    void buildFromPrompt(idea);
+                    void showPlan(idea);
                   }}
                 >
                   {label}
@@ -150,8 +191,9 @@ export default function DashboardPage() {
         <div className="mt-3 flex flex-wrap gap-2">
           {[
             "When a Gmail arrives, add a Google Sheets row",
-            "Every morning, summarize today’s Calendar in Slack",
-            "Catch a webhook and POST it to HTTP"
+            "Every morning, summarize today's Calendar in Slack",
+            "Catch a webhook and POST it to HTTP",
+            "When a new lead comes in, analyze it with AI and send qualified leads to Slack"
           ].map((chip) => (
             <button
               key={chip}

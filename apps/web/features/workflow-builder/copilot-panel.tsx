@@ -220,6 +220,7 @@ export function CopilotPanel({
   const collapsed = !open || minimized;
   const chips = draftConfigured
     ? [
+        "Test this workflow",
         "What is happening?",
         "What should I do first?",
         "Fill this step",
