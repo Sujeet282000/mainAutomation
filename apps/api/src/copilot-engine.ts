@@ -10,12 +10,14 @@ import { copilotTodos } from "./copilot-pipeline";
 import { CatalogIndex } from "./pieces/catalog-index";
 import { pieceRegistry, type OperationCard } from "./pieces/registry";
 import { validateWorkflowGraph } from "./workflow-validation";
+import { planCopilotIntent, type PlannedCopilotIntent } from "./copilot-planner";
 
 const Intent = z.object({
   summary: z.string(),
   trigger: z.object({
     phrase: z.string(),
     appHint: z.string().nullable().optional(),
+    operation: z.string().nullable().optional(),
     kind: z.enum(["app_event", "schedule", "webhook", "form", "chat", "manual"]).default("app_event")
   }),
   steps: z.array(
@@ -23,6 +25,7 @@ const Intent = z.object({
       order: z.number().int(),
       phrase: z.string(),
       appHint: z.string().nullable().optional(),
+      operation: z.string().nullable().optional(),
       intentKind: z.enum(["app_action", "ai", "agent", "http", "code", "table"]).default("app_action")
     })
   ),
@@ -79,45 +82,55 @@ export function parseIntentHeuristic(prompt: string): TIntent {
     if (andParts.length > 1) {
       return Intent.parse({
         summary: text.slice(0, 160),
-        trigger: { phrase: andParts[0], appHint: null, kind },
-        steps: andParts.slice(1).map((phrase, i) => ({ order: i + 1, phrase, appHint: null, intentKind: "app_action" as const })),
+        trigger: { phrase: andParts[0], appHint: null, operation: null, kind },
+        steps: andParts.slice(1).map((phrase, i) => ({ order: i + 1, phrase, appHint: null, operation: null, intentKind: "app_action" as const })),
         ambiguities: []
       });
     }
   }
   return Intent.parse({
     summary: text.slice(0, 160),
-    trigger: { phrase: triggerPhrase, appHint: null, kind },
+    trigger: { phrase: triggerPhrase, appHint: null, operation: null, kind },
     steps: (stepPhrases.length ? stepPhrases : []).map((phrase, i) => ({
       order: i + 1,
       phrase,
       appHint: null,
+      operation: null,
       intentKind: /summar|score|classif|extract|ai|openai/i.test(phrase) ? ("ai" as const) : ("app_action" as const)
     })),
     ambiguities: []
   });
 }
 
-async function pickBestCard(index: CatalogIndex, phrase: string, kind: "trigger" | "action"): Promise<{ card: OperationCard; confidence: number; reason: string } | null> {
+function intentFromPlanner(plan: PlannedCopilotIntent): TIntent {
+  return Intent.parse({
+    summary: plan.summary,
+    trigger: plan.trigger,
+    steps: plan.steps,
+    ambiguities: plan.ambiguities
+  });
+}
+
+async function pickBestCard(index: CatalogIndex, phrase: string, kind: "trigger" | "action", exactOperation?: string | null): Promise<{ card: OperationCard; confidence: number; reason: string } | null> {
   const cands = await index.search(phrase, kind, 12);
   if (!cands.length) return null;
+  const exact = exactOperation ? cands.find((c) => c.operation === exactOperation) : undefined;
   const lower = phrase.toLowerCase();
   const named = cands.filter((c) => {
     const piece = c.piece.replace(/-/g, " ");
     return lower.includes(c.piece) || lower.includes(piece) || lower.includes(c.pieceDisplay.toLowerCase());
   });
-  const card = (named[0] ?? cands[0]);
+  const card = exact ?? named[0] ?? cands[0];
   return {
     card,
-    confidence: named[0] ? 0.86 : 0.62,
-    reason: `Retrieved among ${cands.length} catalog candidates; selected ${card.pieceDisplay} → ${card.display}`
+    confidence: exact ? 0.98 : named[0] ? 0.86 : 0.62,
+    reason: exact
+      ? `AI selected exact catalog operation ${card.pieceDisplay} → ${card.display}`
+      : `Retrieved among ${cands.length} catalog candidates; selected ${card.pieceDisplay} → ${card.display}`
   };
 }
 
-/**
- * Spec Part 6 — real staged Copilot generate (build-time plane).
- * Yields SSE events as stages run. Never publishes. Never creates credentials.
- */
+/** Spec Part 6 — real staged Copilot generate (build-time plane). */
 export async function* runCopilotEngine(opts: {
   prompt: string;
   workspaceId?: string | null;
@@ -128,23 +141,34 @@ export async function* runCopilotEngine(opts: {
   const prompt = opts.prompt.trim();
   yield { type: "stage", stage: "intent", label: "Understanding your request" };
 
-  const intent = parseIntentHeuristic(prompt);
-  yield {
-    type: "reasoning",
-    text: `Plan: ${intent.summary}\nTrigger: ${intent.trigger.phrase}\n${intent.steps.map((s) => `${s.order}. ${s.phrase}`).join("\n") || "(actions inferred from catalog)"}`
-  };
+  let intent = parseIntentHeuristic(prompt);
+  const index = await getCatalogIndex();
+  const planner = await planCopilotIntent({
+    prompt,
+    graph: opts.graph,
+    catalog: pieceRegistry.cards()
+  });
+  if (planner) {
+    intent = intentFromPlanner(planner);
+    yield {
+      type: "reasoning",
+      text: `I understood this as: ${planner.summary}${planner.ambiguities.length ? `\nNeeds your input: ${planner.ambiguities.join("; ")}` : ""}`
+    };
+  } else {
+    yield {
+      type: "reasoning",
+      text: `Plan: ${intent.summary}\nTrigger: ${intent.trigger.phrase}\n${intent.steps.map((s) => `${s.order}. ${s.phrase}`).join("\n") || "(actions inferred from catalog)"}`
+    };
+  }
   for (const a of intent.ambiguities) {
     yield { type: "todo", kind: "confirm", message: a, target: { stepId: "trigger" } };
   }
 
   yield { type: "stage", stage: "retrieve", label: "Finding apps and events" };
-  const index = await getCatalogIndex();
-  const triggerKind = intent.trigger.kind === "schedule" || intent.trigger.kind === "webhook" || intent.trigger.kind === "manual" ? "trigger" : "trigger";
-  const triggerPick = await pickBestCard(index, `${intent.trigger.phrase} ${intent.trigger.appHint ?? ""}`, triggerKind);
+  const triggerPick = await pickBestCard(index, `${intent.trigger.phrase} ${intent.trigger.appHint ?? ""}`, "trigger", intent.trigger.operation);
   const stepPicks: Array<{ order: number; card: OperationCard; confidence: number; reason: string }> = [];
   for (const step of intent.steps) {
-    const kind = step.intentKind === "ai" ? "action" : "action";
-    const pick = await pickBestCard(index, `${step.phrase} ${step.appHint ?? ""}`, kind);
+    const pick = await pickBestCard(index, `${step.phrase} ${step.appHint ?? ""}`, "action", step.operation);
     if (pick) stepPicks.push({ order: step.order, ...pick });
   }
   yield {
@@ -195,7 +219,7 @@ export async function* runCopilotEngine(opts: {
   }
   yield {
     type: "reasoning",
-    text: `Assembled ${graph.nodes.length} catalog steps. Retrieval only upgrades ops that match the prompt tokens.`
+    text: `Assembled ${graph.nodes.length} catalog steps. AI-selected operations are grounded to the registered catalog.`
   };
 
   yield { type: "stage", stage: "connect", label: "Matching your connected accounts" };
@@ -243,7 +267,7 @@ export async function* runCopilotEngine(opts: {
     type: "reasoning",
     text: mapped.filledKeys.length
       ? `Mapped ${mapped.filledKeys.length} field(s). Low-confidence / resource IDs left blank for you.`
-      : "No high-confidence field mappings applied. Fill Spreadsheet / Channel IDs yourself."
+      : "No high-confidence field mappings applied. Fill resource IDs yourself."
   };
 
   yield { type: "stage", stage: "assemble", label: "Building the flow" };
@@ -275,7 +299,7 @@ export async function* runCopilotEngine(opts: {
       : `Draft ready (${graph.nodes.length} steps). Test, then Publish yourself.`;
 
   if (opts.mode === "ask_as_you_build") {
-    yield { type: "proposal", summary, confidence: 0.78 };
+    yield { type: "proposal", summary, confidence: planner ? 0.9 : 0.78 };
   } else {
     yield { type: "applied", summary };
   }
@@ -286,7 +310,7 @@ export async function* runCopilotEngine(opts: {
     result: {
       graph,
       summary,
-      source: "copilot-engine",
+      source: planner ? "copilot-ai-planner" : "copilot-engine",
       rebuilt: true,
       changed: true,
       chapter: "rebuild"
@@ -297,8 +321,5 @@ export async function* runCopilotEngine(opts: {
 export function shouldRunFullEngine(prompt: string, graph?: WorkflowGraph | null) {
   if (!prompt.trim()) return false;
   if (isStarterDraft(graph)) return true;
-  // A complete "when … then …" workflow description is intentionally routed
-  // through the staged engine even from a populated canvas. This creates a
-  // coherent replacement/proposal instead of silently treating it as inspect.
   return mentionsWorkflowIntent(prompt) && /\b(when|whenever)\b/i.test(prompt) && /\b(then|add|append|send|create|notify|post)\b/i.test(prompt);
 }
