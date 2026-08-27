@@ -6,6 +6,7 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@algoverge/api": "*",
     "@algoverge/db": "*",
     "@algoverge/engine": "*",
     "bullmq": "^5.52.2",
