@@ -14,30 +14,26 @@ export interface AgentContextProvider {
   build(context: AgentContext): Promise<unknown>;
 }
 
-/**
- * Provider-neutral multi-round agent loop.
- * Tool execution is deliberately outside the model and is always scoped by
- * the supplied AgentContext. The model gets tool results on subsequent rounds
- * so it can recover from validation errors or continue a multi-step task.
- */
+/** Provider-neutral multi-round agent loop. */
 export class WorkflowAgentLoop {
   constructor(
     private readonly model: AgentModel,
     private readonly tools: AgentToolRegistry,
     private readonly contextProvider: AgentContextProvider,
     private readonly maxRounds = 8,
+    private readonly maxToolCalls = 32,
   ) {}
 
   async run(context: AgentContext, message: string): Promise<AgentResponse> {
     const snapshot = await this.contextProvider.build(context);
     const results: AgentToolResult[] = [];
+    const executedCalls: AgentToolCall[] = [];
     let finalMessage = '';
     let intent: AgentResponse['intent'] = 'answer';
     let requiresInput: AgentResponse['requiresInput'];
-    let executedCalls = 0;
-    let awaitingTools = true;
+    let callsUsed = 0;
 
-    for (let round = 0; round < this.maxRounds && awaitingTools; round += 1) {
+    for (let round = 0; round < this.maxRounds; round += 1) {
       const response = await this.model.respond({
         message,
         context: snapshot,
@@ -47,38 +43,22 @@ export class WorkflowAgentLoop {
       finalMessage = response.message;
       intent = response.intent;
       requiresInput = response.requiresInput;
-
       const calls = response.toolCalls ?? [];
-      if (calls.length === 0) {
-        awaitingTools = false;
-        break;
-      }
+      if (calls.length === 0) break;
 
       for (const call of calls) {
-        if (executedCalls >= 32) {
+        if (callsUsed >= this.maxToolCalls) {
           results.push({ callId: call.callId, ok: false, error: { code: 'TOOL_BUDGET_EXCEEDED', message: 'Maximum tool-call budget exceeded.' } });
-          awaitingTools = false;
-          break;
+          return { intent, message: finalMessage || 'I could not safely complete the requested operation within the agent limit.', toolCalls: executedCalls, toolResults: results, requiresInput };
         }
-        const result = await this.tools.execute(context, call.name, call.arguments);
-        result.callId = call.callId;
+        const result = await this.tools.execute(context, call.name, call.arguments, call.callId);
+        executedCalls.push(call);
         results.push(result);
-        executedCalls += 1;
+        callsUsed += 1;
       }
     }
 
-    if (awaitingTools) {
-      finalMessage = finalMessage || 'I could not safely complete the requested operation within the agent limit.';
-    }
-
-    return {
-      intent,
-      message: finalMessage,
-      // These are the calls the model most recently requested; all execution
-      // results are authoritative and returned separately.
-      toolCalls: [],
-      toolResults: results,
-      requiresInput,
-    };
+    if (!finalMessage) finalMessage = 'I could not safely complete the requested operation within the agent limit.';
+    return { intent, message: finalMessage, toolCalls: executedCalls, toolResults: results, requiresInput };
   }
 }
