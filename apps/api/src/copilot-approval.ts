@@ -10,15 +10,13 @@ export const copilotApprovalRouter = Router();
 copilotApprovalRouter.use(authMiddleware, orgMiddleware);
 
 const approveBody = z.object({
-  operations: z.array(z.unknown()).min(1).optional(),
-  graph: z.unknown().optional(),
   flowId: z.string().uuid().optional(),
 });
 
 /**
  * Explicit approval boundary for Copilot proposals.
- * The client may send the displayed operations, but the server always checks
- * them against the stored proposal event and the current workspace graph.
+ * Approval never trusts operations supplied by the browser. The server takes
+ * the exact confirmation-gated operations recorded in the latest proposal.
  */
 copilotApprovalRouter.post("/copilot/sessions/:id/approve", requireRole("owner", "admin", "editor"), async (req, res) => {
   const body = approveBody.parse(req.body ?? {});
@@ -35,45 +33,47 @@ copilotApprovalRouter.post("/copilot/sessions/:id/approve", requireRole("owner",
     [req.params.id, req.orgId],
   );
   if (!session) return res.status(404).json({ error: "not_found" });
+  if (session.status === "completed") return res.status(409).json({ error: "proposal_already_approved" });
 
   const proposalEvent = await queryOne<{ payload: any }>(
     `SELECT payload
        FROM copilot_events
-      WHERE session_id = $1 AND org_id = $2 AND event_type IN ('proposal', 'result')
+      WHERE session_id = $1 AND org_id = $2 AND event_type = 'proposal'
       ORDER BY sequence_no DESC
       LIMIT 1`,
     [session.id, req.orgId],
   );
   const payload = proposalEvent?.payload ?? {};
-  const storedOperations = Array.isArray(payload.operations) ? payload.operations : [];
-  const operations = (body.operations ?? storedOperations) as AgentOperation[];
-  if (!operations.length) return res.status(400).json({ error: "no_pending_operations" });
-
-  // A confirmation is tied to the exact proposal, not merely the operation kind.
   const pending = Array.isArray(payload.needs_confirmation) ? payload.needs_confirmation : [];
-  if (pending.length) {
-    const pendingJson = new Set(pending.map((op: unknown) => JSON.stringify(op)));
-    const approvedPending = operations.filter((op) => pendingJson.has(JSON.stringify(op)));
-    if (approvedPending.length !== pending.length) {
-      return res.status(409).json({ error: "proposal_mismatch", message: "The approval payload does not match the pending proposal." });
-    }
+  if (!pending.length) {
+    return res.status(409).json({ error: "no_pending_confirmation", message: "There are no confirmation-gated Copilot operations waiting for approval." });
   }
 
-  let currentGraph: unknown = body.graph;
-  const flowId = body.flowId ?? session.flow_id;
-  if (flowId) {
+  // Never accept an operation list from the browser. The exact server-recorded
+  // pending proposal is the only thing this endpoint can approve.
+  const operations = pending as AgentOperation[];
+
+  const requestedFlowId = body.flowId ?? session.flow_id;
+  if (body.flowId && session.flow_id && body.flowId !== session.flow_id) {
+    return res.status(409).json({ error: "flow_mismatch" });
+  }
+
+  let currentGraph: unknown;
+  if (requestedFlowId) {
     const flow = await queryOne<{ draft_definition: unknown }>(
       `SELECT draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
-      [flowId, req.orgId],
+      [requestedFlowId, req.orgId],
     );
     if (!flow) return res.status(404).json({ error: "flow_not_found" });
     currentGraph = flow.draft_definition;
+  } else {
+    currentGraph = payload.graph ?? session.proposed_definition;
   }
-  if (!currentGraph) currentGraph = payload.graph ?? session.proposed_definition;
   if (!currentGraph) return res.status(409).json({ error: "no_current_graph" });
 
-  // Re-run the complete applier with explicit approval. This rechecks catalog,
-  // node/edge references and the resulting workflow before anything is saved.
+  // Re-run the complete applier with explicit approval. This rechecks the real
+  // catalog, current node/edge references and resulting workflow immediately
+  // before persistence, preventing stale or tampered proposals from applying.
   const result = await applyAgentOperations({
     graph: coerceWorkflowGraph(currentGraph),
     operations,
@@ -93,30 +93,30 @@ copilotApprovalRouter.post("/copilot/sessions/:id/approve", requireRole("owner",
   }
 
   const definition = persistBuilderDraft(result.graph);
-  if (flowId) {
+  if (requestedFlowId) {
     await query(
       `UPDATE flows SET draft_definition = $3, updated_at = now(), updated_by = $4 WHERE id = $1 AND org_id = $2`,
-      [flowId, req.orgId, JSON.stringify(definition), req.user!.userId],
+      [requestedFlowId, req.orgId, JSON.stringify(definition), req.user!.userId],
     );
   }
 
   await query(
     `UPDATE copilot_sessions
         SET proposed_definition = $1, status = 'completed', stage = 'persist', updated_at = now()
-      WHERE id = $2 AND org_id = $3`,
+      WHERE id = $2 AND org_id = $3 AND status IS DISTINCT FROM 'completed'`,
     [JSON.stringify(definition), session.id, req.orgId],
   );
 
   await query(
     `INSERT INTO audit_logs (org_id, actor_id, actor_kind, action, target_type, target_id, metadata)
      VALUES ($1, $2, 'user', 'copilot_approve', 'flow', $3, $4)`,
-    [req.orgId, req.user!.userId, flowId ?? session.id, JSON.stringify({ sessionId: session.id, operations })],
+    [req.orgId, req.user!.userId, requestedFlowId ?? session.id, JSON.stringify({ sessionId: session.id, operationCount: operations.length })],
   );
 
   res.json({
     ok: true,
     sessionId: session.id,
-    flowId,
+    flowId: requestedFlowId,
     graph: result.graph,
     definition,
     applied_operations: result.applied,
