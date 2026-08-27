@@ -50,6 +50,10 @@ function createMockDb(def: ReturnType<typeof parseFlowDefinition>, context: Reco
     todos: {
       async create() { return { id: "todo1" }; },
     },
+    runSteps: {
+      async completedByEffectKey(_runId: string, _stepId: string, _key: string) { return null; },
+      async insert() { },
+    },
   };
 
   const queues: any = {
@@ -71,6 +75,7 @@ test("filter halt does not run later steps", async () => {
       { id: "keep", type: "filter", condition: { op: "eq", left: "{{trigger.n}}", right: 2 } },
       { id: "http_1", type: "http", props: { method: "GET", url: "https://example.com" } },
     ],
+    settings: { timezone: "UTC" },
   });
   const { state, db, queues } = createMockDb(def);
   const handlers = new Map<string, StepHandler>([
@@ -78,7 +83,7 @@ test("filter halt does not run later steps", async () => {
   ]);
   const ex = new Executor(db, queues, handlers);
   await ex.transition("run1", 0, 1);
-  assert.equal(state.status, "succeeded");
+  assert.equal(state.status, "filtered");
   assert.equal(state.context.http_1, undefined);
 });
 
@@ -95,6 +100,7 @@ test("branch walks onTrue and records leaf output", async () => {
         onFalse: [],
       },
     ],
+    settings: { timezone: "UTC" },
   });
   const { state, db, queues } = createMockDb(def);
   const handlers = new Map<string, StepHandler>([
@@ -118,6 +124,7 @@ test("transient handler errors retry then succeed", async () => {
         props: { method: "GET", url: "https://example.com" },
       },
     ],
+    settings: { timezone: "UTC" },
   });
   const { state, db, queues } = createMockDb(def);
   let n = 0;
@@ -125,7 +132,7 @@ test("transient handler errors retry then succeed", async () => {
     ["http", {
       execute: async () => {
         n += 1;
-        if (n < 2) throw new Error("temp");
+        if (n < 2) throw new Error("timeout");
         return { kind: "ok" as const, output: { n } };
       },
     }],

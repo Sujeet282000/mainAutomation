@@ -35,17 +35,17 @@ export function registerDomainTools(
   adapters: { workflow: WorkflowToolAdapter; integrations: IntegrationToolAdapter; execution: ExecutionToolAdapter },
 ): void {
   const entries = [
-    adapterTool('workflow.get', 'Read the current workflow snapshot.', schema({ flowId: { type: 'string' }, versionId: { type: 'string' } }), (c, i) => adapters.workflow.getWorkflow?.(c, i)),
-    adapterTool('workflow.validate', 'Validate the current or proposed workflow.', schema({}), (c, i) => adapters.workflow.validateWorkflow?.(c, i)),
-    adapterTool('workflow.add_node', 'Add a node to a draft workflow.', schema({ type: { type: 'string' }, config: { type: 'object' } }), (c, i) => adapters.workflow.addNode?.(c, i)),
-    adapterTool('workflow.update_node', 'Update a node in a draft workflow.', schema({ nodeId: { type: 'string' }, config: { type: 'object' } }), (c, i) => adapters.workflow.updateNode?.(c, i)),
-    adapterTool('workflow.remove_node', 'Remove a node from a draft workflow.', schema({ nodeId: { type: 'string' } }), (c, i) => adapters.workflow.removeNode?.(c, i)),
-    adapterTool('workflow.connect', 'Connect two workflow nodes.', schema({ sourceNodeId: { type: 'string' }, targetNodeId: { type: 'string' } }), (c, i) => adapters.workflow.connect?.(c, i)),
-    adapterTool('integrations.search', 'Search available integrations, triggers and actions.', schema({ query: { type: 'string' } }), (c, i) => adapters.integrations.search?.(c, i)),
-    adapterTool('integrations.schema', 'Read an integration trigger/action schema.', schema({ integration: { type: 'string' }, action: { type: 'string' } }), (c, i) => adapters.integrations.schema?.(c, i)),
-    adapterTool('connections.list', 'List safe connection metadata without secrets.', schema({ provider: { type: 'string' } }), (c, i) => adapters.integrations.connections?.(c, i)),
-    adapterTool('execution.test', 'Test a workflow or workflow step.', schema({ nodeId: { type: 'string' } }), (c, i) => adapters.execution.test?.(c, i)),
-    adapterTool('execution.inspect', 'Inspect a workflow run or failed step.', schema({ runId: { type: 'string' }, stepId: { type: 'string' } }), (c, i) => adapters.execution.inspect?.(c, i)),
+    adapterTool('workflow.get', 'Read the current workflow snapshot.', schema({ flowId: { type: 'string' }, versionId: { type: 'string' } }), async (c, i) => adapters.workflow.getWorkflow?.(c, i) ?? null),
+    adapterTool('workflow.validate', 'Validate the current or proposed workflow.', schema({}), async (c, i) => adapters.workflow.validateWorkflow?.(c, i) ?? null),
+    adapterTool('workflow.add_node', 'Add a node to a draft workflow.', schema({ type: { type: 'string' }, config: { type: 'object' } }), async (c, i) => adapters.workflow.addNode?.(c, i) ?? null),
+    adapterTool('workflow.update_node', 'Update a node in a draft workflow.', schema({ nodeId: { type: 'string' }, config: { type: 'object' } }), async (c, i) => adapters.workflow.updateNode?.(c, i) ?? null),
+    adapterTool('workflow.remove_node', 'Remove a node from a draft workflow.', schema({ nodeId: { type: 'string' } }), async (c, i) => adapters.workflow.removeNode?.(c, i) ?? null),
+    adapterTool('workflow.connect', 'Connect two workflow nodes.', schema({ sourceNodeId: { type: 'string' }, targetNodeId: { type: 'string' } }), async (c, i) => adapters.workflow.connect?.(c, i) ?? null),
+    adapterTool('integrations.search', 'Search available integrations, triggers and actions.', schema({ query: { type: 'string' } }), async (c, i) => adapters.integrations.search?.(c, i) ?? null),
+    adapterTool('integrations.schema', 'Read an integration trigger/action schema.', schema({ integration: { type: 'string' }, action: { type: 'string' } }), async (c, i) => adapters.integrations.schema?.(c, i) ?? null),
+    adapterTool('connections.list', 'List safe connection metadata without secrets.', schema({ provider: { type: 'string' } }), async (c, i) => adapters.integrations.connections?.(c, i) ?? null),
+    adapterTool('execution.test', 'Test a workflow or workflow step.', schema({ nodeId: { type: 'string' } }), async (c, i) => adapters.execution.test?.(c, i) ?? null),
+    adapterTool('execution.inspect', 'Inspect a workflow run or failed step.', schema({ runId: { type: 'string' }, stepId: { type: 'string' } }), async (c, i) => adapters.execution.inspect?.(c, i) ?? null),
   ] as const;
   for (const tool of entries) registry.register(tool);
 }

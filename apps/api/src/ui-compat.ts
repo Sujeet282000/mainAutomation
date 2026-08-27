@@ -11,6 +11,7 @@ import { copilotGraph, copilotChat } from "./copilot";
 import { runCopilotEngine } from "./copilot-engine";
 import { parseCopilotMode } from "./copilot-pipeline";
 import { diagnoseFromFailure } from "./diagnose";
+import { signedAiJson, probeAiService } from "./ai-service";
 
 function catalogApps() {
   return listCatalogApps();
@@ -261,45 +262,46 @@ export function registerUiCompat(authed: Router) {
     res.setHeader("Connection", "keep-alive");
     const body = req.body ?? {};
     const send = (data: Record<string, unknown>) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+    // Use streamCopilotSession which tries Python AI first, falls back to Node engine
     try {
-      const graph = body.graph ? coerceWorkflowGraph(body.graph) : undefined;
-      for await (const ev of runCopilotEngine({
+      const { streamCopilotSession } = await import("./copilot-http");
+      await streamCopilotSession({
+        req: req as any,
+        res: res as any,
+        sessionId: `ui-gen-${Date.now()}`,
+        orgId: req.orgId!,
         prompt: String(body.prompt ?? ""),
-        workspaceId: req.orgId,
-        userEmail: req.user?.email,
-        mode: parseCopilotMode(body.mode),
-        graph,
-      })) {
-        if ("result" in ev && ev.type === "result") {
-          send({
-            type: "result",
-            graph: ev.result.graph,
-            summary: ev.result.summary,
-            applied: true,
-            rebuilt: ev.result.rebuilt,
-            changed: ev.result.changed,
-            mode: body.mode,
-          });
-        } else {
-          send(ev as Record<string, unknown>);
-        }
-      }
+        mode: body.mode,
+        graph: body.graph,
+        flowId: body.automationId,
+        projectId: req.orgId,
+      });
     } catch (err) {
+      // Final fallback: local heuristic engine
       try {
-        const fallback = await copilotGraph(String(body.prompt ?? ""), req.orgId, {
+        const graph = body.graph ? coerceWorkflowGraph(body.graph) : undefined;
+        for await (const ev of runCopilotEngine({
+          prompt: String(body.prompt ?? ""),
+          workspaceId: req.orgId,
           userEmail: req.user?.email,
           mode: parseCopilotMode(body.mode),
-          graph: body.graph,
-        } as any);
-        send({
-          type: "result",
-          graph: fallback.graph,
-          summary: fallback.summary,
-          applied: true,
-          rebuilt: true,
-          changed: true,
-          mode: body.mode,
-        });
+          graph,
+        })) {
+          if ("result" in ev && ev.type === "result") {
+            send({
+              type: "result",
+              graph: ev.result.graph,
+              summary: ev.result.summary,
+              applied: true,
+              rebuilt: ev.result.rebuilt,
+              changed: ev.result.changed,
+              mode: body.mode,
+            });
+          } else {
+            send(ev as Record<string, unknown>);
+          }
+        }
       } catch {
         send({ type: "result", summary: err instanceof Error ? err.message : "Copilot failed", applied: false });
       }
@@ -325,8 +327,70 @@ export function registerUiCompat(authed: Router) {
         graph: z.unknown().optional(),
         selectedStepId: z.string().optional(),
         mode: z.string().optional(),
+        lastTest: z.object({ ok: z.boolean().optional(), body: z.unknown().optional(), ms: z.number().optional() }).nullable().optional(),
       })
       .parse(req.body);
+    const graph = body.graph ? coerceWorkflowGraph(body.graph) : undefined;
+
+    // Try Python AI service first for intelligent conversational responses
+    const ai = await probeAiService();
+    if (ai.reachable) {
+      try {
+        const definition = graph ? persistBuilderDraft(graph) : {};
+        const agentReply = await signedAiJson<{
+          message: string;
+          operations?: Array<{ kind: string; arguments: Record<string, unknown>; requires_confirmation?: boolean }>;
+          needs_input?: string[];
+        }>(
+          "/copilot/chat",
+          {
+            message: body.prompt,
+            workflow: definition,
+            catalog: APP_CATALOG.map((a) => ({
+              slug: a.slug,
+              name: a.name,
+              operations: a.operations.map((o) => ({ key: o.key, name: o.name, type: o.type })),
+            })),
+            history: [],
+            session_id: body.automationId ?? "",
+            flow_id: body.automationId ?? "",
+            org_id: req.orgId ?? "",
+          },
+          req.orgId!,
+        );
+        if (agentReply?.message) {
+          // If the AI agent proposed workflow operations, resolve them locally
+          let appliedGraph = graph;
+          let applied = false;
+          if (agentReply.operations?.length && graph) {
+            const { orchestrateCopilot } = await import("./copilot-orchestrator");
+            const turn = orchestrateCopilot({
+              prompt: body.prompt,
+              graph,
+              selectedStepId: body.selectedStepId,
+              mode: parseCopilotMode(body.mode),
+            });
+            if (turn.graph && turn.changed) {
+              appliedGraph = turn.graph;
+              applied = true;
+            }
+          }
+          res.json({
+            reply: agentReply.message,
+            graph: applied ? appliedGraph : undefined,
+            applied,
+            source: "python-agent",
+            youDoFirst: [],
+            iCan: agentReply.needs_input?.length ? ["Answer: " + agentReply.needs_input.join(", ")] : [],
+          });
+          return;
+        }
+      } catch {
+        /* Python agent unavailable — fall through to local engine */
+      }
+    }
+
+    // Local heuristic fallback
     const result = await copilotChat({
       prompt: body.prompt,
       workspaceId: req.orgId,
@@ -334,9 +398,10 @@ export function registerUiCompat(authed: Router) {
       userId: req.user?.userId,
       userEmail: req.user?.email,
       automationId: body.automationId,
-      graph: body.graph ? coerceWorkflowGraph(body.graph) : undefined,
+      graph,
       selectedStepId: body.selectedStepId,
       mode: parseCopilotMode(body.mode),
+      lastTest: body.lastTest ?? null,
     });
     res.json(result);
   });

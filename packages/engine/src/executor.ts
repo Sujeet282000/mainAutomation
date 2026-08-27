@@ -34,15 +34,15 @@ export class Executor {
     const definition = version.definition as TFlowDefinition; const steps = definition.steps;
     if (cursor >= steps.length) return this.finish(run.id, "succeeded", run.contextJson);
     const step = steps[cursor]; const context = run.contextJson as Record<string, unknown>;
-    if (step.type === "filter") { if (!evaluateFlowCondition(step.condition as any, context)) return this.finish(run.id, "filtered", context); return this.advance(run, cursor, { [step.id]: { passed: true } }); }
+    if (step.type === "filter") { if (!evaluateFlowCondition(step.condition as any, context)) return this.finish(run.id, "filtered", context); return this.advance(run, cursor, { [step.id]: { passed: true } }, steps.length); }
     if (step.type === "branch" || step.type === "router" || step.type === "sub_flow") return this.executeContainer(run, definition, step, cursor, context);
     if (step.type === "loop") return this.executeLoop(run, definition, step as any, cursor, context);
-    if (step.type === "note") return this.advance(run, cursor, { [step.id]: { noted: true } });
+    if (step.type === "note") return this.advance(run, cursor, { [step.id]: { noted: true } }, steps.length);
     if (step.type === "delay") return this.pause(run, cursor, context, { kind: "pause", reason: "delay", resumeAt: (step as any).props?.untilIso });
     if (step.type === "approval") { const props = (step as any).props || {}; await this.db.todos.create(run.orgId, run.id, run.createdAt, step.id, props.title || "Approval needed", { ...props.editableFields }); return this.pause(run, cursor, context, { kind: "pause", reason: "approval" }); }
     const props = resolveProps((step as Record<string, unknown>).props as Record<string, unknown> ?? {}, context);
     const result = await this.executeLeaf(run, step, props, context);
-    if (result.kind === "ok") return this.advance(run, cursor, { [step.id]: result.output });
+    if (result.kind === "ok") return this.advance(run, cursor, { [step.id]: result.output }, steps.length);
     if (result.kind === "stop") return this.finish(run.id, "filtered", context);
     if (result.kind === "pause") return this.pause(run, cursor, context, result);
     return this.applyErrorPolicy(run, definition, step, cursor, context, result.error);
@@ -64,15 +64,16 @@ export class Executor {
   }
 
   private async executeContainer(run: { id: string; orgId: string; contextJson?: unknown }, definition: TFlowDefinition, step: Step, cursor: number, context: Record<string, unknown>): Promise<void> {
-    if (step.type === "branch") { const selected = evaluateFlowCondition(step.condition as any, context) ? step.onTrue : step.onFalse; return this.advance(run, cursor, { [step.id]: await this.runInline(run, definition, selected as Step[], context) }); }
-    if (step.type === "router") { const branches = (step as any).branches; const selected = branches.find((b: any) => b.condition && evaluateFlowCondition(b.condition, context)) ?? branches.find((b: any) => b.default); const output = selected ? await this.runInline(run, definition, selected.steps, context) : {}; return this.advance(run, cursor, { [step.id]: { branchId: selected?.id ?? null, ...output } }); }
-    return this.advance(run, cursor, {});
+    const totalSteps = definition.steps.length;
+    if (step.type === "branch") { const selected = evaluateFlowCondition(step.condition as any, context) ? step.onTrue : step.onFalse; const inline = await this.runInline(run, definition, selected as Step[], context); return this.advance(run, cursor, inline, totalSteps); }
+    if (step.type === "router") { const branches = (step as any).branches; const selected = branches.find((b: any) => b.condition && evaluateFlowCondition(b.condition, context)) ?? branches.find((b: any) => b.default); const output = selected ? await this.runInline(run, definition, selected.steps, context) : {}; return this.advance(run, cursor, { [step.id]: { branchId: selected?.id ?? null, ...output } }, totalSteps); }
+    return this.advance(run, cursor, {}, totalSteps);
   }
 
   private async executeLoop(run: { id: string; orgId: string; transitionEpoch?: number }, definition: TFlowDefinition, step: any, cursor: number, context: Record<string, unknown>): Promise<void> {
     const props = resolveProps(step.props ?? {}, context); const items = props.items; if (!Array.isArray(items)) throw new EngineError("validation", "PROP_TYPE_MISMATCH");
     const outputs: unknown[] = new Array(items.length); for (let i = 0; i < items.length; i++) outputs[i] = await this.runInline(run, definition, step.steps, { ...context, loop: { item: items[i], index: i, total: items.length } });
-    await this.advance(run, cursor, { [step.id]: { items: outputs, count: items.length } });
+    await this.advance(run, cursor, { [step.id]: { items: outputs, count: items.length } }, definition.steps.length);
   }
 
   private async runInline(run: { id: string; orgId: string; transitionEpoch?: number }, definition: TFlowDefinition, steps: Step[], context: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -84,7 +85,8 @@ export class Executor {
     return appended;
   }
 
-  private async advance(run: { id: string; orgId: string; transitionEpoch?: number }, cursor: number, append: Record<string, unknown>): Promise<void> {
+  private async advance(run: { id: string; orgId: string; transitionEpoch?: number; contextJson?: Record<string, unknown> }, cursor: number, append: Record<string, unknown>, totalSteps: number): Promise<void> {
+    if (cursor + 1 >= totalSteps) return this.finish(run.id, "succeeded", { ...(run.contextJson ?? {}), ...append });
     const state = await this.db.flowRuns.checkpoint(run.id, { expectedCursor: cursor, expectedEpoch: run.transitionEpoch, appendContext: append, nextCursor: cursor + 1, status: "queued" });
     await this.queues.flowStep.add("transition", { runId: run.id, orgId: run.orgId, cursor: state.cursor, epoch: state.transitionEpoch }, { jobId: `step:${run.id}:${state.cursor}:${state.transitionEpoch}` });
   }
@@ -93,7 +95,7 @@ export class Executor {
 
   private async applyErrorPolicy(run: { id: string }, definition: TFlowDefinition, step: Step, cursor: number, context: Record<string, unknown>, error: EngineError): Promise<void> {
     const policy = (step as any).onError ?? "fail";
-    if (policy === "continue") return this.advance(run as any, cursor, { [step.id]: { error: { message: error.message, code: error.code } } });
+    if (policy === "continue") return this.advance(run as any, cursor, { [step.id]: { error: { message: error.message, code: error.code } } }, definition.steps.length);
     return this.finish(run.id, "failed", { ...context, [step.id]: { error: { message: error.message, code: error.code } } });
   }
 

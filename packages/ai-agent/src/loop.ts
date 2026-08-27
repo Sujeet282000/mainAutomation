@@ -51,7 +51,8 @@ export class WorkflowAgentLoop {
           results.push({ callId: call.callId, ok: false, error: { code: 'TOOL_BUDGET_EXCEEDED', message: 'Maximum tool-call budget exceeded.' } });
           return { intent, message: finalMessage || 'I could not safely complete the requested operation within the agent limit.', toolCalls: executedCalls, toolResults: results, requiresInput };
         }
-        const result = await this.tools.execute(context, call.name, call.arguments, call.callId);
+        const result = await this.tools.execute(context, call.name, call.arguments);
+        result.callId = call.callId;
         executedCalls.push(call);
         results.push(result);
         callsUsed += 1;

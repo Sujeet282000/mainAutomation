@@ -88,6 +88,7 @@ export function CopilotPanel({
   const [minimized, setMinimized] = useState(false);
   const [width, setWidth] = useState(DEFAULT_W);
   const [humanActionModal, setHumanActionModal] = useState(false);
+  const [suggestionsExpanded, setSuggestionsExpanded] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const drag = useRef<{ startX: number; startW: number } | null>(null);
   const widthRef = useRef(width);
@@ -206,8 +207,20 @@ export function CopilotPanel({
   const empty = msgs.length === 0 && !building && !sending;
   const collapsed = !open || minimized;
   const chips = draftConfigured
-    ? ["What is happening?", "What should I do first?", "Fill this step", "Add the next step", "Explain the last test"]
-    : ["When a Gmail arrives, add a Sheets row", "Every morning, summarize Calendar in Slack"];
+    ? [
+        "What is happening?",
+        "What should I do first?",
+        "Fill this step",
+        "Add the next step",
+        "Explain the last test",
+        "What integrations are available?",
+        "What connections do I have?",
+      ]
+    : [
+        "When a Gmail arrives, add a Sheets row",
+        "Every morning, summarize Calendar in Slack",
+        "Send WhatsApp when a Google Sheet row is added",
+      ];
 
   if (collapsed) {
     return (
@@ -242,9 +255,6 @@ export function CopilotPanel({
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold leading-none">Copilot</p>
-          <p className="mt-0.5 truncate text-[10px] text-ink-muted">
-            {draftConfigured ? "Inspecting this draft" : "Ready to outline a draft"}
-          </p>
         </div>
         <button
           type="button"
@@ -271,22 +281,15 @@ export function CopilotPanel({
         <button type="button" className="rounded-lg p-1.5 text-ink-muted hover:bg-muted" title="Settings" onClick={() => setSettingsOpen((v) => !v)}>
           <Settings className="h-4 w-4" />
         </button>
+        {firstHumanAction ? (
+          <button type="button" className="rounded-lg p-1.5 text-warn hover:bg-warn/10" title="Action needed" onClick={() => setHumanActionModal(true)}>
+            <AlertTriangle className="h-4 w-4" />
+          </button>
+        ) : null}
         <button type="button" className="rounded-lg p-1.5 text-ink-muted hover:bg-muted" onClick={onClose} aria-label="Close Copilot">
           <X className="h-4 w-4" />
         </button>
       </div>
-      {firstHumanAction ? (
-        <button
-          type="button"
-          className="min-w-0 border-b border-line bg-muted/50 px-3 py-2 text-left hover:bg-muted/80 transition-colors"
-          onClick={() => setHumanActionModal(true)}
-        >
-          <div className="flex items-center gap-1.5">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-warn" />
-            <span className="truncate text-[11px] font-medium text-warn">Action required — tap to view</span>
-          </div>
-        </button>
-      ) : null}
       {settingsOpen && (
         <div className="space-y-2 border-b border-line bg-muted/40 px-3 py-2 text-[11px] text-ink-muted">
           <p>Patches apply as you go, or wait until you confirm. Copilot never publishes or creates accounts.</p>
@@ -311,13 +314,8 @@ export function CopilotPanel({
       )}
       <div ref={scroller} className="av-hide-scroll min-h-0 min-w-0 flex-1 space-y-3 p-3 text-sm">
         {empty && (
-          <div className="rounded-2xl border border-line bg-muted/30 p-4">
-            <p className="text-[15px] font-medium">{draftConfigured ? "Ask about this draft" : "What should this workflow do?"}</p>
-            <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-              {draftConfigured
-                ? "I'll inspect the steps you already placed, then tell you what only you can do (connect, pick a calendar, publish)."
-                : "Describe a trigger and actions. I reuse a connected account when one exists. I cannot sign in or publish."}
-            </p>
+          <div className="px-1 py-2">
+            <p className="text-[13px] text-ink-muted">{draftConfigured ? "Ask about this draft" : "Describe a workflow to get started"}</p>
           </div>
         )}
         {(building || sending) && (
@@ -372,6 +370,16 @@ export function CopilotPanel({
                   </ul>
                 </div>
               ) : null}
+              {m.iCan && m.iCan.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {m.iCan.slice(0, 3).map((item) => (
+                    <span key={item} className="inline-flex items-center gap-1 rounded-full border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/30 px-2 py-0.5 text-[10px] text-violet-700 dark:text-violet-300">
+                      <Sparkles className="h-2.5 w-2.5" />
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
           )
         )}
@@ -401,19 +409,40 @@ export function CopilotPanel({
         )}
       </div>
       <div className="border-t border-line p-3">
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {chips.map((chip) => (
-            <button
-              key={chip}
-              type="button"
-              className="rounded-full border border-line px-2.5 py-1 text-[11px] text-ink-muted hover:border-violet-400 hover:text-violet-600"
-              disabled={sending || building}
-              onClick={() => void send(draftConfigured ? "chat" : "build", chip)}
-            >
-              {chip}
-            </button>
-          ))}
-        </div>
+        {msgs.length === 0 && !building && !sending ? (
+          <div className="mb-2">
+            {!suggestionsExpanded ? (
+              <button
+                type="button"
+                className="flex items-center gap-1.5 rounded-full border border-violet-300 dark:border-violet-700 bg-violet-50 dark:bg-violet-950/40 px-3 py-1.5 text-[11px] font-medium text-violet-700 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/50 transition-colors"
+                onClick={() => setSuggestionsExpanded(true)}
+              >
+                <Sparkles className="h-3 w-3" />
+                Suggestions
+              </button>
+            ) : (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-medium text-ink-muted">Try asking</span>
+                  <button type="button" className="text-[10px] text-ink-muted hover:text-ink" onClick={() => setSuggestionsExpanded(false)}>✕</button>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {chips.map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      className="rounded-full border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/30 px-2.5 py-1 text-[11px] text-violet-700 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/50 hover:border-violet-400 transition-colors"
+                      disabled={sending || building}
+                      onClick={() => { setSuggestionsExpanded(false); void send(draftConfigured ? "chat" : "build", chip); }}
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : null}
         <div className="flex items-end gap-2 rounded-2xl border border-line bg-muted/20 p-2 focus-within:border-violet-400">
           <textarea
             className="max-h-28 min-h-[44px] flex-1 resize-none bg-transparent px-1 py-1 text-sm outline-none"
@@ -431,7 +460,7 @@ export function CopilotPanel({
             {building ? "Stop" : <Send className="h-3.5 w-3.5" />}
           </Button>
         </div>
-        <p className="mt-2 text-[10px] text-ink-muted">Copilot is AI and can make mistakes. It cannot sign in or publish.</p>
+        <p className="mt-2 text-[10px] text-ink-muted">AI-powered. Cannot sign in or publish.</p>
       </div>
       <button
         type="button"

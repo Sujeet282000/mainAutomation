@@ -8,17 +8,14 @@ import type { StepData } from "./store";
 
 export type RunState = "idle" | "queued" | "running" | "waiting" | "ok" | "fail";
 
-/* ── Status icon with ring animation ────────────────────────────────────── */
+/* ── Status icon — filled circle style ──────────────────────────────────── */
 
 function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
-  /* Running — violet spinner with expanding ring */
+  /* Running — violet spinner with filled background */
   if (run === "running") {
     return (
-      <span className="relative flex h-6 w-6 items-center justify-center">
-        <span className="absolute inset-0 rounded-full bg-violet-500/20 av-status-ring" />
-        <span className="relative flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-violet-600 text-white shadow-lg shadow-violet-500/30">
-          <Loader2 className="h-3 w-3 animate-spin" />
-        </span>
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-violet-500 text-white shadow-sm">
+        <Loader2 className="h-3 w-3 animate-spin" />
       </span>
     );
   }
@@ -26,44 +23,35 @@ function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
   /* Queued — muted dot */
   if (run === "queued") {
     return (
-      <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60">
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700">
         <span className="h-1.5 w-1.5 rounded-full bg-slate-400 dark:bg-slate-500" />
       </span>
     );
   }
 
-  /* Waiting — amber pulse */
+  /* Waiting — amber spinner with filled background */
   if (run === "waiting") {
     return (
-      <span className="relative flex h-6 w-6 items-center justify-center">
-        <span className="absolute inset-0 rounded-full bg-amber-400/20 animate-ping [animation-duration:2s]" />
-        <span className="relative flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-amber-400 to-amber-500 text-white shadow-lg shadow-amber-400/25">
-          <Loader2 className="h-3 w-3 animate-spin" />
-        </span>
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
+        <Loader2 className="h-3 w-3 animate-spin" />
       </span>
     );
   }
 
-  /* Success — green check with bounce-in */
+  /* Success — green filled circle with white checkmark (matching image) */
   if (run === "ok") {
     return (
-      <span className="relative flex h-7 w-7 items-center justify-center">
-        <span className="absolute inset-0 rounded-full bg-emerald-400/20 av-status-ring" />
-        <span className="relative flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-lg shadow-emerald-500/40">
-          <Check className="h-4 w-4 av-icon-pop" strokeWidth={3} />
-        </span>
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
+        <Check className="h-3.5 w-3.5" strokeWidth={3} />
       </span>
     );
   }
 
-  /* Fail — red cross with shake */
+  /* Fail — red filled circle with white X (matching image) */
   if (run === "fail") {
     return (
-      <span className="relative flex h-7 w-7 items-center justify-center">
-        <span className="absolute inset-0 rounded-full bg-red-400/20 av-status-ring" />
-        <span className="relative flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-red-400 to-red-600 text-white shadow-lg shadow-red-500/40">
-          <X className="h-4 w-4 av-icon-pop" strokeWidth={3} />
-        </span>
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white shadow-sm">
+        <X className="h-3.5 w-3.5" strokeWidth={3} />
       </span>
     );
   }
@@ -71,7 +59,7 @@ function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
   /* Empty step — amber warning */
   if (empty) {
     return (
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-amber-400 to-amber-500 text-white shadow-md shadow-amber-400/20">
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
         <AlertTriangle className="h-3 w-3" />
       </span>
     );
@@ -79,7 +67,7 @@ function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
 
   /* Default idle — subtle dot */
   return (
-    <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-line bg-elevated text-[10px] text-ink-muted">
+    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800 text-[10px] text-ink-muted">
       •
     </span>
   );
@@ -112,26 +100,25 @@ export function StepNode({
     : null;
   const appName = data.appSlug ? data.appSlug.replace(/-/g, " ") : empty ? "Choose app" : "Step";
 
+  /* Determine border class based on state */
+  const borderClass = (() => {
+    if (run === "running") return "border-2 border-violet-400 dark:border-violet-500";
+    if (run === "ok") return "border-2 border-emerald-400 dark:border-emerald-500";
+    if (run === "fail") return "border-2 border-red-400 dark:border-red-500";
+    if (run === "waiting") return "border-2 border-amber-400 dark:border-amber-500";
+    if (selected) return "border border-violet-400 dark:border-violet-500";
+    if (empty) return "border border-dashed border-line";
+    return "border border-line";
+  })();
+
   return (
     <div
       className={cn(
-        "relative w-[320px] rounded-2xl border-2 px-4 py-4 shadow-sm transition-all duration-300 ease-out bg-white dark:bg-[rgb(15,22,36)]",
-        /* ── Selected ── */
-        selected && "border-violet-500 shadow-[0_0_0_3px_rgba(139,92,246,0.18),0_4px_16px_rgba(139,92,246,0.08)] bg-violet-50/80 dark:bg-violet-950/40",
-        /* ── Empty ── */
-        !selected && empty && "border-dashed border-slate-300 dark:border-slate-600 bg-white/60 dark:bg-slate-900/40",
-        /* ── Configured idle ── */
-        !selected && !empty && "border-slate-200/80 dark:border-slate-700/80 hover:border-violet-300 hover:shadow-md dark:hover:border-violet-600",
-        /* ── Queued ── */
-        run === "queued" && "border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50 av-node-queued",
-        /* ── Running ── */
-        run === "running" && "border-violet-400 dark:border-violet-500 bg-gradient-to-br from-violet-50/80 to-violet-100/60 dark:from-violet-950/30 dark:to-violet-900/20 av-node-run",
-        /* ── Waiting ── */
-        run === "waiting" && "border-amber-400 dark:border-amber-500 bg-gradient-to-br from-amber-50/80 to-amber-100/50 dark:from-amber-950/25 dark:to-amber-900/15 av-node-wait",
-        /* ── Success ── */
-        run === "ok" && "border-emerald-400 dark:border-emerald-500 bg-gradient-to-br from-emerald-50/90 to-emerald-100/60 dark:from-emerald-950/25 dark:to-emerald-900/15 shadow-[0_0_0_2px_rgba(16,185,129,0.2)] av-node-ok",
-        /* ── Fail ── */
-        run === "fail" && "border-red-400 dark:border-red-500 bg-gradient-to-br from-red-50/90 to-red-100/60 dark:from-red-950/25 dark:to-red-900/15 shadow-[0_0_0_2px_rgba(239,68,68,0.2)] av-node-fail"
+        "relative w-[320px] rounded-xl px-4 py-4 transition-colors duration-200 bg-elevated",
+        /* ── Border states ── */
+        borderClass,
+        /* ── Running pulse ── */
+        run === "running" && "av-node-run"
       )}
     >
       {/* Top handle */}
@@ -167,12 +154,12 @@ export function StepNode({
         <span
           className={cn(
             "inline-flex min-w-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize",
-            run === "ok" && "bg-emerald-100/80 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300",
-            run === "fail" && "bg-red-100/80 dark:bg-red-900/30 text-red-700 dark:text-red-300",
-            run === "running" && "bg-violet-100/80 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300",
-            run === "waiting" && "bg-amber-100/80 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300",
-            run === "queued" && "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400",
-            run === "idle" && "bg-muted text-ink"
+            run === "ok" && "text-emerald-600 dark:text-emerald-400",
+            run === "fail" && "text-red-600 dark:text-red-400",
+            run === "running" && "text-violet-600 dark:text-violet-400",
+            run === "waiting" && "text-amber-600 dark:text-amber-400",
+            run === "queued" && "text-ink-muted",
+            run === "idle" && "text-ink"
           )}
         >
           {!empty && <AppIcon slug={data.appSlug} size="sm" />}
@@ -180,7 +167,7 @@ export function StepNode({
         </span>
         <button
           type="button"
-          className="ml-auto rounded-lg p-1.5 text-ink-muted hover:bg-muted hover:text-ink transition-colors"
+          className="ml-auto rounded-lg p-1.5 text-ink-muted hover:text-ink transition-colors"
           aria-label="Open step actions"
           onClick={(event) => {
             event.stopPropagation();
@@ -196,9 +183,9 @@ export function StepNode({
         <div
           className={cn(
             "truncate text-[14px] font-semibold leading-snug",
-            run === "ok" && "text-emerald-800 dark:text-emerald-200",
-            run === "fail" && "text-red-800 dark:text-red-200",
-            run === "running" && "text-violet-800 dark:text-violet-200",
+            run === "ok" && "text-emerald-700 dark:text-emerald-300",
+            run === "fail" && "text-red-700 dark:text-red-300",
+            run === "running" && "text-violet-700 dark:text-violet-300",
             (run === "idle" || run === "queued" || run === "waiting") && "text-ink"
           )}
         >
@@ -214,7 +201,7 @@ export function StepNode({
       {data.needsAccount && (
         <button
           type="button"
-          className="mt-3 flex w-full items-center gap-1.5 rounded-xl border-2 border-dashed border-amber-400/60 bg-amber-50/50 dark:bg-amber-900/15 px-3 py-2 text-left text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/25 transition-colors"
+          className="mt-3 flex w-full items-center gap-1.5 rounded-xl border border-dashed border-amber-400/60 bg-elevated px-3 py-2 text-left text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:border-amber-400 transition-colors"
           onClick={(event) => {
             event.stopPropagation();
             data.onAddAccount?.();
@@ -229,7 +216,7 @@ export function StepNode({
       {data.terminal && (
         <button
           type="button"
-          className="absolute -bottom-3.5 left-1/2 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border-2 border-line bg-elevated text-ink-muted shadow-sm hover:border-violet-500 hover:text-violet-600 hover:shadow-md transition-all"
+          className="absolute -bottom-3.5 left-1/2 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-line bg-elevated text-ink-muted hover:border-violet-500 hover:text-violet-600 transition-colors shadow-sm"
           aria-label="Add a step after this action"
           title="Add a step"
           onClick={(event) => {

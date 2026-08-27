@@ -25,7 +25,8 @@ test("FlowDefinition parses Orchestra step types and rejects credentials", () =>
         connectionId: null,
         props: { text: "hi" }
       }
-    ]
+    ],
+    settings: { timezone: "UTC" }
   });
   assert.equal(def.steps[0].type, "piece_action");
   const bad = safeParseFlowDefinition({

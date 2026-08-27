@@ -16,7 +16,7 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Book, Check, ChevronRight, Clock, Copy, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Wrench, X, Zap } from "lucide-react";
+import { AlertTriangle, Book, Check, ChevronRight, Clock, Copy, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Workflow, Wrench, X, Zap } from "lucide-react";
 import { api, streamSse } from "@/lib/api";
 import {
   appAuth,
@@ -203,6 +203,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [injectPrompt, setInjectPrompt] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; label: string } | null>(null);
+  const [flowOverviewOpen, setFlowOverviewOpen] = useState(false);
   const inspectorDrag = useRef<{ startX: number; startW: number } | null>(null);
   const inspectorWRef = useRef(inspectorW);
   inspectorWRef.current = inspectorW;
@@ -621,7 +622,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       edges.map((e) => ({
         ...e,
         type: "plus",
-        animated: runStates[e.source] === "ok" || runStates[e.source] === "running" || busy === "test",
+        animated: runStates[e.source] === "ok" || runStates[e.source] === "running",
         data: {
           onAdd: (edgeId: string) => openPicker("action", undefined, edgeId),
           label: e.sourceHandle ? String(e.sourceHandle).replace("path-", "Path ").toUpperCase() : undefined,
@@ -630,7 +631,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#64748b" }
       })),
-    [busy, edges, runStates]
+    [edges, runStates]
   );
 
   async function testStep(node = selected) {
@@ -663,13 +664,42 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   async function testWorkflow() {
     setBusy("test");
     const ordered = layoutFlow(nodes, edges);
-    setRunStates(Object.fromEntries(ordered.map((n) => [n.id, "queued" as RunState])));
+    /* Reset all nodes to idle first, then animate step by step */
+    setRunStates({});
     try {
       await saveDraft();
       const trigger = nodes.find((n) => n.data.kind === "trigger");
       const app = apps.find((x) => x.slug === trigger?.data.appSlug);
       const op = app?.operations.find((o) => opKey(o) === trigger?.data.operation);
       const payload = op ? opSample(op) : { ping: true, test: true };
+
+      /* Step-by-step entrance animation: each node goes running sequentially */
+      for (let idx = 0; idx < ordered.length; idx++) {
+        await new Promise((r) => setTimeout(r, idx === 0 ? 100 : 400));
+        setRunStates((prev) => {
+          const next = { ...prev };
+          /* Mark previous as ok if still in running */
+          if (idx > 0) {
+            const prevId = ordered[idx - 1].id;
+            if (next[prevId] === "running") next[prevId] = "ok";
+          }
+          next[ordered[idx].id] = "running";
+          return next;
+        });
+        /* Follow the active step in the inspector */
+        setSelected(ordered[idx].id);
+        setInspectorTab("test");
+      }
+      /* Mark the last one as ok after the final entrance */
+      await new Promise((r) => setTimeout(r, 400));
+      setRunStates((prev) => {
+        const next = { ...prev };
+        const lastId = ordered[ordered.length - 1].id;
+        if (next[lastId] === "running") next[lastId] = "ok";
+        return next;
+      });
+
+      /* Now fire the actual run */
       const d = await api<{ execution: { id: string } }>(`/automations/${automationId}/run`, {
         method: "POST",
         body: JSON.stringify({ payload })
@@ -696,7 +726,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                     ? "queued"
                     : "running";
         }
-        const painted: Record<string, RunState> = Object.fromEntries(ordered.map((n) => [n.id, "queued" as RunState]));
+        const painted: Record<string, RunState> = Object.fromEntries(ordered.map((n) => [n.id, "idle" as RunState]));
         for (const n of ordered) {
           if (byId[n.id]) painted[n.id] = byId[n.id];
         }
@@ -709,10 +739,25 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           }
         }
         setRunStates(painted);
+        /* Sync inspector with the currently running step */
+        const runningStep = ordered.find((n) => painted[n.id] === "running");
+        const failedStep = ordered.find((n) => painted[n.id] === "fail");
+        const activeStep = failedStep || runningStep || ordered.find((n) => painted[n.id] === "waiting");
+        if (activeStep) {
+          setSelected(activeStep.id);
+          setInspectorTab("test");
+        }
         if (["succeeded", "failed", "cancelled", "waiting"].includes(snap.execution.status)) break;
       }
       const ok = last?.execution.status === "succeeded";
       setTestResult({ ok: Boolean(ok), body: last });
+      /* After test completes, select the failed node if any, otherwise the last node */
+      const finalFailed = ordered.find((n) => runStates[n.id] === "fail");
+      const finalNode = finalFailed || ordered[ordered.length - 1];
+      if (finalNode) {
+        setSelected(finalNode.id);
+        setInspectorTab("test");
+      }
       const runStatus = last?.execution.status ?? "timed out";
       setMsg(ok ? "Test workflow completed." : runStatus === "waiting" ? "Test workflow is waiting to resume." : `Test workflow ${runStatus}.`);
     } catch (err) {
@@ -905,6 +950,14 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
+        <button
+          type="button"
+          className="rounded-lg p-1 text-ink-muted hover:bg-muted hover:text-ink transition-colors"
+          title="Workflow overview"
+          onClick={() => setFlowOverviewOpen(true)}
+        >
+          <Workflow className="h-4 w-4" />
+        </button>
         <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-ink-muted">
           {published ? "On" : "Draft"}
         </span>
@@ -1715,6 +1768,52 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           setConfirmDelete(null);
         }}
       />
+
+      {/* Flow Overview Modal */}
+      {flowOverviewOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/50 p-4" onClick={() => setFlowOverviewOpen(false)}>
+          <div className="w-full max-w-lg rounded-2xl border border-line bg-elevated p-5 shadow-card" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-100 dark:bg-violet-900/40">
+                <Workflow className="h-4 w-4 text-violet-600" />
+              </span>
+              <div className="flex-1">
+                <h2 className="text-base font-semibold">{title || "Untitled workflow"}</h2>
+                <p className="text-xs text-ink-muted">{published ? "Published and active" : "Draft"} · {nodes.length} step{nodes.length !== 1 ? "s" : ""}</p>
+              </div>
+              <button type="button" className="rounded-lg p-1.5 text-ink-muted hover:bg-muted" onClick={() => setFlowOverviewOpen(false)}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-2">
+              {nodes.map((n, i) => {
+                const app = apps.find((a) => a.slug === n.data.appSlug);
+                return (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className={`w-full flex items-center gap-3 rounded-xl border px-3 py-2 text-left transition-colors ${n.id === selectedId ? "border-violet-400 bg-violet-50 dark:bg-violet-950/30" : "border-line hover:bg-muted/50"}`}
+                    onClick={() => { setFlowOverviewOpen(false); setSelected(n.id); setInspectorTab("setup"); }}
+                  >
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-semibold text-ink-muted">
+                      {i + 1}
+                    </span>
+                    <span className="flex-1 min-w-0">
+                      <span className="text-sm font-medium truncate block">{n.data.label || n.data.operation || "Choose app"}</span>
+                      <span className="text-[11px] text-ink-muted">{n.data.appSlug || "No app"} {n.data.kind === "trigger" ? "· Trigger" : "· Action"}</span>
+                    </span>
+                    {n.data.connectionId ? (
+                      <span className="rounded-full bg-ok/10 px-2 py-0.5 text-[10px] font-medium text-ok">Connected</span>
+                    ) : n.data.appSlug && !(["webhook","http","manual","schedule","filter","paths"].includes(n.data.appSlug)) ? (
+                      <span className="rounded-full bg-warn/10 px-2 py-0.5 text-[10px] font-medium text-warn">Needs auth</span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

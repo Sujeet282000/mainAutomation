@@ -898,6 +898,40 @@ export async function copilotChat(opts: {
     });
   }
 
+  // Platform-level questions the orchestrator cannot answer
+  if (/\b(what (?:integrations?|apps?|actions?|triggers?) (?:are |is )?(?:available|supported|can i)|list (?:integrations?|apps?|connections?))\b/i.test(opts.prompt)) {
+    const { listIntegrations } = await import("./copilot-tools");
+    const result = await listIntegrations();
+    const apps = (result.data as Array<{ slug: string; name: string; operationCount: number }> | undefined) ?? [];
+    const top = apps.slice(0, 20).map((a) => `${a.name} (${a.operationCount} operations)`).join(", ");
+    return finish({
+      reply: `Your platform supports ${apps.length} integrations including: ${top}${apps.length > 20 ? "…" : ""}. Describe a workflow to get started, or pick an app on the canvas.`,
+      source: "copilot-tools",
+      chapter: "explain"
+    });
+  }
+
+  if (/\b(what connections? (?:do i|have|are)|my connected accounts?)\b/i.test(opts.prompt)) {
+    const { listConnections } = await import("./copilot-tools");
+    const result = await listConnections({ workspaceId: opts.workspaceId ?? "", userId: opts.userId ?? "" });
+    const conns = (result.data as Array<{ pieceName: string; label: string; status: string }> | undefined) ?? [];
+    if (!conns.length) {
+      return finish({ reply: "You have no connected accounts yet. Add a step to the workflow and connect an account in Setup.", source: "copilot-tools", chapter: "explain" });
+    }
+    const list = conns.map((c) => `${c.label} (${c.pieceName}) — ${c.status}`).join("\n• ");
+    return finish({ reply: `Your connected accounts:\n• ${list}`, source: "copilot-tools", chapter: "explain" });
+  }
+
+  if (/\b(hi|hello|hey|thanks|thank you)[\s!.]*$/i.test(opts.prompt.trim())) {
+    return finish({
+      reply: snapshot.empty
+        ? "Hello! Describe the workflow you want to build — for example: 'When a Gmail arrives, send a Slack message.'"
+        : `Hello! Your ${snapshot.nodeCount}-step workflow is ready. ${snapshot.youDoFirst?.[0] ?? "Review the steps, test, then publish."}`,
+      source: "copilot",
+      chapter: "inspect"
+    });
+  }
+
   const turn = orchestrateCopilot({
     prompt: opts.prompt,
     graph: opts.graph,

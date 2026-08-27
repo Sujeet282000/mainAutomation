@@ -254,8 +254,8 @@ export async function createAndRunFlow(opts: {
   }
 
   await query(
-    `UPDATE flow_runs SET status = $3, finished_at = now(), context = $4, steps_billable = $5 WHERE id = $1 AND created_at = $2`,
-    [run!.id, run!.created_at, failed ? "failed" : "succeeded", JSON.stringify(ctx), Math.max(0, seq - 1)],
+    `UPDATE flow_runs SET status = $2, finished_at = now(), context = $3, steps_billable = $4 WHERE id = $1`,
+    [run!.id, failed ? "failed" : "succeeded", JSON.stringify(ctx), Math.max(0, seq - 1)],
   );
   return { id: run!.id };
 }
