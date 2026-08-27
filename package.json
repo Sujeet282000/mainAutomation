@@ -5,7 +5,7 @@
   "description": "Orchestra — AI-Native Workflow Automation and Orchestration Platform",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev": "concurrently -n api,web,worker,ai -c blue,green,magenta,cyan \"npm run dev -w @algoverge/api\" \"npm run dev -w @algoverge/web\" \"npm run dev -w @algoverge/worker\" \"npm run dev:ai\"",
+    "dev": "concurrently -n api,web,worker,scheduler,ai -c blue,green,magenta,yellow,cyan \"npm run dev -w @algoverge/api\" \"npm run dev -w @algoverge/web\" \"npm run dev -w @algoverge/worker\" \"npm run dev:scheduler\" \"npm run dev:ai\"",
     "dev:api": "npm run dev -w @algoverge/api",
     "dev:web": "npm run dev -w @algoverge/web",
     "dev:worker": "npm run dev -w @algoverge/worker",
