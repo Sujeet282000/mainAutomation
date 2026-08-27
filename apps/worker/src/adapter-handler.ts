@@ -4,31 +4,30 @@ import { EngineError, type StepHandler } from "@algoverge/engine";
 
 /**
  * Compatibility bridge while integration implementations are migrated from
- * the API application into packages/pieces. No adapter implementation is
- * duplicated or removed; the canonical engine simply invokes the existing
- * handlers through this boundary.
+ * the API application into packages/pieces. Existing adapter implementations
+ * remain untouched; the canonical engine invokes them through this boundary.
  */
 export const adapterStepHandler: StepHandler = {
   async execute({ run, step, props, context, idempotencyKey }) {
-    const raw = step as Record<string, unknown>;
-    const appSlug = String(raw.appSlug ?? raw.app ?? "");
-    const operation = String(raw.operation ?? raw.operationId ?? raw.action ?? "");
+    const raw = step as Record<string, any>;
+    const piece = raw.piece as Record<string, unknown> | undefined;
+    const appSlug = String(piece?.name ?? raw.appSlug ?? raw.app ?? raw.type ?? "");
+    const operation = String(raw.operation ?? raw.operationId ?? props.operation ?? raw.action ?? "");
     const connectionId = raw.connectionId ? String(raw.connectionId) : undefined;
+    const workspaceId = String(run.projectId ?? run.orgId);
 
     if (!appSlug || !operation) {
       return { kind: "error", error: new EngineError("validation", "INVALID_STEP") };
     }
 
     try {
-      const auth = connectionId
-        ? await loadConnectionAuth(connectionId, run.orgId)
-        : null;
+      const auth = connectionId ? await loadConnectionAuth(connectionId, workspaceId) : null;
       const result = await runAdapter({
         appSlug,
         operation,
-        input: props,
+        input: { ...props, context, idempotencyKey },
         auth,
-        workspaceId: run.orgId,
+        workspaceId,
         executionId: run.id,
         connectionId,
         idempotencyKey,
