@@ -15,9 +15,21 @@
     "seed": "npm run seed -w @algoverge/api",
     "docker:up": "docker compose up -d postgres redis",
     "docker:down": "docker compose down",
+<<<<<<< HEAD
     "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/core && npm run build -w @algoverge/ai-agent && npm run build -w @algoverge/engine && npm run build -w @algoverge/api && npm run build -w @algoverge/web && npm run build -w @algoverge/worker && npm run build -w @algoverge/scheduler",
     "test": "npm run test -w @algoverge/api && npm run test -w @algoverge/engine",
     "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p packages/engine/tsconfig.json --noEmit && tsc -p packages/ai-agent/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && tsc -p apps/scheduler/tsconfig.json --noEmit"
+=======
+<<<<<<< HEAD
+    "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/api",
+    "test": "npm run test -w @algoverge/api",
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit"
+=======
+    "build": "npm run build -w @algoverge/shared && npm run build -w @algoverge/engine && npm run build -w @algoverge/api && npm run build -w @algoverge/web && npm run build -w @algoverge/worker && npm run build -w @algoverge/scheduler",
+    "test": "npm run test -w @algoverge/api && npm run test -w @algoverge/engine",
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/db/tsconfig.json --noEmit && tsc -p packages/engine/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && tsc -p apps/scheduler/tsconfig.json --noEmit"
+>>>>>>> 2fc2a3e3137b8aba357a6d1ccb57fda4bb44ce90
+>>>>>>> 05d04df3f678870b2e23a13305e9006abbfecd7a
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
