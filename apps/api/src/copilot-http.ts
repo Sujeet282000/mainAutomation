@@ -6,6 +6,7 @@ import { copilotChat } from "./copilot";
 import { runCopilotEngine } from "./copilot-engine";
 import { parseCopilotMode } from "./copilot-pipeline";
 import { probeAiService, signedAiJson, streamAiCopilotGenerate } from "./ai-service";
+import { listCatalogApps } from "./catalog";
 
 const STAGE_FOR_DB: Record<string, string> = {
   connect: "connections",
@@ -237,30 +238,48 @@ export async function refineCopilotSession(opts: {
       : undefined;
   const ai = await probeAiService();
   if (ai.reachable && graph) {
-    const refined = await signedAiJson<{ applied?: boolean; definition?: unknown; summary?: string }>(
+    const refined = await signedAiJson<{
+      applied?: boolean;
+      definition?: unknown;
+      summary?: string;
+      operations?: Array<{
+        kind: string;
+        arguments: Record<string, unknown>;
+        requires_confirmation?: boolean;
+      }>;
+      needs_input?: string[];
+      issues?: Array<Record<string, unknown>>;
+      publishable?: boolean;
+    }>(
       "/copilot/refine",
-      { definition: persistBuilderDraft(graph), instruction: opts.prompt },
+      {
+        definition: persistBuilderDraft(graph),
+        instruction: opts.prompt,
+        selected_step_id: opts.selectedStepId,
+        catalog: listCatalogApps(),
+      },
       opts.orgId,
     );
-    if (refined?.applied && refined.definition) {
-      try {
-        const next = coerceWorkflowGraph(refined.definition);
-        await query(`UPDATE copilot_sessions SET proposed_definition = $1, updated_at = now() WHERE id = $2`, [
-          JSON.stringify(persistBuilderDraft(next)),
-          opts.sessionId,
-        ]);
-        return {
-          reply: refined.summary ?? "Updated the draft from your instruction.",
-          graph: next,
-          applied: true,
-          summary: refined.summary,
-          source: "python-copilot",
-        };
-      } catch {
-        /* fall through to Node engine */
-      }
+
+    if (refined) {
+      // Python is the reasoning boundary. It must never claim a durable
+      // mutation here; Node remains responsible for validation and applying
+      // any returned operations through its authoritative service/tool layer.
+      return {
+        reply: refined.summary ?? "I prepared a plan for the requested change.",
+        graph,
+        definition: persistBuilderDraft(graph),
+        applied: false,
+        summary: refined.summary,
+        operations: refined.operations ?? [],
+        needs_input: refined.needs_input ?? [],
+        issues: refined.issues ?? [],
+        publishable: false,
+        source: "python-copilot",
+      };
     }
   }
+
   const result = await copilotChat({
     prompt: opts.prompt,
     workspaceId: opts.orgId,
