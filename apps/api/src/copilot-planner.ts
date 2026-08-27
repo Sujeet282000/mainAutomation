@@ -7,12 +7,16 @@ const PlannedIntent = z.object({
   trigger: z.object({
     phrase: z.string().min(1).max(500),
     appHint: z.string().nullable().default(null),
+    operation: z.string().nullable().default(null),
+    operationConfidence: z.number().min(0).max(1).default(0),
     kind: z.enum(["app_event", "schedule", "webhook", "form", "chat", "manual"])
   }),
   steps: z.array(z.object({
     order: z.number().int().positive(),
     phrase: z.string().min(1).max(500),
     appHint: z.string().nullable().default(null),
+    operation: z.string().nullable().default(null),
+    operationConfidence: z.number().min(0).max(1).default(0),
     intentKind: z.enum(["app_action", "ai", "agent", "http", "code", "table"])
   })).max(32),
   ambiguities: z.array(z.string().min(1).max(300)).max(16).default([])
@@ -32,9 +36,10 @@ function extractJson(text: string) {
 function normalize(intent: PlannedCopilotIntent): PlannedCopilotIntent {
   return {
     ...intent,
+    trigger: { ...intent.trigger, appHint: intent.trigger.appHint?.trim() || null, operation: intent.trigger.operation?.trim() || null },
     steps: [...intent.steps]
       .sort((a, b) => a.order - b.order)
-      .map((step, i) => ({ ...step, order: i + 1 })),
+      .map((step, i) => ({ ...step, order: i + 1, appHint: step.appHint?.trim() || null, operation: step.operation?.trim() || null })),
     ambiguities: [...new Set(intent.ambiguities.map((x) => x.trim()).filter(Boolean))]
   };
 }
@@ -75,9 +80,12 @@ export async function planCopilotIntent(opts: {
       "You are the planning layer for a visual automation Copilot.",
       "Understand the user's goal before selecting implementation details.",
       "Return JSON only with summary, trigger, steps, ambiguities.",
+      "For trigger and each executable app step, operation must be the exact operation identifier from the supplied catalog or null.",
+      "Never invent an operation identifier. If no catalog operation is a safe match, return null and explain the missing choice through ambiguities only when it materially changes the workflow.",
       "Each step must describe one meaningful action or control-flow intent in execution order.",
       "Use intentKind=ai for summarization, classification, extraction, generation or transformation; use agent only when the user explicitly asks an autonomous agent to act.",
-      "Do not invent operation identifiers. The catalog is grounding context; appHint should be null when uncertain.",
+      "The catalog is grounding context; appHint should be null when uncertain.",
+      "operationConfidence must reflect confidence in the catalog match, not confidence in the user's request.",
       "Ask an ambiguity only when a missing choice materially changes the workflow. Never ask for credentials, tokens, IDs, or secrets that can be selected later by the UI.",
       "Do not output chain-of-thought. summary is a short user-safe explanation."
     ].join(" ")
