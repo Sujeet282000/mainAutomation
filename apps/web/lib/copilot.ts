@@ -53,10 +53,10 @@ function applyEvent(out: CopilotDraft, ev: Record<string, unknown>) {
   if (ev.source) out.source = String(ev.source);
   if (Array.isArray(ev.operations)) out.operations = ev.operations as CopilotOperation[];
   if (Array.isArray(ev.applied_operations)) out.applied_operations = ev.applied_operations as CopilotOperation[];
-  if (Array.isArray(ev.rejected_operations)) out.rejected_operations = ev.rejected_operations as CopilotDraft['rejected_operations'];
+  if (Array.isArray(ev.rejected_operations)) out.rejected_operations = ev.rejected_operations as CopilotDraft["rejected_operations"];
   if (Array.isArray(ev.needs_confirmation)) out.needs_confirmation = ev.needs_confirmation as CopilotOperation[];
   if (Array.isArray(ev.needs_input)) out.needs_input = ev.needs_input as string[];
-  if (Array.isArray(ev.issues)) out.issues = ev.issues as CopilotDraft['issues'];
+  if (Array.isArray(ev.issues)) out.issues = ev.issues as CopilotDraft["issues"];
 }
 
 export async function generateCopilotDraft(
@@ -98,6 +98,33 @@ export async function persistCopilotSession(sessionId: string, flowId: string) {
   return api<{ ok: boolean; flowId: string }>(`/copilot/sessions/${sessionId}/persist`, {
     method: "POST",
     body: JSON.stringify({ flowId }),
+  });
+}
+
+/**
+ * Approve the server-stored Copilot proposal.
+ *
+ * Deliberately accepts only the session/flow identifiers. The browser never
+ * sends the operation list, graph, credentials, or other executable payload.
+ * The API loads the pending confirmation-gated operations from the session,
+ * revalidates them against the current workflow/catalog, applies them, and
+ * returns the authoritative resulting graph.
+ */
+export async function approveCopilotSession(sessionId: string, flowId?: string) {
+  return api<{
+    ok: boolean;
+    sessionId: string;
+    flowId?: string;
+    graph?: unknown;
+    definition?: unknown;
+    applied_operations: CopilotOperation[];
+    rejected_operations: Array<{ operation: CopilotOperation; reason: string }>;
+    needs_confirmation: CopilotOperation[];
+    issues: Array<{ code?: string; message: string; nodeId?: string }>;
+    publishable: boolean;
+  }>(`/copilot/sessions/${encodeURIComponent(sessionId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify(flowId ? { flowId } : {}),
   });
 }
 
