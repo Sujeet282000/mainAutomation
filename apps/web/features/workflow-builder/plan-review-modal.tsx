@@ -44,7 +44,7 @@ export function PlanReviewModal({
   const [expanded, setExpanded] = useState(true);
   if (!open) return null;
 
-  const steps: PlanStep[] = plan?.preview?.steps ?? [];
+  const steps: PlanStep[] = (plan?.preview?.steps ?? []) as PlanStep[];
   const appsUsed = plan?.preview?.apps_used ?? [];
   const missingConns = plan?.preview?.missing_connections ?? [];
   const missingInfo = plan?.preview?.missing_information ?? [];
@@ -193,7 +193,7 @@ export function PlanReviewModal({
                   Apps I&apos;ll use
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {appsUsed.map((app) => (
+                  {appsUsed.map((app: { name: string; slug: string }) => (
                     <span
                       key={app.slug}
                       className="inline-flex items-center gap-1 rounded-full border border-line bg-muted px-2.5 py-1 text-xs text-ink"
@@ -213,7 +213,7 @@ export function PlanReviewModal({
                   Needs your attention
                 </p>
                 <ul className="mt-2 space-y-1">
-                  {missingConns.map((item) => (
+                  {missingConns.map((item: string) => (
                     <li
                       key={item}
                       className="flex items-start gap-1.5 text-xs text-ink"
@@ -233,7 +233,7 @@ export function PlanReviewModal({
                   I still need from you
                 </p>
                 <ul className="mt-2 space-y-1">
-                  {missingInfo.map((item) => (
+                  {missingInfo.map((item: string) => (
                     <li
                       key={item}
                       className="flex items-start gap-1.5 text-xs text-ink-muted"

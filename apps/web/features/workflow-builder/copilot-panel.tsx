@@ -5,6 +5,7 @@ import { AlertTriangle, Check, History, Maximize2, PanelLeftClose, PanelLeftOpen
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { CopilotMode } from "./copilot-types";
+import { WorkflowPreview, type WorkflowPreviewData } from "./workflow-preview";
 
 type Msg = {
   role: "user" | "assistant";
