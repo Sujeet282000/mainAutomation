@@ -1,32 +1,32 @@
-import { Worker } from "bullmq";
-import { runExecution } from "../../api/src/engine";
+import { Queue, Worker } from "bullmq";
 import { connection } from "../../api/src/queue";
-import { tickSchedules } from "../../api/src/schedules";
-import { tickPolling } from "../../api/src/poll";
-import { isNonRetryableError } from "../../api/src/runtime-guards";
+import { db } from "@algoverge/db";
+import { Executor } from "@algoverge/engine";
 
-new Worker(
-  "executions",
+const transitionQueue = new Queue("flow-steps", { connection });
+const executor = new Executor(db, { flowStep: transitionQueue }, new Map());
+
+const worker = new Worker(
+  "flow-steps",
   async (job) => {
-    const executionId = String(job.data.executionId);
-    try {
-      await runExecution(executionId);
-    } catch (err) {
-      if (isNonRetryableError(err)) return;
-      throw err;
-    }
+    const runId = String(job.data.runId);
+    const cursor = Number(job.data.cursor ?? 0);
+    const epoch = Number(job.data.epoch ?? 1);
+    await executor.transition(runId, cursor, epoch);
   },
-  { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 25) }
+  { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 25) },
 );
 
-async function tick() {
-  await tickSchedules();
-  await tickPolling();
-}
+worker.on("completed", (job) => console.log(`Flow run ${job.data.runId} transition completed`));
+worker.on("failed", (job, err) => console.error(`Flow run ${job?.data?.runId ?? "unknown"} failed`, err));
+worker.on("error", (err) => console.error("Worker error", err));
 
-setInterval(() => {
-  tick().catch((err) => console.error("schedule/poll tick", err));
-}, 60_000);
-tick().catch((err) => console.error("schedule/poll tick", err));
+console.log("Worker listening on flow-steps queue");
 
-console.log("Worker listening on executions queue + schedule/poll ticker");
+const shutdown = async () => {
+  await worker.close();
+  await transitionQueue.close();
+  process.exit(0);
+};
+process.once("SIGTERM", () => void shutdown());
+process.once("SIGINT", () => void shutdown());
