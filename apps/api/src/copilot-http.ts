@@ -70,10 +70,6 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
             const grounded = operations.length
               ? await groundGraph(rawGraph ?? ev.graph, operations as AgentOperation[], { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: false })
               : { graph: coerceWorkflowGraph(ev.graph), applied: [], rejected: [], needsConfirmation: [], issues: [], testResults: [] };
-            const requiresReview = grounded.needsConfirmation.length > 0 || grounded.rejected.length > 0;
-            const persisted = requiresReview ? null : await persistGroundedGraph(opts.sessionId, grounded.graph);
-            sawResult = true;
-            await send({ ...ev, graph: requiresReview ? rawGraph ?? ev.graph : persisted!.graph, definition: persisted?.definition, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: !requiresReview && grounded.applied.length > 0, mode, source: "python-copilot" });
             const needsApproval = grounded.needsConfirmation.length > 0 || grounded.rejected.length > 0;
             const persisted = await persistGroundedGraph(opts.sessionId, grounded.graph, needsApproval ? operations : undefined);
             sawResult = true;
