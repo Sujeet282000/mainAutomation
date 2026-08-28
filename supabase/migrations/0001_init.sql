@@ -4,12 +4,38 @@
 -- ============================================================================
 
 -- ──────────────────────────────────────────────────────────────────────────────
+-- Supabase-compatible roles (normally pre-created by Supabase)
+-- ──────────────────────────────────────────────────────────────────────────────
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'supabase_admin') THEN
+    CREATE ROLE supabase_admin NOLOGIN;
+  END IF;
+END
+$$;
+
+-- Grant schema usage to roles
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON SCHEMA public TO supabase_admin;
+
+-- ──────────────────────────────────────────────────────────────────────────────
 -- Extensions
 -- ──────────────────────────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS vector;          -- pgvector, schema: extensions
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS vector SCHEMA extensions;  -- pgvector, schema: extensions
+SET search_path TO public, extensions, pg_catalog;
 
 -- pg_cron requires Supabase project setting; fail early if absent.
 DO $$
@@ -78,6 +104,8 @@ CREATE TABLE public.users (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email       TEXT NOT NULL UNIQUE,
   email_normalized TEXT GENERATED ALWAYS AS (lower(trim(email))) STORED,
+  password_hash TEXT,
+  email_verified_at TIMESTAMPTZ,
   full_name   TEXT,
   avatar_url  TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -307,7 +335,8 @@ CREATE TABLE public.triggers_registry (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   FOREIGN KEY (flow_id, org_id) REFERENCES public.flows(id, org_id) ON DELETE CASCADE,
-  UNIQUE (id, org_id)
+  UNIQUE (id, org_id),
+  UNIQUE (id, flow_id)
 );
 
 -- ──────────────────────────────────────────────────────────────────────────────
@@ -345,6 +374,7 @@ CREATE TABLE public.flow_runs (
   FOREIGN KEY (flow_id, org_id) REFERENCES public.flows(id, org_id) ON DELETE CASCADE,
   FOREIGN KEY (flow_version_id, org_id) REFERENCES public.flow_versions(id, org_id) ON DELETE RESTRICT
 ) PARTITION BY RANGE (created_at);
+CREATE UNIQUE INDEX flow_runs_id_uniq ON public.flow_runs (id, created_at, org_id);
 CREATE UNIQUE INDEX flow_runs_idempotency_idx ON public.flow_runs (org_id, idempotency_key, created_at) WHERE idempotency_key IS NOT NULL;
 
 -- run_steps: one row per node execution, partition key = run_created_at

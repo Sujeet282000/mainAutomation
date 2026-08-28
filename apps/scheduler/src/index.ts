@@ -1,4 +1,17 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import fs from "fs";
+import path from "path";
+
+// Inline .env loader (no dotenv dependency needed)
+for (const envFile of [".env", ".env.local"]) {
+  const p = path.resolve(__dirname, "../../../", envFile);
+  if (fs.existsSync(p)) {
+    for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+      const m = line.match(/^([^#=]+)=(.*)$/);
+      if (m && !process.env[m[1].trim()]) process.env[m[1].trim()] = m[2].trim();
+    }
+  }
+}
 
 const API_URL = (process.env.API_URL ?? "http://localhost:4000").replace(/\/$/, "");
 const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET;

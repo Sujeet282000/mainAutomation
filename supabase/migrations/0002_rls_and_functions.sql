@@ -2,6 +2,8 @@
 -- Orchestra Part 4 — RLS policies, triggers, and helper functions
 -- ============================================================================
 
+SET search_path TO public, extensions, pg_catalog;
+
 -- ──────────────────────────────────────────────────────────────────────────────
 -- Helper functions for RLS (read membership as definer, avoid recursion)
 -- ──────────────────────────────────────────────────────────────────────────────
@@ -548,7 +550,7 @@ RETURNS TABLE (dependency_type TEXT, dependency_id TEXT)
 LANGUAGE sql SECURITY DEFINER
 SET search_path = pg_catalog, public AS $$
   SELECT 'connection'::TEXT, conn_id
-  FROM jsonb_array_elements_text(
+  FROM unnest(
     (SELECT regexp_matches(draft_definition::text, '"connectionId"\s*:\s*"([^"]+)"', 'g')
      FROM public.flows WHERE id = p_flow_id AND org_id = p_org_id)
   ) AS conn_id
