@@ -1,8 +1,8 @@
 import type { GraphNode, WorkflowGraph } from "@algoverge/shared";
-import { APP_CATALOG } from "./catalog";
-import { pieceRegistry } from "./pieces/registry";
-import { validateWorkflowGraph } from "./workflow-validation";
-import { AgentOperation, parseAgentOperations, AGENT_MUTATING_OPERATION_TYPES, type AgentOperation as AgentOperationType } from "./agent/operations";
+import { APP_CATALOG } from "../catalog";
+import { pieceRegistry } from "../pieces/registry";
+import { validateWorkflowGraph } from "../workflow-validation";
+import { AgentOperation, parseAgentOperations, AGENT_MUTATING_OPERATION_TYPES, type AgentOperation as AgentOperationType } from "./operations";
 
 export type AgentBoundaryMode = "preview" | "apply";
 
@@ -72,7 +72,8 @@ export function validateAgentOperations(raw: unknown, graph: WorkflowGraph): { o
     const args = operation.arguments ?? {};
     const prefix = `Operation ${index + 1} (${operation.kind})`;
 
-    if (AGENT_MUTATING_OPERATION_TYPES.has(operation.kind) && hasCredentialMaterial(args)) {
+    const isMutating = operation.kind !== "validate_workflow" && operation.kind !== "test_action" && operation.kind !== "explain_run";
+    if (isMutating && AGENT_MUTATING_OPERATION_TYPES.has(operation.kind as typeof AGENT_MUTATING_OPERATION_TYPES extends Set<infer T> ? T : never) && hasCredentialMaterial(args)) {
       errors.push(`${prefix}: credential or secret material is not allowed in AgentOperation arguments.`);
       return;
     }
@@ -187,7 +188,7 @@ function applyOne(graph: WorkflowGraph, operation: AgentOperationType): void {
  * Single controlled boundary for AI-proposed graph changes.
  * Preview never mutates. Apply clones, applies, then validates the final graph.
  */
-export function executeAgentOperations(raw: unknown, graph: WorkflowGraph, mode: AgentBoundaryMode = "preview"): AgentBoundaryResult {
+export async function executeAgentOperations(raw: unknown, graph: WorkflowGraph, mode: AgentBoundaryMode = "preview"): Promise<AgentBoundaryResult> {
   const checked = validateAgentOperations(raw, graph);
   if (checked.errors.length) {
     return { ok: false, status: "rejected", graph, operations: checked.operations, applied: [], pending: [], errors: checked.errors, warnings: checked.warnings };
@@ -214,9 +215,9 @@ export function executeAgentOperations(raw: unknown, graph: WorkflowGraph, mode:
     return { ok: false, status: "rejected", graph, operations: checked.operations, applied: [], pending: [], errors: [error instanceof Error ? error.message : "Agent operation failed"], warnings: checked.warnings };
   }
 
-  const validation = validateWorkflowGraph(next);
-  if (!validation.valid) {
-    return { ok: false, status: "rejected", graph, operations: checked.operations, applied: [], pending: [], errors: validation.errors ?? ["Resulting workflow is invalid."], warnings: checked.warnings };
+  const validation = await validateWorkflowGraph(next, { workspaceId: "", strict: false });
+  if (validation.issues.length) {
+    return { ok: false, status: "rejected", graph, operations: checked.operations, applied: [], pending: [], errors: validation.issues.map((issue) => issue.message), warnings: checked.warnings };
   }
 
   return { ok: true, status: "applied", graph: next, operations: checked.operations, applied: checked.operations, pending: [], errors: [], warnings: checked.warnings };

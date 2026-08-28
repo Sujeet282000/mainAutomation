@@ -9,11 +9,6 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-<<<<<<< HEAD
-  "include": ["src", "../../packages/core/src", "../../packages/shared/src", "../../packages/crypto/src", "../../packages/model-gateway/src", "../../packages/engine/src"],
-  "exclude": ["src/**/*.test.ts", "src/__tests__/**"]
-=======
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
->>>>>>> ceb3f3ba741aa802e4d850901999006a1e531ff2
+  "exclude": ["src/**/*.test.ts", "src/__tests__/**"]
 }

@@ -7,7 +7,6 @@ import { applyAgentOperations, type AgentOperation } from "./agent-operation-app
 import { persistBuilderDraft } from "./flow-runtime";
 
 export const copilotApprovalRouter = Router();
-copilotApprovalRouter.use(authMiddleware, orgMiddleware);
 
 const approveBody = z.object({
   flowId: z.string().uuid().optional(),
@@ -18,7 +17,7 @@ const approveBody = z.object({
  * Approval never trusts operations supplied by the browser. The server takes
  * the exact confirmation-gated operations recorded in the latest proposal.
  */
-copilotApprovalRouter.post("/copilot/sessions/:id/approve", requireRole("owner", "admin", "editor"), async (req, res) => {
+copilotApprovalRouter.post("/copilot/sessions/:id/approve", authMiddleware, orgMiddleware, requireRole("owner", "admin", "editor"), async (req, res) => {
   const body = approveBody.parse(req.body ?? {});
   const session = await queryOne<{
     id: string;

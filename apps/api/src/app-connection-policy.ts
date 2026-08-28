@@ -54,7 +54,7 @@ export function getConnectionSetup(appSlug: string): ConnectionSetup | null {
   return {
     appSlug: app.slug,
     appName: app.name,
-    authType: app.authType,
+    authType: app.authType ?? "none",
     ...(GOOGLE.has(app.slug) ? { oauthProvider: "google" } : {}),
     fields: authFields(app),
     capabilities: counts

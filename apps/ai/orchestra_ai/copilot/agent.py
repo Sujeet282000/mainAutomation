@@ -99,15 +99,9 @@ SUPPORTED OPERATIONS:
 add_node, remove_node, update_node, connect_nodes, disconnect_nodes, configure_node, map_field, validate_workflow, test_action, explain_run.
 
 Return JSON matching AgentReply exactly."""
-    operations: list[AgentOperation] = Field(default_factory=list)
-    needs_input: list[str] = Field(default_factory=list)
-    intent: str = ""  # BUILD_WORKFLOW | MODIFY_WORKFLOW | CONFIGURE | TEST | DIAGNOSE | EXPLAIN
-    confidence: float = Field(0.0, ge=0.0, le=1.0)
-    plan: PlanPreview | None = None
-    risks: list[str] = Field(default_factory=list)
 
 
-SYSTEM = """You are Orchestra Copilot, a workflow automation agent.
+LEGACY_SYSTEM = """You are Orchestra Copilot, a workflow automation agent.
 
 ## Core behavior
 You think before you answer. When the user asks you to build or modify a workflow:

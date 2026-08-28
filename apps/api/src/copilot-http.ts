@@ -71,9 +71,13 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
               ? await groundGraph(rawGraph ?? ev.graph, operations as AgentOperation[], { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: false })
               : { graph: coerceWorkflowGraph(ev.graph), applied: [], rejected: [], needsConfirmation: [], issues: [], testResults: [] };
             const needsApproval = grounded.needsConfirmation.length > 0 || grounded.rejected.length > 0;
-            const persisted = await persistGroundedGraph(opts.sessionId, grounded.graph, needsApproval ? operations : undefined);
+            const persisted = await persistGroundedGraph(
+              opts.sessionId,
+              grounded.graph,
+              needsApproval ? operations : undefined,
+            );
             sawResult = true;
-            await send({ ...ev, graph: persisted.graph, definition: persisted.definition, sessionId: opts.sessionId, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: mode === "auto_build" && grounded.needsConfirmation.length === 0 && grounded.rejected.length === 0, mode, source: "python-copilot" });
+            await send({ ...ev, graph: persisted.graph, definition: persisted.definition, sessionId: opts.sessionId, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: mode === "auto_build" && !needsApproval, mode, source: "python-copilot" });
             continue;
           } catch (error) {
             await send({ type: "error", stage: "validate", message: error instanceof Error ? error.message : "AI proposal could not be grounded" });
