@@ -1,5 +1,104 @@
 export type GraphNodeType = "trigger" | "action" | "logic";
 
+// ─── Asset Registry (Unified Product Model) ─────────────────────────────────
+export {
+  AssetType,
+  AssetStatus,
+  Asset,
+  AssetRelation,
+  AssetGraph,
+  Folder,
+  KnowledgeSource,
+} from "./assets";
+export type {
+  AssetType as AssetTypeValue,
+  AssetStatus as AssetStatusValue,
+} from "./assets";
+
+// ─── Tables ──────────────────────────────────────────────────────────────────
+export {
+  TableFieldType,
+  TableField,
+  ViewType,
+  TableView,
+  TableRecord,
+  TableAutomation,
+  Table,
+} from "./tables";
+
+// ─── Forms ───────────────────────────────────────────────────────────────────
+export {
+  FormComponentType,
+  FormComponent,
+  FormPage,
+  Form,
+  FormSubmission,
+} from "./forms";
+
+// ─── Interfaces ──────────────────────────────────────────────────────────────
+export {
+  InterfaceComponentType,
+  InterfaceComponent,
+  InterfacePage,
+  Interface,
+} from "./interfaces";
+
+// ─── Canvas ──────────────────────────────────────────────────────────────────
+export {
+  CanvasNodeType,
+  CanvasNode,
+  CanvasEdge,
+  CanvasGroup,
+  Canvas,
+} from "./canvas";
+
+// ─── Agents ──────────────────────────────────────────────────────────────────
+export {
+  AgentToolType,
+  AgentTool,
+  Agent,
+  AgentRun,
+} from "./agents";
+
+// ─── Chatbots ────────────────────────────────────────────────────────────────
+export {
+  Chatbot,
+  ChatbotSession,
+} from "./chatbots";
+
+// ─── Approvals ───────────────────────────────────────────────────────────────
+export {
+  ApprovalType,
+  ApprovalRequest,
+} from "./approvals";
+
+// ─── Notifications ───────────────────────────────────────────────────────────
+export {
+  NotificationCategory,
+  NotificationChannel,
+  Notification,
+  NotificationPreference,
+} from "./notifications";
+
+// ─── Copilot Product Router ──────────────────────────────────────────────────
+export {
+  IntentClassification,
+  classifyIntent,
+} from "./copilot-router";
+
+// ─── AutomationPlan IR ───────────────────────────────────────────────────
+export {
+  AutomationPlan,
+  PlanStep,
+  PlanStepType,
+  PlanConnection,
+  AttentionItem,
+  DataRef,
+  FieldMapping,
+  PlanValidationResult,
+} from "./automation-plan";
+
+
 export {
   defaultWorkflowGraph,
   emptyActionNode,

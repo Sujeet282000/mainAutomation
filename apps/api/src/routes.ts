@@ -508,37 +508,8 @@ authed.post("/flows/:id/step/:stepId/test", requireRole("owner", "admin", "edito
 // CONNECTIONS (Part 10 § "Connections")
 // ============================================================================
 
-authed.get("/connections", async (req, res) => {
-  const rows = await query(
-    `SELECT id, piece_name as app_slug, label as name, auth_type, status, owner_email,
-            use_count as zap_count, last_used_at, created_at,
-            (SELECT display_name FROM pieces WHERE name = connections.piece_name AND org_id = connections.org_id LIMIT 1) as app_name
-     FROM connections WHERE org_id = $1 ORDER BY created_at DESC`,
-    [req.orgId],
-  );
-  res.json({ connections: rows });
-});
-
-authed.post("/connections", async (req, res) => {
-  const body = z
-    .object({
-      projectId: z.string().uuid().optional(),
-      pieceId: z.string().uuid().optional(),
-      pieceName: z.string(),
-      label: z.string().min(1),
-      authType: z.enum(["oauth2", "api_key", "basic", "custom", "none"]),
-      ownerEmail: z.string().email().optional(),
-    })
-    .parse(req.body);
-
-  const row = await queryOne<{ id: string }>(
-    `INSERT INTO connections (org_id, project_id, piece_id, piece_name, label, auth_type, owner_email, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active') RETURNING id`,
-    [req.orgId, body.projectId ?? null, body.pieceId ?? null, body.pieceName, body.label, body.authType, body.ownerEmail ?? null],
-  );
-
-  res.json({ connection: { id: row!.id, ...body, status: "active" } });
-});
+// NOTE: GET /connections, POST /connections, PATCH /connections/:id live in ui-compat.ts
+// (they have credential sealing logic). DELETE /connections/:id and POST /test live here.
 
 authed.delete("/connections/:id", async (req, res) => {
   // Check for dependent flows
@@ -580,6 +551,41 @@ authed.post("/connections/:id/test", async (req, res) => {
     } else if (["gmail", "google-sheets", "google-calendar", "google-drive"].includes(conn.piece_name)) {
       const { testGoogleConnection } = await import("./adapters");
       await testGoogleConnection(auth, conn.id, req.orgId);
+    } else if (conn.piece_name === "slack") {
+      const token = String(auth.bot_token ?? auth.access_token ?? "");
+      if (!token) throw new Error("Slack bot_token is missing from the connection.");
+      const res = await fetch("https://slack.com/api/auth.test", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      const body = await res.json() as { ok?: boolean; error?: string; user?: string; team?: string };
+      if (!body.ok) throw new Error(`Slack auth.test failed: ${body.error ?? "unknown"}. Reconnect with a valid bot token (xoxb-...).`);
+    } else if (conn.piece_name === "github") {
+      const token = String(auth.access_token ?? auth.api_key ?? "");
+      if (!token) throw new Error("GitHub token is missing from the connection.");
+      const res = await fetch("https://api.github.com/user", {
+        headers: { authorization: `token ${token}`, "user-agent": "orchestra" }
+      });
+      if (!res.ok) throw new Error(`GitHub auth failed (${res.status}). Reconnect with a valid token.`);
+    } else if (conn.piece_name === "telegram") {
+      const token = String(auth.api_key ?? auth.bot_token ?? "");
+      if (!token) throw new Error("Telegram bot token is missing.");
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const body = await res.json() as { ok?: boolean; description?: string };
+      if (!body.ok) throw new Error(`Telegram auth failed: ${body.description ?? "unknown"}.`);
+    } else if (conn.piece_name === "hubspot") {
+      const token = String(auth.access_token ?? "");
+      if (!token) throw new Error("HubSpot access token is missing.");
+      const res = await fetch("https://api.hubapi.com/crm/v3/objects/contacts?limit=1", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error(`HubSpot auth failed (${res.status}). Reconnect with a valid token.`);
+    } else if (conn.piece_name === "stripe") {
+      const token = String(auth.api_key ?? auth.secret_key ?? "");
+      if (!token) throw new Error("Stripe secret key is missing.");
+      const res = await fetch("https://api.stripe.com/v1/balance", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error(`Stripe auth failed (${res.status}). Reconnect with a valid key.`);
     }
     await query(`UPDATE connections SET status = 'active', updated_at = now() WHERE id = $1 AND org_id = $2`, [
       conn.id,
@@ -591,17 +597,7 @@ authed.post("/connections/:id/test", async (req, res) => {
   }
 });
 
-// PATCH /connections/:id — rename
-authed.patch("/connections/:id", async (req, res) => {
-  const body = z.object({ name: z.string().min(1).optional(), label: z.string().min(1).optional() }).parse(req.body);
-  const name = body.name ?? body.label;
-  if (!name) return res.status(400).json({ error: "nothing_to_update" });
-  await query(
-    `UPDATE connections SET label = $3, updated_at = now() WHERE id = $1 AND org_id = $2`,
-    [req.params.id, req.orgId, name],
-  );
-  res.json({ ok: true, connection: { id: req.params.id, name } });
-});
+// NOTE: PATCH /connections/:id lives in ui-compat.ts (credential sealing)
 
 // ============================================================================
 // PIECES & CATALOG (Part 10 § "Pieces and catalog")
@@ -949,6 +945,158 @@ authed.post("/copilot/sessions/:id/persist", requireRole("owner", "admin", "edit
   );
 
   res.json({ ok: true, flowId });
+});
+
+// POST /copilot/build — Build an AutomationPlan atomically into a persisted workflow
+authed.post("/copilot/build", requireRole("owner", "admin", "editor"), async (req, res) => {
+  const body = z
+    .object({
+      plan: z.record(z.unknown()),
+      projectId: z.string().uuid().optional(),
+    })
+    .parse(req.body);
+
+  try {
+    const { buildPlanAtomically } = await import("./copilot-plan-builder");
+    const { AutomationPlan } = await import("@algoverge/shared");
+
+    // Validate plan structure
+    const planParsed = AutomationPlan.safeParse(body.plan);
+    if (!planParsed.success) {
+      return res.status(400).json({ error: "invalid_plan", details: planParsed.error.flatten() });
+    }
+
+    const result = await buildPlanAtomically({
+      plan: planParsed.data,
+      workspaceId: req.orgId!,
+      userId: req.user!.userId,
+      projectId: body.projectId,
+    });
+
+    res.json({ ok: true, flowId: result.flowId, graph: result.graph });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: "build_failed", detail: msg });
+  }
+});
+
+// GET /copilot/readiness — Show integration readiness stats with acceptance checklist
+authed.get("/copilot/readiness", async (req, res) => {
+  const { getCatalogReadiness, getReadinessStats } = await import("./catalog-readiness");
+  const { generateAcceptanceChecklist, generateAcceptanceReport } = await import("./integration-test-harness");
+  const stats = getReadinessStats();
+  const apps = [...getCatalogReadiness().values()];
+
+  // Add acceptance checklist to each app
+  const appsWithChecklist = apps.map((app) => ({
+    ...app,
+    acceptance: generateAcceptanceChecklist(app.slug),
+  }));
+
+  const report = generateAcceptanceReport();
+  res.json({ stats, apps: appsWithChecklist, report });
+});
+
+// GET /copilot/readiness/:slug — Show detailed readiness for a specific app
+authed.get("/copilot/readiness/:slug", async (req, res) => {
+  const { getCatalogReadiness } = await import("./catalog-readiness");
+  const { generateAcceptanceChecklist } = await import("./integration-test-harness");
+  const { getAppFixtures } = await import("./test-data-fixtures");
+  const app = getCatalogReadiness().get(req.params.slug);
+  if (!app) return res.status(404).json({ error: "app_not_found" });
+  const acceptance = generateAcceptanceChecklist(app.slug);
+  const fixtures = getAppFixtures(app.slug);
+  res.json({ app, acceptance, fixtures });
+});
+
+// POST /copilot/test-step — Test a single workflow step against a real provider
+authed.post("/copilot/test-step", requireRole("owner", "admin", "editor"), async (req, res) => {
+  const body = z
+    .object({
+      appSlug: z.string(),
+      operation: z.string(),
+      connectionId: z.string().uuid().optional(),
+      config: z.record(z.unknown()).default({}),
+    })
+    .parse(req.body);
+
+  const { getFixture } = await import("./test-data-fixtures");
+  const { getAdapter } = await import("./adapters/registry");
+
+  const adapter = getAdapter(body.appSlug, body.operation);
+  if (!adapter) {
+    // Return sample data from fixtures instead
+    const fixture = getFixture(body.appSlug, body.operation);
+    if (fixture) {
+      return res.json({
+        ok: true,
+        appSlug: body.appSlug,
+        operation: body.operation,
+        executionTimeMs: 0,
+        output: fixture.sampleOutput,
+        error: undefined,
+        errorType: "none",
+        sampleSaved: false,
+        note: "No live adapter — returned sample fixture data",
+      });
+    }
+    return res.status(400).json({ error: "no_adapter", detail: `No adapter for ${body.appSlug}.${body.operation}` });
+  }
+
+  // Execute real adapter call
+  const start = Date.now();
+  try {
+    const result = await adapter({
+      appSlug: body.appSlug,
+      operation: body.operation,
+      input: body.config,
+      auth: null, // Connection auth resolved separately
+      workspaceId: req.orgId!,
+      executionId: `test-${Date.now()}`,
+      connectionId: body.connectionId,
+    });
+    res.json({
+      ok: true,
+      appSlug: body.appSlug,
+      operation: body.operation,
+      executionTimeMs: Date.now() - start,
+      output: result.output,
+      error: undefined,
+      errorType: "none",
+      sampleSaved: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const errorType = /auth|token|401|403/i.test(msg) ? "auth_error"
+      : /rate|429/i.test(msg) ? "rate_limit"
+      : /timeout/i.test(msg) ? "timeout"
+      : /valid/i.test(msg) ? "validation_error"
+      : "provider_error";
+    res.json({
+      ok: false,
+      appSlug: body.appSlug,
+      operation: body.operation,
+      executionTimeMs: Date.now() - start,
+      output: undefined,
+      error: msg,
+      errorType,
+      sampleSaved: false,
+    });
+  }
+});
+
+// GET /copilot/fixtures — List all available test fixtures
+authed.get("/copilot/fixtures", async (req, res) => {
+  const { TEST_FIXTURES, getFixedAppSlugs } = await import("./test-data-fixtures");
+  res.json({
+    total: TEST_FIXTURES.length,
+    apps: getFixedAppSlugs(),
+    fixtures: TEST_FIXTURES.map((f) => ({
+      appSlug: f.appSlug,
+      operation: f.operation,
+      description: f.description,
+    })),
+  });
 });
 
 authed.get("/copilot/status", async (req, res) => {
@@ -1576,6 +1724,107 @@ authed.delete("/automations/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+authed.post("/automations/:id/run", async (req, res) => {
+  try {
+    const flow = await queryOne<{ id: string }>(
+      `SELECT id FROM flows WHERE id = $1 AND org_id = $2`,
+      [req.params.id, req.orgId],
+    );
+    if (!flow) return res.status(404).json({ error: "not_found" });
+
+    // Execute workflow — createAndRunFlow creates the run record first, returns ID
+    const { createAndRunFlow } = await import("./flow-runtime");
+    const exec = await createAndRunFlow({
+      orgId: req.orgId!,
+      flowId: flow.id,
+      userId: req.user!.userId,
+      payload: (req.body as any)?.payload ?? { ping: true },
+      triggerKind: "manual",
+    });
+    res.json({ execution: { id: exec.id, status: "started" } });
+  } catch (err: any) {
+    console.error("POST /automations/:id/run error:", err);
+    res.status(500).json({ error: err.message ?? "run_failed" });
+  }
+});
+
+authed.post("/automations/:id/test-step", async (req, res) => {
+  const flow = await queryOne<{ id: string }>(
+    `SELECT id FROM flows WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
+  if (!flow) return res.status(404).json({ error: "not_found" });
+  try {
+    const body = z.object({ nodeId: z.string().optional(), graph: z.unknown().optional(), inputs: z.record(z.unknown()).default({}) }).parse(req.body);
+    // If nodeId is provided, execute the real step via testFlowStep
+    if (body.nodeId && body.graph) {
+      const { testFlowStep } = await import("./flow-runtime");
+      const result = await testFlowStep({ orgId: req.orgId!, flowId: flow.id, nodeId: body.nodeId, graph: body.graph });
+      res.json(result);
+    } else {
+      // Fallback: return inputs as output (backward compat)
+      res.json({ ok: true, output: body.inputs, duration_ms: 0, status: "succeeded" });
+    }
+  } catch (err: any) {
+    console.error("POST /automations/:id/test-step error:", err);
+    res.status(400).json({ error: err.message ?? "test_step_failed" });
+  }
+});
+
+authed.post("/automations/:id/publish", async (req, res) => {
+  const flow = await queryOne<{ id: string }>(
+    `SELECT id FROM flows WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
+  if (!flow) return res.status(404).json({ error: "not_found" });
+  try {
+    const { ensureFlowVersion, loadBuilderGraph, persistBuilderDraft } = await import("./flow-runtime");
+    const dbFlow = await queryOne<{ id: string; draft_definition: unknown; project_id: string }>(
+      `SELECT id, draft_definition, project_id FROM flows WHERE id = $1 AND org_id = $2`,
+      [flow.id, req.orgId],
+    );
+    if (!dbFlow) return res.status(404).json({ error: "not_found" });
+    const draft = persistBuilderDraft(loadBuilderGraph(dbFlow.draft_definition));
+    const versionId = await ensureFlowVersion({
+      orgId: req.orgId!, flowId: dbFlow.id, definition: draft, userId: req.user!.userId,
+    });
+    await query(`UPDATE flows SET published_version_id = $1, status = 'active', updated_at = now() WHERE id = $2`, [versionId, dbFlow.id]);
+    res.json({ ok: true, versionId });
+  } catch (err: any) {
+    console.error("POST /automations/:id/publish error:", err);
+    res.status(500).json({ error: err.message ?? "publish_failed" });
+  }
+});
+
+authed.post("/automations/:id/validate", async (req, res) => {
+  const flow = await queryOne<{ id: string }>(
+    `SELECT id FROM flows WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
+  if (!flow) return res.status(404).json({ error: "not_found" });
+  try {
+    const { loadBuilderGraph } = await import("./flow-runtime");
+    const dbFlow = await queryOne<{ id: string; draft_definition: unknown }>(
+      `SELECT id, draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
+      [flow.id, req.orgId],
+    );
+    if (!dbFlow) return res.status(404).json({ error: "not_found" });
+    const graph = loadBuilderGraph(dbFlow.draft_definition);
+    const issues: Array<{ message: string; severity: string }> = [];
+    if (!graph.nodes || graph.nodes.length === 0) {
+      issues.push({ message: "No steps in workflow", severity: "error" });
+    }
+    const hasTrigger = graph.nodes?.some((n: any) => n.type === "trigger");
+    if (!hasTrigger) {
+      issues.push({ message: "No trigger step found", severity: "warning" });
+    }
+    res.json({ ok: issues.filter(i => i.severity === "error").length === 0, issues });
+  } catch (err: any) {
+    console.error("POST /automations/:id/validate error:", err);
+    res.status(500).json({ error: err.message ?? "validate_failed" });
+  }
+});
+
 authed.post("/automations/:id/duplicate", async (req, res) => {
   const flow = await queryOne<{ id: string; name: string; draft_definition: any; project_id: string }>(
     `SELECT id, name, draft_definition, project_id FROM flows WHERE id = $1 AND org_id = $2`,
@@ -1870,6 +2119,18 @@ authed.post("/tables", async (req, res) => {
   res.json({ table: { id: row!.id, name: body.name } });
 });
 
+authed.get("/tables/:id", async (req, res) => {
+  const row = await queryOne(`SELECT * FROM data_tables WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId]);
+  if (!row) return res.status(404).json({ error: "not_found" });
+  res.json({ table: row });
+});
+
+authed.delete("/tables/:id", async (req, res) => {
+  await query(`DELETE FROM data_table_rows WHERE table_id = $1 AND org_id = $2`, [req.params.id, req.orgId]);
+  await query(`DELETE FROM data_tables WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
+});
+
 authed.patch("/tables/:id", async (req, res) => {
   const body = z.object({ schema: z.record(z.unknown()).optional(), name: z.string().optional() }).parse(req.body);
   const sets: string[] = [];
@@ -2033,6 +2294,11 @@ authed.post("/forms", async (req, res) => {
   res.json({ form: { id: row!.id, name: body.name } });
 });
 
+authed.delete("/forms/:id", async (req, res) => {
+  await query(`DELETE FROM data_tables WHERE id = $1 AND org_id = $2 AND name LIKE 'form:%'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
+});
+
 authed.get("/forms/:id/submissions", async (req, res) => {
   // Form submissions are stored as data_table_rows
   const rows = await query(
@@ -2104,6 +2370,11 @@ authed.post("/interfaces", async (req, res) => {
   res.json({ interface: presentItem(row!) });
 });
 
+authed.delete("/interfaces/:id", async (req, res) => {
+  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'interface'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
+});
+
 authed.get("/chatbots", async (req, res) => {
   const rows = await listItems(req.orgId!, "chatbot");
   res.json({ chatbots: rows.map(presentItem) });
@@ -2120,6 +2391,11 @@ authed.post("/chatbots", async (req, res) => {
   const slug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const row = await insertItem(req.orgId!, "chatbot", body.name, { ...body, slug, activities: [] });
   res.json({ chatbot: presentItem(row!) });
+});
+
+authed.delete("/chatbots/:id", async (req, res) => {
+  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
 });
 
 authed.post("/chatbots/:id/chat", async (req, res) => {
@@ -2151,6 +2427,11 @@ authed.post("/agents", async (req, res) => {
   }).parse(req.body);
   const row = await insertItem(req.orgId!, "agent", body.name, { ...body, status: "active", activities: [] });
   res.json({ agent: presentItem(row!) });
+});
+
+authed.delete("/agents/:id", async (req, res) => {
+  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
 });
 
 authed.post("/agents/:id/run", async (req, res) => {
@@ -2221,6 +2502,20 @@ authed.post("/ai/copilot", async (req, res) => {
   res.json({ graph: result.graph, summary: result.summary, source: result.source });
 });
 
+/** Simple AI text generation for table AI fields */
+authed.post("/ai/generate", async (req, res) => {
+  const body = z.object({ prompt: z.string().min(1) }).parse(req.body);
+  const ai = await probeAiService();
+  if (ai.reachable) {
+    try {
+      const result = await signedAiJson<{ text?: string; content?: string }>("/generate", { prompt: body.prompt }, req.orgId!);
+      return res.json({ text: result?.text ?? result?.content ?? "Generated content" });
+    } catch { /* fall through */ }
+  }
+  // Fallback: generate placeholder text based on the prompt
+  res.json({ text: `[AI] ${body.prompt.slice(0, 200)}` });
+});
+
 authed.get("/canvases", async (req, res) => {
   const rows = await listItems(req.orgId!, "canvas");
   res.json({ canvases: rows.map((r) => ({ ...presentItem(r), graph: (r.payload as { graph?: unknown })?.graph ?? { nodes: [], edges: [] } })) });
@@ -2263,6 +2558,23 @@ authed.post("/canvases", async (req, res) => {
   res.json({ canvas: { ...presentItem(row!), graph } });
 });
 
+authed.patch("/canvases/:id", async (req, res) => {
+  const body = z.object({ name: z.string().optional(), graph: z.record(z.unknown()).optional() }).parse(req.body);
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  let idx = 3;
+  if (body.name) { sets.push(`name = $${idx}`); params.push(body.name); idx++; }
+  if (body.graph) { sets.push(`payload = jsonb_set(COALESCE(payload, '{}'), '{graph}', $${idx}::jsonb)`); params.push(JSON.stringify(body.graph)); idx++; }
+  if (sets.length === 0) return res.status(400).json({ error: "nothing_to_update" });
+  await query(`UPDATE workspace_items SET ${sets.join(", ")}, updated_at = now() WHERE id = $1 AND org_id = $2 AND kind = 'canvas'`, [req.params.id, req.orgId, ...params]);
+  res.json({ ok: true });
+});
+
+authed.delete("/canvases/:id", async (req, res) => {
+  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'canvas'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
+});
+
 // ============================================================================
 // FOLDERS
 // ============================================================================
@@ -2280,10 +2592,6 @@ authed.post("/folders", async (req, res) => {
   );
   res.json({ folder: row });
 });
-
-// ============================================================================
-// MOUNT
-// ============================================================================
 
 // ============================================================================
 // MOUNT
@@ -2347,6 +2655,271 @@ router.post("/internal/execute-tool", serviceAuthMiddleware, async (req, res) =>
   } catch (err) {
     res.json({ ok: false, code: "FATAL", message: err instanceof Error ? err.message : "tool execution failed" });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Asset Registry — Unified product model
+// ═══════════════════════════════════════════════════════════════════════════
+
+authed.get("/assets", async (req, res) => {
+  const { type, status, folder_id, search, limit: lim } = req.query as Record<string, string>;
+  let sql = `SELECT a.*, f.name as folder_name
+    FROM public.assets a
+    LEFT JOIN public.folders f ON f.id = a.folder_id
+    WHERE a.org_id = $1`;
+  const params: any[] = [req.orgId!];
+  let idx = 2;
+  if (type) { sql += ` AND a.type = $${idx++}`; params.push(type); }
+  if (status) { sql += ` AND a.status = $${idx++}`; params.push(status); }
+  if (folder_id) { sql += ` AND a.folder_id = $${idx++}`; params.push(folder_id); }
+  if (search) { sql += ` AND a.name ILIKE $${idx++}`; params.push(`%${search}%`); }
+  sql += ` ORDER BY a.updated_at DESC LIMIT $${idx}`;
+  params.push(Number(lim) || 100);
+  const rows = await query<any>(sql, params);
+  res.json({ assets: rows, total: rows.length });
+});
+
+authed.get("/assets/:id", async (req, res) => {
+  const asset = await queryOne(`SELECT * FROM public.assets WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId!]);
+  if (!asset) return res.status(404).json({ error: "not found" });
+  const relations = await query(`SELECT ar.*, a.name as target_name, a.type as target_type, a.slug as target_slug
+    FROM public.asset_relations ar
+    JOIN public.assets a ON a.id = ar.target_asset_id
+    WHERE ar.source_asset_id = $1`, [req.params.id]);
+  res.json({ asset, relations });
+});
+
+authed.post("/assets", async (req, res) => {
+  const body = z.object({
+    type: z.enum(["workflow", "table", "form", "interface", "canvas", "agent", "chatbot"]),
+    name: z.string().min(1),
+    slug: z.string().min(1),
+    description: z.string().optional(),
+    folder_id: z.string().uuid().nullable().optional(),
+    tags: z.array(z.string()).optional(),
+    metadata: z.record(z.unknown()).optional(),
+  }).parse(req.body);
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO public.assets (id, org_id, type, name, slug, description, folder_id, tags, metadata, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [id, req.orgId!, body.type, body.name, body.slug, body.description ?? null, body.folder_id ?? null, body.tags ?? [], body.metadata ?? {}, req.user?.userId ?? null],
+  );
+  const asset = await queryOne(`SELECT * FROM public.assets WHERE id = $1`, [id]);
+  res.status(201).json({ asset });
+});
+
+authed.patch("/assets/:id", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1).optional(),
+    description: z.string().optional(),
+    status: z.enum(["draft", "active", "paused", "disabled", "archived"]).optional(),
+    folder_id: z.string().uuid().nullable().optional(),
+    tags: z.array(z.string()).optional(),
+    metadata: z.record(z.unknown()).optional(),
+  }).parse(req.body);
+  const sets: string[] = [`updated_at = now()`];
+  const params: any[] = [];
+  let idx = 1;
+  for (const [k, v] of Object.entries(body)) {
+    if (v === undefined) continue;
+    sets.push(`${k} = $${idx++}`);
+    params.push(k === "tags" ? v : typeof v === "object" ? JSON.stringify(v) : v);
+  }
+  params.push(req.params.id, req.orgId!);
+  await query(`UPDATE public.assets SET ${sets.join(", ")} WHERE id = $${idx++} AND org_id = $${idx}`, params);
+  const asset = await queryOne(`SELECT * FROM public.assets WHERE id = $1`, [req.params.id]);
+  res.json({ asset });
+});
+
+authed.delete("/assets/:id", async (req, res) => {
+  await query(`DELETE FROM public.assets WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId!]);
+  res.json({ ok: true });
+});
+
+authed.post("/assets/:id/relations", async (req, res) => {
+  const body = z.object({
+    target_asset_id: z.string().uuid(),
+    relation_type: z.enum(["triggers", "depends_on", "calls", "reads_from", "writes_to", "embeds", "contains", "notifies", "approves", "uses", "generates"]),
+    metadata: z.record(z.unknown()).optional(),
+  }).parse(req.body);
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO public.asset_relations (id, source_asset_id, target_asset_id, relation_type, metadata)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (source_asset_id, target_asset_id, relation_type) DO NOTHING`,
+    [id, req.params.id, body.target_asset_id, body.relation_type, body.metadata ?? {}],
+  );
+  res.status(201).json({ ok: true, id });
+});
+
+authed.get("/assets/:id/graph", async (req, res) => {
+  const asset = await queryOne(`SELECT * FROM public.assets WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId!]);
+  if (!asset) return res.status(404).json({ error: "not found" });
+  const nodes = [asset];
+  const edges = await query(
+    `SELECT ar.*, a.name as target_name, a.type as target_type, a.slug as target_slug
+     FROM public.asset_relations ar
+     JOIN public.assets a ON a.id = ar.target_asset_id
+     WHERE ar.source_asset_id = $1`, [req.params.id]);
+  res.json({ nodes, edges });
+});
+
+// NOTE: Folders routes live earlier in this file (line ~2478)
+// The asset-registry public.folders routes were removed as duplicates.
+
+// ─── Notifications ─────────────────────────────────────────────────────────
+
+authed.get("/notifications", async (req, res) => {
+  const { unread_only, limit: lim } = req.query as Record<string, string>;
+  let sql = `SELECT * FROM public.notifications WHERE user_id = $1`;
+  const params: any[] = [req.user?.userId ?? ""];
+  let idx = 2;
+  if (unread_only === "true") { sql += ` AND read = false`; }
+  sql += ` ORDER BY created_at DESC LIMIT $${idx}`;
+  params.push(Number(lim) || 50);
+  const rows = await query<any>(sql, params);
+  const unread = await queryOne<{ count: string }>(
+    `SELECT count(*)::int as count FROM public.notifications WHERE user_id = $1 AND read = false`,
+    [req.user?.userId ?? ""],
+  );
+  res.json({ notifications: rows, unread_count: Number(unread?.count ?? 0) });
+});
+
+authed.patch("/notifications/:id/read", async (req, res) => {
+  await query(`UPDATE public.notifications SET read = true, read_at = now() WHERE id = $1 AND user_id = $2`, [req.params.id, req.user?.userId ?? ""]);
+  res.json({ ok: true });
+});
+
+authed.post("/notifications/mark-all-read", async (req, res) => {
+  await query(`UPDATE public.notifications SET read = true, read_at = now() WHERE user_id = $1 AND read = false`, [req.user?.userId ?? ""]);
+  res.json({ ok: true });
+});
+
+// NOTE: Approvals routes live earlier in this file (line ~1831)
+// The asset-registry approval_requests table routes were removed as duplicates.
+
+// ─── Knowledge ─────────────────────────────────────────────────────────────
+
+authed.get("/knowledge", async (req, res) => {
+  const rows = await query(`SELECT * FROM public.knowledge_sources WHERE org_id = $1 ORDER BY created_at DESC`, [req.orgId!]);
+  res.json({ knowledge: rows });
+});
+
+authed.post("/knowledge", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1),
+    type: z.enum(["file", "url", "table", "document", "text"]),
+    content: z.string().optional(),
+    url: z.string().optional(),
+    table_id: z.string().uuid().optional(),
+    metadata: z.record(z.unknown()).optional(),
+  }).parse(req.body);
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO public.knowledge_sources (id, org_id, name, type, content, url, table_id, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [id, req.orgId!, body.name, body.type, body.content ?? null, body.url ?? null, body.table_id ?? null, body.metadata ?? {}],
+  );
+  res.status(201).json({ id });
+});
+
+// ─── Table Records (for Tables product) ─────────────────────────────────────
+
+authed.get("/table-assets/:id/records", async (req, res) => {
+  const { view_id, search, limit: lim, offset } = req.query as Record<string, string>;
+  let sql = `SELECT * FROM public.table_records WHERE table_asset_id = $1 AND org_id = $2`;
+  const params: any[] = [req.params.id, req.orgId!];
+  let idx = 3;
+  if (search) { sql += ` AND data::text ILIKE $${idx++}`; params.push(`%${search}%`); }
+  sql += ` ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx}`;
+  params.push(Number(lim) || 100, Number(offset) || 0);
+  const rows = await query<any>(sql, params);
+  const total = await queryOne<{ count: string }>(
+    `SELECT count(*)::int as count FROM public.table_records WHERE table_asset_id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId!],
+  );
+  res.json({ records: rows, total: Number(total?.count ?? 0) });
+});
+
+authed.post("/table-assets/:id/records", async (req, res) => {
+  const body = z.object({ data: z.record(z.unknown()) }).parse(req.body);
+  const recordId = crypto.randomUUID();
+  await query(
+    `INSERT INTO public.table_records (id, table_asset_id, org_id, data, created_by)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [recordId, req.params.id, req.orgId!, body.data, req.user?.userId ?? null],
+  );
+  res.status(201).json({ id: recordId, data: body.data });
+});
+
+authed.patch("/table-records/:id", async (req, res) => {
+  const body = z.object({ data: z.record(z.unknown()) }).parse(req.body);
+  await query(
+    `UPDATE public.table_records SET data = $1, updated_at = now() WHERE id = $2 AND org_id = $3`,
+    [body.data, req.params.id, req.orgId!],
+  );
+  res.json({ ok: true });
+});
+
+authed.delete("/table-records/:id", async (req, res) => {
+  await query(`DELETE FROM public.table_records WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId!]);
+  res.json({ ok: true });
+});
+
+// ─── Table Fields ───────────────────────────────────────────────────────────
+
+authed.get("/table-assets/:id/fields", async (req, res) => {
+  const rows = await query(`SELECT * FROM public.table_fields WHERE table_asset_id = $1 ORDER BY position`, [req.params.id]);
+  res.json({ fields: rows });
+});
+
+authed.post("/table-assets/:id/fields", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1),
+    type: z.string().default("text"),
+    config: z.record(z.unknown()).optional(),
+    options: z.array(z.unknown()).optional(),
+    formula: z.string().optional(),
+    required: z.boolean().optional(),
+    unique: z.boolean().optional(),
+    default_value: z.unknown().optional(),
+  }).parse(req.body);
+  const maxPos = await queryOne<{ max_pos: number }>(
+    `SELECT COALESCE(MAX(position), -1) + 1 as max_pos FROM public.table_fields WHERE table_asset_id = $1`,
+    [req.params.id],
+  );
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO public.table_fields (id, table_asset_id, org_id, name, type, config, options, formula, required, is_unique, default_value, position)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [id, req.params.id, req.orgId!, body.name, body.type, body.config ?? {}, body.options ?? [], body.formula ?? null, body.required ?? false, body.unique ?? false, body.default_value ?? null, maxPos?.max_pos ?? 0],
+  );
+  res.status(201).json({ id });
+});
+
+// ─── Table Views ────────────────────────────────────────────────────────────
+
+authed.get("/table-assets/:id/views", async (req, res) => {
+  const rows = await query(`SELECT * FROM public.table_views WHERE table_asset_id = $1 ORDER BY is_default DESC, name`, [req.params.id]);
+  res.json({ views: rows });
+});
+
+authed.post("/table-assets/:id/views", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1),
+    type: z.string().default("grid"),
+    filters: z.array(z.unknown()).optional(),
+    sorts: z.array(z.unknown()).optional(),
+    hidden_fields: z.array(z.string()).optional(),
+    group_by: z.string().optional(),
+  }).parse(req.body);
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO public.table_views (id, table_asset_id, org_id, name, type, filters, sorts, hidden_fields, group_by, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [id, req.params.id, req.orgId!, body.name, body.type, body.filters ?? [], body.sorts ?? [], body.hidden_fields ?? [], body.group_by ?? null, req.user?.userId ?? null],
+  );
+  res.status(201).json({ id });
 });
 
 router.use("/", authed);

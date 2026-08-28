@@ -19,6 +19,7 @@ export type CopilotEvent =
 export const COPILOT_PIPELINE: Array<{ stage: string; label: string }> = [
   { stage: "inspect", label: "Reading the current draft" },
   { stage: "intent", label: "Parsing intent" },
+  { stage: "plan", label: "Planning asset system" },
   { stage: "retrieve", label: "Finding apps and events" },
   { stage: "select", label: "Selecting operations" },
   { stage: "connect", label: "Resolving existing connections" },

@@ -64,9 +64,15 @@ export async function httpRequest(input: Record<string, unknown>, extraHeaders: 
 
 export function authHeaders(auth: Record<string, unknown> | null): Record<string, string> {
   if (!auth) return {};
+  // Slack-style bot_token (xoxb-...)
+  if (auth.bot_token) return { authorization: `Bearer ${auth.bot_token}` };
+  // Generic OAuth access_token
   if (auth.access_token) return { authorization: `Bearer ${auth.access_token}` };
+  // Custom header with api_key
   if (auth.api_key && auth.header) return { [String(auth.header)]: String(auth.api_key) };
+  // Bearer api_key
   if (auth.api_key) return { authorization: `Bearer ${auth.api_key}` };
+  // Basic auth
   if (auth.username && auth.password) {
     const basic = Buffer.from(`${auth.username}:${auth.password}`).toString("base64");
     return { authorization: `Basic ${basic}` };

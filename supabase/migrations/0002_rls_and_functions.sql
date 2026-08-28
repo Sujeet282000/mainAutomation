@@ -154,7 +154,7 @@ $$;
 -- set_flow_version_hash: SHA-256 content addressing
 CREATE OR REPLACE FUNCTION internal.set_flow_version_hash()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY INVOKER
-SET search_path = pg_catalog, extensions AS $$
+SET search_path = pg_catalog, extensions, public AS $$
 BEGIN
   NEW.definition_hash := encode(digest(NEW.definition::text, 'sha256'), 'hex');
   RETURN NEW;

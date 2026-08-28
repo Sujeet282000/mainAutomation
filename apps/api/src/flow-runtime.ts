@@ -59,7 +59,9 @@ export async function ensureFlowVersion(opts: {
   );
   const row = await queryOne<{ id: string }>(
     `INSERT INTO flow_versions (org_id, flow_id, definition, definition_hash, version_number, published_by)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (flow_id, definition_hash) DO UPDATE SET flow_id = EXCLUDED.flow_id
+     RETURNING id`,
     [
       opts.orgId,
       opts.flowId,

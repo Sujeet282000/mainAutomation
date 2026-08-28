@@ -14,18 +14,21 @@ import {
   Settings,
   Sparkles,
   Table2,
-  Workflow
+  Workflow,
+  Zap
 } from "lucide-react";
 
 export const NAV = [
   {
     label: "Automate",
+    defaultOpen: true,
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { href: "/automations", label: "Workflow", icon: Workflow },
-      { href: "/activity", label: "Activity", icon: Activity },
+      { href: "/automations", label: "Workflows", icon: Workflow },
+      { href: "/activity", label: "Runs", icon: Activity },
       { href: "/apps", label: "Apps", icon: Plug },
-      { href: "/connections", label: "Connections", icon: Unplug }
+      { href: "/connections", label: "Connections", icon: Unplug },
+      { href: "/integrations/health", label: "Integration Health", icon: Zap },
     ]
   },
   {
@@ -59,9 +62,9 @@ export const NAV = [
 
 export const COMMANDS = [
   { href: "/dashboard", label: "Go to Dashboard" },
-  { href: "/automations", label: "Go to Workflow" },
+  { href: "/automations", label: "Go to Workflows" },
   { href: "/automations/new", label: "Create workflow" },
-  { href: "/activity", label: "Go to Activity" },
+  { href: "/activity", label: "Go to Runs" },
   { href: "/apps", label: "Go to Apps" },
   { href: "/connections", label: "Go to Connections" },
   { href: "/templates", label: "Go to Templates" },
@@ -73,6 +76,7 @@ export const COMMANDS = [
   { href: "/agents", label: "Go to Agents" },
   { href: "/chatbots", label: "Go to Chatbots" },
   { href: "/approvals", label: "Go to Approvals" },
+  { href: "/integrations/health", label: "Integration Health" },
   { href: "/developer", label: "Developer keys & MCP" },
   { href: "/billing", label: "Billing & usage" },
   { href: "/audit", label: "Audit log" },

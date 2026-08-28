@@ -1,153 +1,150 @@
-﻿"use client";
+"use client";
 
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileInput } from "lucide-react";
+import { Copy, ExternalLink, FileInput, GripVertical, Plus, Trash2 } from "lucide-react";
 import { api, getWorkspaceId } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import { PageInfo } from "@/components/ui/page-info";
 import { EmptyState } from "@/components/ui/empty-state";
+import { cn } from "@/lib/utils";
 
-type Field = { key: string; type: string; label: string };
-type FormRow = {
-  id: string;
-  name: string;
-  slug: string;
-  fields: Field[];
-  automation_id?: string | null;
-  table_id?: string | null;
-};
+type Field = { key: string; type: string; label: string; required?: boolean; placeholder?: string };
+type FormRow = { id: string; name: string; slug: string; fields: Field[]; automation_id?: string | null; table_id?: string | null; created_at?: string };
+
+const FIELD_TYPES = [
+  { value: "text", label: "Text" }, { value: "email", label: "Email" }, { value: "number", label: "Number" },
+  { value: "textarea", label: "Long text" }, { value: "select", label: "Dropdown" }, { value: "checkbox", label: "Checkbox" },
+  { value: "date", label: "Date" }, { value: "url", label: "URL" }, { value: "phone", label: "Phone" },
+];
+
+function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) {
+  const ws = getWorkspaceId();
+  const publicUrl = `/f/${ws}/${form.slug}`;
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="fixed inset-0 z-50 flex bg-bg">
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex items-center justify-between border-b border-line px-6 py-3">
+          <div className="flex items-center gap-3">
+            <FileInput className="h-5 w-5 text-teal" />
+            <span className="font-semibold">{form.name}</span>
+            <span className="rounded-full bg-teal/10 px-2 py-0.5 text-[10px] font-medium text-teal">Form</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <a href={publicUrl} target="_blank" className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink-muted hover:bg-muted">
+              <ExternalLink className="h-3 w-3" /> Public page
+            </a>
+            <button className="rounded-lg p-1.5 text-ink-muted hover:bg-muted" onClick={() => { navigator.clipboard.writeText(window.location.origin + publicUrl); setCopied(true); setTimeout(() => setCopied(false), 2000); }}>
+              <Copy className="h-3.5 w-3.5" />
+            </button>
+            <button className="rounded-lg p-1.5 text-ink-muted hover:bg-muted" onClick={onClose}>×</button>
+          </div>
+        </div>
+        <div className="flex flex-1 overflow-hidden">
+          {/* Form preview */}
+          <div className="flex flex-1 items-start justify-center overflow-auto bg-muted/20 p-8">
+            <div className="w-full max-w-lg rounded-2xl border border-line bg-white p-6 shadow-sm">
+              <h2 className="mb-1 text-lg font-semibold">{form.name}</h2>
+              <p className="mb-6 text-xs text-ink-muted">Fields marked with * are required</p>
+              {form.fields.map((f) => (
+                <div key={f.key} className="mb-4">
+                  <label className="mb-1 block text-xs font-medium text-ink">
+                    {f.label}{f.required !== false && <span className="text-danger"> *</span>}
+                  </label>
+                  {f.type === "textarea" ? (
+                    <textarea className="w-full rounded-lg border border-line px-3 py-2 text-sm" rows={3} placeholder={f.placeholder} />
+                  ) : f.type === "select" ? (
+                    <select className="w-full rounded-lg border border-line px-3 py-2 text-sm"><option>Choose...</option></select>
+                  ) : f.type === "checkbox" ? (
+                    <div className="flex items-center gap-2"><input type="checkbox" className="h-4 w-4 rounded border-line" /><span className="text-sm">{f.label}</span></div>
+                  ) : (
+                    <Input type={f.type} placeholder={f.placeholder ?? f.label} />
+                  )}
+                </div>
+              ))}
+              <Button className="mt-2 w-full">Submit</Button>
+            </div>
+          </div>
+          {/* Fields panel */}
+          <div className="w-72 border-l border-line bg-elevated p-4">
+            <p className="mb-3 text-[10px] font-semibold uppercase text-ink-muted">Form fields</p>
+            {form.fields.map((f) => (
+              <div key={f.key} className="mb-2 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-xs">
+                <GripVertical className="h-3 w-3 text-ink-muted" />
+                <span className="flex-1 truncate font-medium">{f.label}</span>
+                <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] text-ink-muted">{f.type}</span>
+              </div>
+            ))}
+            <p className="mt-4 text-[10px] font-semibold uppercase text-ink-muted">Settings</p>
+            <p className="mt-1 text-xs text-ink-muted">Table: {form.table_id ? "Connected" : "Not connected"}</p>
+            <p className="text-xs text-ink-muted">Workflow: {form.automation_id ? "Connected" : "Not connected"}</p>
+            <p className="mt-2 text-xs text-ink-muted">Submissions go directly to the connected table and can trigger a workflow.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function FormsPage() {
   const qc = useQueryClient();
   const ws = getWorkspaceId();
   const list = useQuery({ queryKey: ["forms"], queryFn: () => api<{ forms: FormRow[] }>("/forms") });
   const tables = useQuery({ queryKey: ["tables"], queryFn: () => api<{ tables: Array<{ id: string; name: string }> }>("/tables") });
-  const autos = useQuery({
-    queryKey: ["automations"],
-    queryFn: () => api<{ automations: Array<{ id: string; name: string }> }>("/automations")
-  });
-  const [name, setName] = useState("Lead form");
-  const [fields, setFields] = useState<Field[]>([
-    { key: "email", type: "email", label: "Email" },
-    { key: "name", type: "text", label: "Name" }
-  ]);
+  const [createName, setCreateName] = useState("");
   const [tableId, setTableId] = useState("");
-  const [automationId, setAutomationId] = useState("");
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<FormRow | null>(null);
+  const [viewSubs, setViewSubs] = useState<string | null>(null);
   const [subs, setSubs] = useState<Array<{ id: string; data: unknown; created_at: string }>>([]);
 
   return (
-    <div>
-      <PageHeader
-        title="Forms"
-        description="Hosted forms that write to Tables and start workflows. Form usage is not billed as a task."
-      />
-      <Card className="mb-4 space-y-3">
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Form name" />
-        {fields.map((f, i) => (
-          <div key={i} className="flex gap-2">
-            <Input
-              value={f.label}
-              placeholder="Label"
-              onChange={(e) => {
-                const next = [...fields];
-                next[i] = { ...f, label: e.target.value, key: e.target.value.toLowerCase().replace(/\s+/g, "_") || f.key };
-                setFields(next);
-              }}
-            />
-            <select
-              className="rounded-lg border border-line bg-elevated px-2 text-sm"
-              value={f.type}
-              onChange={(e) => {
-                const next = [...fields];
-                next[i] = { ...f, type: e.target.value };
-                setFields(next);
-              }}
-            >
-              <option value="text">Text</option>
-              <option value="email">Email</option>
-              <option value="number">Number</option>
-              <option value="select">Dropdown</option>
-            </select>
-          </div>
-        ))}
-        <Button variant="secondary" type="button" onClick={() => setFields([...fields, { key: `q${fields.length}`, type: "text", label: "Question" }])}>
-          Add field
-        </Button>
-        <select className="w-full rounded-lg border border-line bg-elevated p-2 text-sm" value={tableId} onChange={(e) => setTableId(e.target.value)}>
-          <option value="">Write into table (optional)</option>
-          {(tables.data?.tables ?? []).map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
-        <select className="w-full rounded-lg border border-line bg-elevated p-2 text-sm" value={automationId} onChange={(e) => setAutomationId(e.target.value)}>
-          <option value="">Start workflow (optional)</option>
-          {(autos.data?.automations ?? []).map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-            </option>
-          ))}
-        </select>
-        <Button
-          onClick={async () => {
-            await api("/forms", {
-              method: "POST",
-              body: JSON.stringify({
-                name,
-                slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`,
-                fields,
-                tableId: tableId || undefined,
-                automationId: automationId || undefined
-              })
-            });
+    <div>      <PageHeader title="Forms" description="No-code forms that write to Tables and trigger workflows." actions={<div className="flex items-center gap-2"><PageInfo title="Forms" description="Forms collect data from users via a public link. Submissions can automatically write to a Table and trigger a Workflow." tips={["Create a form with fields like Name, Email, Phone, etc.","Connect to a Table to store submissions automatically.","Connect to a Workflow to process submissions (e.g. send welcome email).","Share the public /f link to collect responses from anyone.","View submissions inline or in the connected Table."]} /><Button onClick={async () => {
+            const name = createName.trim() || "Untitled form";
+            const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`;
+            await api("/forms", { method: "POST", body: JSON.stringify({ name, slug, fields: [{ key: "name", type: "text", label: "Name" }, { key: "email", type: "email", label: "Email" }], tableId: tableId || undefined }) });
+            setCreateName("");
+            setTableId("");
             qc.invalidateQueries({ queryKey: ["forms"] });
-          }}
-        >
-          Create form
-        </Button>
-      </Card>
-      {!list.isLoading && !list.data?.forms.length && (
-        <EmptyState icon={<FileInput className="h-10 w-10" />} title="No forms" description="Create a form, share the public /f link, and optionally write rows into a table." />
+          }}><Plus className="mr-1 h-3.5 w-3.5" />New form</Button></div>}
+      />
+
+      {createName === "" && !list.isLoading && !list.data?.forms.length && (
+        <EmptyState icon={<FileInput className="h-10 w-10" />} title="No forms yet" description="Create a form, share the public link, and optionally write submissions into a table." />
       )}
-      <div className="grid gap-3">
-        {(list.data?.forms ?? []).map((f) => (
-          <Card key={f.id}>
-            <h3 className="font-semibold">{f.name}</h3>
-            <p className="text-sm text-ink-muted">Public /f/{ws}/{f.slug}</p>
-            <a className="text-sm text-teal" href={`/f/${ws}/${f.slug}`}>
-              Open public page
-            </a>
-            <Button
-              variant="secondary"
-              className="mt-2"
-              onClick={async () => {
-                setOpen(f.id);
-                const d = await api<{ submissions: Array<{ id: string; data: unknown; created_at: string }> }>(
-                  `/forms/${f.id}/submissions`
-                );
-                setSubs(d.submissions ?? []);
-              }}
-            >
-              Submissions
-            </Button>
-            {open === f.id && (
-              <ul className="mt-2 text-sm text-ink-muted">
-                {subs.length === 0 && <li>No submissions yet.</li>}
-                {subs.map((s) => (
-                  <li key={s.id}>
-                    {JSON.stringify(s.data)} · {new Date(s.created_at).toLocaleString()}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
-        ))}
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {(list.data?.forms ?? []).map((f) => {
+          const publicUrl = `/f/${ws}/${f.slug}`;
+          return (
+            <Card key={f.id} className="group cursor-pointer transition-all hover:shadow-md hover:border-teal/40" onClick={() => setOpen(f)}>
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10">
+                    <FileInput className="h-5 w-5 text-blue-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold">{f.name}</h3>
+                    <p className="text-[11px] text-ink-muted">{f.fields.length} fields · {f.table_id ? "→ Table" : "Standalone"}</p>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <a href={publicUrl} target="_blank" className="flex items-center gap-1 rounded-full border border-line bg-muted/50 px-2 py-0.5 text-[10px] text-ink-muted hover:bg-muted" onClick={(e) => e.stopPropagation()}>
+                  <ExternalLink className="h-2.5 w-2.5" /> Public link
+                </a>
+                {f.table_id && <span className="rounded-full bg-teal/10 px-2 py-0.5 text-[10px] font-medium text-teal">→ Table</span>}
+                {f.automation_id && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">→ Workflow</span>}
+              </div>
+            </Card>
+          );
+        })}
       </div>
+
+      {open && <FormBuilder form={open} onClose={() => setOpen(null)} />}
     </div>
   );
 }

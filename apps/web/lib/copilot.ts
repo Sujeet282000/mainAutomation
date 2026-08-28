@@ -20,12 +20,39 @@ export type CopilotDraft = {
   rebuilt?: boolean;
   changed?: boolean;
   source?: string;
+  plan?: AutomationPlan | null;
   operations?: CopilotOperation[];
   applied_operations?: CopilotOperation[];
   rejected_operations?: Array<{ operation: CopilotOperation; reason: string }>;
   needs_confirmation?: CopilotOperation[];
   needs_input?: string[];
   issues?: Array<{ code?: string; message: string; nodeId?: string }>;
+};
+
+/** AutomationPlan IR from the enhanced copilot pipeline */
+export type AutomationPlan = {
+  goal: string;
+  summary: string;
+  confidence: number;
+  steps: Array<{
+    id: string;
+    type: string;
+    label: string;
+    description: string;
+    order: number;
+    appSlug: string | null;
+    operation: string | null;
+    liveAdapter: boolean;
+    confidence: number;
+    connectionRequired: boolean;
+    connectionId: string | null;
+  }>;
+  connections: Array<{ stepId: string; appSlug: string; connectionId: string; status: string }>;
+  attentionItems: Array<{ kind: string; message: string; appSlug?: string }>;
+  availableData: Array<{ stepId: string; label: string; fields: string[] }>;
+  warnings: string[];
+  missingInformation: string[];
+  modificationType: string;
 };
 
 export async function createCopilotSession(opts: {
@@ -44,6 +71,11 @@ export async function createCopilotSession(opts: {
 }
 
 function applyEvent(out: CopilotDraft, ev: Record<string, unknown>) {
+  // Handle AutomationPlan events from enhanced pipeline
+  if (ev.type === "plan" && ev.plan) {
+    out.plan = ev.plan as AutomationPlan;
+    return;
+  }
   if (ev.type !== "proposal" && ev.type !== "result") return;
   if (ev.graph) out.graph = ev.graph;
   if (ev.summary) out.summary = String(ev.summary);
@@ -51,6 +83,8 @@ function applyEvent(out: CopilotDraft, ev: Record<string, unknown>) {
   if ("rebuilt" in ev) out.rebuilt = Boolean(ev.rebuilt);
   if ("changed" in ev) out.changed = Boolean(ev.changed);
   if (ev.source) out.source = String(ev.source);
+  // Carry forward plan from earlier event
+  if (ev.plan) out.plan = ev.plan as AutomationPlan;
   if (Array.isArray(ev.operations)) out.operations = ev.operations as CopilotOperation[];
   if (Array.isArray(ev.applied_operations)) out.applied_operations = ev.applied_operations as CopilotOperation[];
   if (Array.isArray(ev.rejected_operations)) out.rejected_operations = ev.rejected_operations as CopilotDraft["rejected_operations"];
@@ -202,6 +236,8 @@ export type CopilotPlanResult = {
   needs_input: string[];
   clarificationQuestions?: ClarificationQuestion[];
   confidence?: number;
+  /** Enhanced AutomationPlan IR from copilot-plan-builder */
+  plan?: AutomationPlan | null;
 };
 
 export async function planCopilotWorkflow(opts: {

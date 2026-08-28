@@ -1,9 +1,11 @@
 import type { Request, Response } from "express";
 import { coerceWorkflowGraph } from "@algoverge/core";
+import type { AutomationPlan } from "@algoverge/shared";
 import { query, queryOne } from "./db";
 import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
 import { copilotChat } from "./copilot";
 import { runCopilotEngine } from "./copilot-engine";
+import { runEnhancedCopilot, buildPlanAtomically } from "./copilot-plan-builder";
 import { parseCopilotMode } from "./copilot-pipeline";
 import { probeAiService, signedAiJson, streamAiCopilotGenerate } from "./ai-service";
 import { listCatalogApps } from "./catalog";
@@ -11,7 +13,7 @@ import { applyAgentOperations, type AgentOperation } from "./agent-operation-app
 
 const STAGE_FOR_DB: Record<string, string> = { connect: "connections", schema: "schemas", map: "mapping" };
 const PERSISTABLE_EVENTS = new Set(["stage", "reasoning", "proposal", "applied", "todo", "usage", "done", "error"]);
-const PERSISTABLE_STAGES = new Set(["intent", "retrieve", "select", "connections", "schemas", "mapping", "assemble", "validate", "repair", "persist"]);
+const PERSISTABLE_STAGES = new Set(["intent", "plan", "retrieve", "select", "connections", "schemas", "mapping", "assemble", "validate", "repair", "persist"]);
 
 export async function ensureProjectId(orgId: string) {
   const existing = await queryOne<{ id: string }>(`SELECT id FROM projects WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`, [orgId]);
@@ -90,6 +92,39 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
     } catch (err) { await send({ type: "reasoning", text: `AI plane failed (${err instanceof Error ? err.message : "error"}); using the Node catalog engine.` }); }
   } else await send({ type: "reasoning", text: ai.hint });
 
+  // ── Enhanced plan pipeline (primary Node.js path) ──
+  // Produces AutomationPlan IR with connection resolution, data lineage, field mapping, and validation.
+  let sawPlan = false;
+  try {
+    for await (const ev of runEnhancedCopilot({ prompt: opts.prompt, workspaceId: opts.orgId, userEmail: opts.req.user?.email ?? null, mode, graph })) {
+      const rawEv = ev as Record<string, unknown>;
+      if (ev.type === "plan") {
+        // The enhanced pipeline yields a full AutomationPlan — forward it to the frontend
+        await send({ type: "plan", plan: rawEv.plan, sessionId: opts.sessionId });
+        sawPlan = true;
+      } else if (rawEv.type === "result" && rawEv.result) {
+        const result = rawEv.result as { graph: unknown; summary: string; source: string; rebuilt: boolean; changed: boolean };
+        const definition = persistBuilderDraft(result.graph as any);
+        await query(`UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`, [JSON.stringify(definition), opts.sessionId]);
+        await send({ type: "proposal", graph: result.graph, definition, summary: result.summary, sessionId: opts.sessionId, applied: mode === "auto_build", rebuilt: result.rebuilt, changed: result.changed, source: result.source, mode });
+        await send({ type: "result", graph: result.graph, summary: result.summary, sessionId: opts.sessionId, applied: mode === "auto_build", rebuilt: result.rebuilt, changed: result.changed, source: result.source, mode });
+        sawPlan = true;
+      } else if (ev.type === "stage") {
+        await send({ type: "stage", stage: STAGE_FOR_DB[ev.stage] ?? ev.stage, label: ev.label });
+      } else {
+        await send(rawEv);
+      }
+    }
+    if (sawPlan) {
+      await send({ type: "done", status: "draft_saved", publishable: true, note: "Review and publish. Copilot never publishes.", source: "copilot-plan-builder" });
+      return;
+    }
+  } catch (enhancedErr) {
+    // Enhanced pipeline failed — fall through to legacy engine
+    await send({ type: "reasoning", text: `Enhanced plan pipeline failed (${enhancedErr instanceof Error ? enhancedErr.message : "error"}); using legacy engine.` });
+  }
+
+  // ── Legacy copilot engine fallback ──
   for await (const ev of runCopilotEngine({ prompt: opts.prompt, workspaceId: opts.orgId, userEmail: opts.req.user?.email, mode, graph })) {
     if (ev.type === "result") {
       const definition = persistBuilderDraft(ev.result.graph);

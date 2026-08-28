@@ -584,14 +584,23 @@ export const APP_CATALOG: AppManifest[] = [
   {
     slug: "hubspot",
     name: "HubSpot",
-    description: "CRM contacts, deals, and tickets.",
+    description: "CRM contacts, deals, companies, and tickets.",
     category: "crm",
     icon: "🧡",
     color: "#ff7a59",
     authType: "oauth2",
     operations: [
       { key: "new_contact", name: "New Contact", type: "trigger", triggerMode: "polling", inputFields: [] },
-      { key: "create_contact", name: "Create Contact", type: "action", inputFields: [{ key: "email", label: "Email", type: "string", required: true }, { key: "firstname", label: "First name", type: "string" }] }
+      { key: "create_contact", name: "Create Contact", type: "action", inputFields: [{ key: "email", label: "Email", type: "string", required: true }, { key: "firstname", label: "First name", type: "string" }, { key: "lastname", label: "Last name", type: "string" }, { key: "phone", label: "Phone", type: "string" }, { key: "company", label: "Company", type: "string" }] },
+      { key: "list_contacts", name: "List Contacts", type: "action", inputFields: [{ key: "limit", label: "Limit", type: "number" }], outputSample: { results: [{ id: "123", properties: { email: "ada@example.com", firstname: "Ada" } }] } },
+      { key: "search_contacts", name: "Search Contacts", type: "action", inputFields: [{ key: "query", label: "Search query", type: "string", required: true }] },
+      { key: "new_deal", name: "New Deal", type: "trigger", triggerMode: "polling", inputFields: [] },
+      { key: "create_deal", name: "Create Deal", type: "action", inputFields: [{ key: "dealname", label: "Deal name", type: "string", required: true }, { key: "amount", label: "Amount", type: "number" }, { key: "dealstage", label: "Stage", type: "dynamic" }, { key: "pipeline", label: "Pipeline", type: "string" }] },
+      { key: "update_deal", name: "Update Deal", type: "action", inputFields: [{ key: "dealId", label: "Deal", type: "dynamic", required: true }, { key: "dealname", label: "Deal name", type: "string" }, { key: "amount", label: "Amount", type: "number" }, { key: "dealstage", label: "Stage", type: "dynamic" }] },
+      { key: "new_company", name: "New Company", type: "trigger", triggerMode: "polling", inputFields: [] },
+      { key: "create_company", name: "Create Company", type: "action", inputFields: [{ key: "name", label: "Company name", type: "string", required: true }, { key: "domain", label: "Domain", type: "string" }, { key: "industry", label: "Industry", type: "string" }] },
+      { key: "new_ticket", name: "New Ticket", type: "trigger", triggerMode: "polling", inputFields: [] },
+      { key: "create_ticket", name: "Create Ticket", type: "action", inputFields: [{ key: "subject", label: "Subject", type: "string", required: true }, { key: "content", label: "Content", type: "text" }, { key: "pipeline", label: "Pipeline", type: "dynamic" }, { key: "priority", label: "Priority", type: "dynamic" }] }
     ]
   },
   {
@@ -882,17 +891,25 @@ export const APP_CATALOG: AppManifest[] = [
     operations: [
       { key: "new_order", name: "New Order", type: "trigger", triggerMode: "webhook", inputFields: [] },
       { key: "create_customer", name: "Create Customer", type: "action", inputFields: [{ key: "email", label: "Email", type: "string", required: true }] }
-    ]
-  },
+    ]  },
   {
     slug: "typeform",
     name: "Typeform",
-    description: "Form entries.",
+    description: "Form entries and submissions.",
     category: "forms",
     icon: "📄",
     color: "#262627",
     authType: "oauth2",
-    operations: [{ key: "new_entry", name: "New Entry", type: "trigger", triggerMode: "webhook", inputFields: [{ key: "formId", label: "Form ID", type: "string" }] }]
+    operations: [
+      { key: "new_entry", name: "New Entry", type: "trigger", triggerMode: "webhook", inputFields: [{ key: "formId", label: "Form ID", type: "string" }] },
+      { key: "new_submission", name: "New Submission", type: "trigger", triggerMode: "polling", inputFields: [{ key: "formId", label: "Form ID", type: "dynamic", required: true, help: "Pick a form to watch for new submissions." }] },
+      { key: "list_forms", name: "List Forms", type: "action", inputFields: [], outputSample: { forms: [{ id: "abc", title: "Contact Form" }], total: 1 } },
+      { key: "get_form", name: "Get Form", type: "action", inputFields: [{ key: "formId", label: "Form ID", type: "dynamic", required: true }] },
+      { key: "get_responses", name: "Get Responses", type: "action", inputFields: [{ key: "formId", label: "Form ID", type: "dynamic", required: true }, { key: "pageSize", label: "Limit", type: "number" }], outputSample: { responses: [{ responseId: "r1", submittedAt: "2024-01-01T00:00:00Z", answers: {} }], total: 1, hasMore: false } },
+      { key: "create_form", name: "Create Form", type: "action", inputFields: [{ key: "title", label: "Title", type: "string", required: true }] }
+    ]
+  },
+
   },
   {
     slug: "microsoft-teams",

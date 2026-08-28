@@ -152,18 +152,7 @@ export function registerUiCompat(authed: Router) {
     res.json({ adapters: listRegisteredAdapters() });
   });
 
-  authed.get("/apps", async (req, res) => {
-    const q = String(req.query.q ?? "").toLowerCase();
-    let apps = catalogApps();
-    if (q) apps = apps.filter((a) => `${a.slug} ${a.name} ${a.description}`.toLowerCase().includes(q));
-    res.json({ apps });
-  });
 
-  authed.get("/apps/:slug", async (req, res) => {
-    const app = getApp(req.params.slug);
-    if (!app) return res.status(404).json({ error: "not_found" });
-    res.json({ app: catalogApps().find((a) => a.slug === app.slug) });
-  });
 
   authed.post("/apps/:slug/operations/:op/dynamic-fields", async (req, res) => {
     const handler = getDynamicFieldsHandler(req.params.slug);
@@ -252,94 +241,7 @@ export function registerUiCompat(authed: Router) {
     });
   });
 
-  authed.post("/automations/:id/test-step", async (req, res) => {
-    const result = await testFlowStep({
-      orgId: req.orgId!,
-      flowId: req.params.id,
-      nodeId: String(req.body?.nodeId ?? ""),
-      graph: req.body?.graph,
-    });
-    res.json(result);
-  });
 
-  authed.post("/automations/:id/run", async (req, res) => {
-    const exec = await createAndRunFlow({
-      orgId: req.orgId!,
-      flowId: req.params.id,
-      userId: req.user!.userId,
-      payload: req.body?.payload,
-      graph: req.body?.graph,
-      triggerKind: "test",
-    });
-    res.json({ execution: { id: exec.id } });
-  });
-
-  authed.post("/automations/:id/publish", async (req, res) => {
-    req.url = `/flows/${req.params.id}/publish`;
-    // Reuse flow publish after converting graph if present
-    const flow = await queryOne<{ draft_definition: unknown }>(
-      `SELECT draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
-      [req.params.id, req.orgId],
-    );
-    if (!flow) return res.status(404).json({ error: "not_found" });
-    const { issues } = await validateWorkflowGraph(loadBuilderGraph(flow.draft_definition), {
-      workspaceId: req.orgId!,
-      strict: true,
-    });
-    if (issues.length) {
-      return res.status(400).json({ error: "invalid_flow", issues: issues.map((i) => ({ message: i.message })) });
-    }
-    const draft = persistBuilderDraft(loadBuilderGraph(flow.draft_definition));
-    await query(`UPDATE flows SET draft_definition = $3, updated_at = now() WHERE id = $1 AND org_id = $2`, [
-      req.params.id,
-      req.orgId,
-      JSON.stringify(draft),
-    ]);
-    const hashMod = await import("@algoverge/core");
-    const hash = hashMod.definitionHash(draft);
-    const last = await queryOne<{ version_number: number }>(
-      `SELECT version_number FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
-      [req.params.id],
-    );
-    const version = await queryOne<{ id: string }>(
-      `INSERT INTO flow_versions (org_id, flow_id, definition, definition_hash, version_number, published_by)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (flow_id, definition_hash) DO UPDATE SET published_at = now()
-       RETURNING id`,
-      [req.orgId, req.params.id, JSON.stringify(draft), hash, (last?.version_number ?? 0) + 1, req.user!.userId],
-    );
-    await query(`UPDATE flows SET published_version_id = $1, status = 'active', updated_at = now() WHERE id = $2`, [
-      version!.id,
-      req.params.id,
-    ]);
-    try {
-      const { TriggerActivationService } = await import("./triggers/trigger-activation.service");
-      const { env } = await import("./config");
-      await new TriggerActivationService({ getTrigger: () => ({}) }, env.apiUrl).onPublished(version!.id);
-    } catch {
-      /* trigger registry is best-effort */
-    }
-    const hook = await queryOne<{ webhook_token: string | null }>(
-      `SELECT webhook_token FROM triggers_registry WHERE flow_id = $1 AND status = 'active' AND webhook_token IS NOT NULL LIMIT 1`,
-      [req.params.id],
-    );
-    const { env } = await import("./config");
-    const webhookUrl = hook?.webhook_token
-      ? `${env.apiUrl.replace(/\/$/, "")}/api/v1/webhooks/inbound/${hook.webhook_token}`
-      : null;
-    res.json({ ok: true, webhookUrl });
-  });
-
-  authed.post("/automations/:id/validate", async (req, res) => {
-    const graph = req.body?.graph ?? loadBuilderGraph(
-      (await queryOne<{ draft_definition: unknown }>(`SELECT draft_definition FROM flows WHERE id = $1 AND org_id = $2`, [
-        req.params.id,
-        req.orgId,
-      ]))?.draft_definition,
-    );
-    const { issues } = await validateWorkflowGraph(graph, { workspaceId: req.orgId!, strict: true });
-    res.json({ ok: issues.length === 0, issues: issues.map((i) => ({ message: i.message })) });
-  });
 
   authed.get("/executions/:id", async (req, res) => {
     const run = await queryOne(

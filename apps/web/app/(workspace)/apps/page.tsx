@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Search, Plug } from "lucide-react";
 import { api } from "@/lib/api";
-import { mergeCatalog } from "@/lib/catalog";
+import { mergeCatalog, type CatalogApp } from "@/lib/catalog";
 import { AppIcon } from "@/components/app-icon";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -13,20 +13,13 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
 
-type AppRow = {
-  slug: string;
-  name: string;
-  description?: string;
-  category?: string;
-  authType?: string;
-  operations?: Array<{ type: string }>;
-};
+type AppRow = CatalogApp;
 type Conn = { id: string; name: string; status: string; appSlug?: string; app_slug?: string };
 
 export default function AppsPage() {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("all");
-  const list = useQuery({ queryKey: ["apps"], queryFn: () => api<{ apps: AppRow[] }>("/apps") });
+  const list = useQuery({ queryKey: ["apps"], queryFn: () => api<{ apps: CatalogApp[] }>("/apps") });
   const connections = useQuery({ queryKey: ["connections"], queryFn: () => api<{ connections: Conn[] }>("/connections") });
   const apps = mergeCatalog(list.data?.apps);
   const cats = ["all", ...Array.from(new Set(apps.map((a) => a.category).filter(Boolean)))] as string[];

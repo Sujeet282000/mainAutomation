@@ -11,6 +11,7 @@ import { CatalogIndex } from "./pieces/catalog-index";
 import { pieceRegistry, type OperationCard } from "./pieces/registry";
 import { validateWorkflowGraph } from "./workflow-validation";
 import { planCopilotIntent, type PlannedCopilotIntent } from "./copilot-planner";
+import { classifyIntent } from "@algoverge/shared";
 
 const Intent = z.object({
   summary: z.string(),
@@ -140,6 +141,22 @@ export async function* runCopilotEngine(opts: {
 }): AsyncGenerator<CopilotEvent | { type: "result"; result: CopilotEngineResult }> {
   const prompt = opts.prompt.trim();
   yield { type: "stage", stage: "intent", label: "Understanding your request" };
+
+  // Classify intent into asset type (workflow, table, form, agent, chatbot, system, etc.)
+  const assetClassification = classifyIntent(prompt);
+  yield {
+    type: "reasoning",
+    text: `Asset type: ${assetClassification.assetType} (${Math.round(assetClassification.confidence * 100)}% confidence)\nAction: ${assetClassification.action}${assetClassification.entities.apps.length ? `\nDetected apps: ${assetClassification.entities.apps.join(", ")}` : ""}${assetClassification.dependencies.length ? `\nDependencies: ${assetClassification.dependencies.map((d) => `${d.assetType} (${d.reason})`).join(", ")}` : ""}`
+  };
+
+  // If multi-asset system detected, yield a plan-stage event for the UI
+  if (assetClassification.assetType === "system" || assetClassification.dependencies.length > 0) {
+    yield {
+      type: "stage",
+      stage: "plan",
+      label: `Planning ${assetClassification.assetType} system`
+    };
+  }
 
   let intent = parseIntentHeuristic(prompt);
   const index = await getCatalogIndex();
