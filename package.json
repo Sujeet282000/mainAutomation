@@ -9,7 +9,7 @@
     "dev:api": "npm run dev -w @algoverge/api",
     "dev:web": "npm run dev -w @algoverge/web",
     "dev:worker": "npm run dev -w @algoverge/worker",
-    "dev:scheduler": "npm run dev:scheduler",
+    "dev:scheduler": "npm run dev -w @algoverge/scheduler",
     "dev:ai": "cd apps/ai && python -m uvicorn main:app --reload --port 8000",
     "migrate": "npm run migrate -w @algoverge/api",
     "seed": "npm run seed -w @algoverge/api",
