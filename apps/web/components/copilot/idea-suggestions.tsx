@@ -26,10 +26,11 @@ export function IdeaSuggestions({ onSelect, compact = false }: { onSelect: (prom
       </div>
       <div className={compact ? "grid gap-2" : "grid gap-3 sm:grid-cols-2"}>
         {ideas.map(({ title, description, icon: Icon, prompt }) => (
-          <button key={title} type="button" onClick={() => onSelect(prompt)} className="group flex items-center gap-3 rounded-xl border border-line bg-elevated p-3 text-left transition-all hover:-translate-y-0.5 hover:border-violet-300 hover:shadow-sm">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted text-violet-600 transition-colors group-hover:bg-violet-600 group-hover:text-white"><Icon className="h-4 w-4" /></span>
-            <span className="min-w-0 flex-1"><span className="block text-xs font-semibold text-ink">{title}</span><span className="mt-0.5 block truncate text-[11px] text-ink-muted">{description}</span></span>
-            <ChevronRight className="h-4 w-4 shrink-0 text-ink-muted transition-transform group-hover:translate-x-0.5" />
+          <button key={title} type="button" onClick={() => onSelect(prompt)} className="group relative flex items-center gap-3 overflow-hidden rounded-xl border border-line bg-elevated p-3 text-left shadow-none transition-all duration-200 ease-out hover:-translate-y-1 hover:border-violet-300 hover:bg-violet-50/40 hover:shadow-lg hover:shadow-violet-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:ring-offset-2 active:translate-y-0 active:scale-[0.99]">
+            <span className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-500 group-hover:translate-x-full" />
+            <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-violet-600 transition-all duration-200 group-hover:scale-105 group-hover:bg-violet-600 group-hover:text-white group-hover:shadow-md group-hover:shadow-violet-600/20"><Icon className="h-4 w-4" /></span>
+            <span className="relative min-w-0 flex-1"><span className="block text-xs font-semibold text-ink transition-colors group-hover:text-violet-900">{title}</span><span className="mt-0.5 block truncate text-[11px] text-ink-muted">{description}</span></span>
+            <ChevronRight className="relative h-4 w-4 shrink-0 text-ink-muted transition-all duration-200 group-hover:translate-x-1 group-hover:text-violet-600" />
           </button>
         ))}
       </div>
