@@ -17,7 +17,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Book, Check, ChevronRight, Clock, Copy, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Workflow, Wrench, X, Zap } from "lucide-react";
-import { api, streamSse } from "@/lib/api";
+import { api, streamSse, streamGetSse } from "@/lib/api";
 import {
   appAuth,
   fieldKey,
@@ -707,52 +707,65 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         body: JSON.stringify({ payload })
       });
       const execId = d.execution.id;
-      let last: { execution: { status: string }; steps: Array<{ step_id: string; status: string }> } | null = null;
-      for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, 350));
-        const snap = await api<{
-          execution: { status: string };
-          steps: Array<{ step_id: string; status: string }>;
-        }>(`/executions/${execId}`);
-        last = snap;
-        const byId: Record<string, RunState> = {};
-        for (const s of snap.steps) {
-          byId[s.step_id] =
-            s.status === "succeeded" || s.status === "success" || s.status === "completed"
-              ? "ok"
-              : s.status === "failed" || s.status === "cancelled"
-                ? "fail"
-                : s.status === "waiting" || s.status === "pending_approval"
-                  ? "waiting"
-                  : s.status === "queued"
-                    ? "queued"
-                    : "running";
-        }
-        const painted: Record<string, RunState> = Object.fromEntries(ordered.map((n) => [n.id, "idle" as RunState]));
-        for (const n of ordered) {
-          if (byId[n.id]) painted[n.id] = byId[n.id];
-        }
-        if (snap.execution.status === "waiting") {
-          const lastExecuted = [...snap.steps].reverse().find((step) => byId[step.step_id] === "ok" || byId[step.step_id] === "waiting");
-          if (lastExecuted) {
-            for (const edge of edges) {
-              if (edge.source === lastExecuted.step_id && !byId[edge.target]) painted[edge.target] = "waiting";
+      const lastRef: { current: { execution: { status: string }; steps: Array<{ step_id: string; status: string }> } | null } = { current: null };
+      
+      /* SSE-based real-time step streaming */
+      await new Promise<void>((resolve) => {
+        const controller = new AbortController();
+        streamGetSse(`/executions/${execId}/stream`, (event, data) => {
+          if (event === "snapshot" || event === "done") {
+            const snap = data as { execution: { status: string }; steps: Array<{ step_id: string; status: string }> };
+            lastRef.current = snap;
+            const byId: Record<string, RunState> = {};
+            for (const s of snap.steps) {
+              byId[s.step_id] =
+                s.status === "succeeded" || s.status === "success" || s.status === "completed"
+                  ? "ok"
+                  : s.status === "failed" || s.status === "cancelled"
+                    ? "fail"
+                    : s.status === "waiting" || s.status === "pending_approval"
+                      ? "waiting"
+                      : s.status === "queued"
+                        ? "queued"
+                        : "running";
             }
+            const painted: Record<string, RunState> = Object.fromEntries(ordered.map((n) => [n.id, "idle" as RunState]));
+            for (const n of ordered) {
+              if (byId[n.id]) painted[n.id] = byId[n.id];
+            }
+            if (snap.execution.status === "waiting") {
+              const lastExecuted = [...snap.steps].reverse().find((step) => byId[step.step_id] === "ok" || byId[step.step_id] === "waiting");
+              if (lastExecuted) {
+                for (const edge of edges) {
+                  if (edge.source === lastExecuted.step_id && !byId[edge.target]) painted[edge.target] = "waiting";
+                }
+              }
+            }
+            setRunStates(painted);
+            const runningStep = ordered.find((n) => painted[n.id] === "running");
+            const failedStep = ordered.find((n) => painted[n.id] === "fail");
+            const activeStep = failedStep || runningStep || ordered.find((n) => painted[n.id] === "waiting");
+            if (activeStep) {
+              setSelected(activeStep.id);
+              setInspectorTab("test");
+            }
+          } else if (event === "step") {
+            /* Individual step update — animate immediately */
+            const stepData = data as { stepId: string; status: string };
+            const state: RunState =
+              stepData.status === "succeeded" ? "ok" :
+              stepData.status === "failed" ? "fail" : "running";
+            setRunStates((prev) => ({ ...prev, [stepData.stepId]: state }));
+            setSelected(stepData.stepId);
+            setInspectorTab("test");
           }
-        }
-        setRunStates(painted);
-        /* Sync inspector with the currently running step */
-        const runningStep = ordered.find((n) => painted[n.id] === "running");
-        const failedStep = ordered.find((n) => painted[n.id] === "fail");
-        const activeStep = failedStep || runningStep || ordered.find((n) => painted[n.id] === "waiting");
-        if (activeStep) {
-          setSelected(activeStep.id);
-          setInspectorTab("test");
-        }
-        if (["succeeded", "failed", "cancelled", "waiting"].includes(snap.execution.status)) break;
-      }
-      const ok = last?.execution.status === "succeeded";
-      setTestResult({ ok: Boolean(ok), body: last });
+          if (event === "done") { resolve(); controller.abort(); }
+        }, controller.signal).catch(() => resolve());
+        /* Safety timeout: resolve after 30s regardless */
+        setTimeout(() => { controller.abort(); resolve(); }, 30000);
+      });
+      const ok = lastRef.current?.execution.status === "succeeded";
+      setTestResult({ ok: Boolean(ok), body: lastRef.current });
       /* After test completes, select the failed node if any, otherwise the last node */
       const finalFailed = ordered.find((n) => runStates[n.id] === "fail");
       const finalNode = finalFailed || ordered[ordered.length - 1];
@@ -760,7 +773,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         setSelected(finalNode.id);
         setInspectorTab("test");
       }
-      const runStatus = last?.execution.status ?? "timed out";
+      const runStatus = lastRef.current?.execution.status ?? "timed out";
       setMsg(ok ? "Test workflow completed." : runStatus === "waiting" ? "Test workflow is waiting to resume." : `Test workflow ${runStatus}.`);
     } catch (err) {
       setTestResult({ ok: false, body: { error: err instanceof Error ? err.message : "Run failed" } });

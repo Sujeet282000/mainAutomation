@@ -126,7 +126,8 @@ registerAdapter("github", "list_repos", async (ctx) => {
   url.searchParams.set("type", String(ctx.input.type ?? "owner"));
 
   const res = await fetch(url.toString(), { headers: ghHeaders(ctx.auth) });
-  const repos = await requireOk(res, "GitHub repos") as Array<Record<string, unknown>>;
+  const body = await requireOk(res, "GitHub repos") as Record<string, unknown>;
+  const repos = (body as unknown as Array<Record<string, unknown>>) ?? [];
   return {
     output: {
       repos: repos.map((r) => ({

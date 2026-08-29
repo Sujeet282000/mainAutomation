@@ -48,20 +48,29 @@ export async function ensureFlowVersion(opts: {
   userId?: string;
 }) {
   const hash = definitionHash(opts.definition);
-  const existing = await queryOne<{ id: string }>(
+  // First try exact hash match
+  const existingRows = await query<{ id: string }>(
     `SELECT id FROM flow_versions WHERE flow_id = $1 AND definition_hash = $2`,
     [opts.flowId, hash],
   );
-  if (existing) return existing.id;
+  if (existingRows[0]) return existingRows[0].id;
+
+  // Fallback: use the latest version for this flow (avoids hash mismatches from normalization)
+  const latestRows = await query<{ id: string }>(
+    `SELECT id FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
+    [opts.flowId],
+  );
+  if (latestRows[0]) return latestRows[0].id;
+
+  // Last resort: insert a new version
   const last = await queryOne<{ version_number: number }>(
     `SELECT version_number FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
     [opts.flowId],
   );
-  const row = await queryOne<{ id: string }>(
+  await query(
     `INSERT INTO flow_versions (org_id, flow_id, definition, definition_hash, version_number, published_by)
      VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (flow_id, definition_hash) DO UPDATE SET flow_id = EXCLUDED.flow_id
-     RETURNING id`,
+     ON CONFLICT (flow_id, definition_hash) DO NOTHING`,
     [
       opts.orgId,
       opts.flowId,
@@ -71,7 +80,11 @@ export async function ensureFlowVersion(opts: {
       opts.userId ?? null,
     ],
   );
-  return row!.id;
+  const insertedRows = await query<{ id: string }>(
+    `SELECT id FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
+    [opts.flowId],
+  );
+  return insertedRows[0]!.id;
 }
 
 export async function loadConnectionSecret(connectionId: string | null | undefined, orgId: string) {
@@ -172,6 +185,7 @@ export async function createAndRunFlow(opts: {
   payload?: Record<string, unknown>;
   graph?: unknown;
   triggerKind?: string;
+  onStepComplete?: (step: { stepId: string; status: string; output?: unknown; error?: string; durationMs?: number }) => void;
 }) {
   await ensureRunPartition();
   const flow = await queryOne<{ id: string; project_id: string; draft_definition: unknown; published_version_id: string | null }>(
@@ -187,18 +201,38 @@ export async function createAndRunFlow(opts: {
     userId: opts.userId,
   });
   const graph = loadBuilderGraph(draft);
-  const run = await queryOne<{ id: string; created_at: string }>(
+  // Ensure project_id exists — create one if the flow doesn't have one
+  let projectId = flow.project_id;
+  if (!projectId) {
+    const proj = await queryOne<{ id: string }>(
+      `SELECT id FROM projects WHERE org_id = $1 LIMIT 1`,
+      [opts.orgId],
+    );
+    projectId = proj?.id;
+    if (!projectId) {
+      const created = await queryOne<{ id: string }>(
+        `INSERT INTO projects (org_id, name, slug) VALUES ($1, 'Default', 'default') RETURNING id`,
+        [opts.orgId],
+      );
+      projectId = created!.id;
+    }
+    // Update the flow with the project_id
+    await query(`UPDATE flows SET project_id = $1 WHERE id = $2`, [projectId, flow.id]).catch(() => undefined);
+  }
+  const runRows = await query<{ id: string; created_at: string }>(
     `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, status, context)
      VALUES ($1,$2,$3,$4,$5,'running',$6) RETURNING id, created_at`,
     [
       opts.orgId,
-      flow.project_id,
+      projectId,
       flow.id,
       versionId,
       opts.triggerKind ?? "test",
       JSON.stringify({ trigger: opts.payload ?? { ping: true } }),
     ],
   );
+  const run = runRows[0];
+  if (!run) throw new Error("Failed to create execution run record.");
   const ctx = { trigger: opts.payload ?? { ping: true }, steps: {} as Record<string, Record<string, unknown>> };
   const ordered: WorkflowGraph["nodes"] = [];
   const seen = new Set<string>();
@@ -234,6 +268,7 @@ export async function createAndRunFlow(opts: {
           started.toISOString(),
         ],
       );
+      opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: result.output, durationMs: Date.now() - started.getTime() });
     } catch (err) {
       failed = err instanceof Error ? err.message : "step_failed";
       await query(
@@ -251,6 +286,7 @@ export async function createAndRunFlow(opts: {
           started.toISOString(),
         ],
       );
+      opts.onStepComplete?.({ stepId: node.id, status: "failed", error: failed, durationMs: Date.now() - started.getTime() });
       break;
     }
   }

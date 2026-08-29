@@ -32,13 +32,14 @@ registerAdapter("typeform", "new_submission", async (ctx) => {
   if (!latest) return { output: {} };
 
   // Flatten answers into a key-value map
-  const answers = (latest.answers as Record<string, unknown>[] | undefined) ?? [];
+  const answers = (latest.answers as Array<Record<string, unknown>> | undefined) ?? [];
   const fields: Record<string, unknown> = {};
   for (const a of answers) {
-    const fieldId = String(a.field?.ref ?? a.field?.id ?? "");
-    const fieldTitle = String(a.field?.title ?? fieldId);
+    const field = (a.field ?? {}) as Record<string, unknown>;
+    const fieldId = String(field.ref ?? field.id ?? "");
+    const fieldTitle = String(field.title ?? fieldId);
     fields[fieldId] = a.text ?? a.number ?? a.boolean ?? a.email ?? a.date ?? "";
-    fields[fieldTitle] = fields[fieldId]; // Also store by title for easier mapping
+    fields[fieldTitle] = fields[fieldId];
   }
 
   return {
@@ -96,18 +97,19 @@ registerAdapter("typeform", "get_responses", async (ctx) => {
   if (ctx.input.after) url.searchParams.set("after", String(ctx.input.after));
 
   const res = await fetch(url.toString(), { headers: tfHeaders(ctx.auth) });
-  const body = await requireOk(res, "Typeform responses");
+  const body = await requireOk(res, "Typeform responses") as Record<string, unknown>;
 
-  const items = (body.items as Record<string, unknown>[] | undefined) ?? [];
+  const items = (body.items as Array<Record<string, unknown>> | undefined) ?? [];
   const responses = items.map((r) => {
-    const answers = (r.answers as Record<string, unknown>[] | undefined) ?? [];
-    const fields: Record<string, unknown> = {};
-    for (const a of answers) {
-      const ref = String(a.field?.ref ?? a.field?.id ?? "");
-      const title = String(a.field?.title ?? ref);
-      fields[ref] = a.text ?? a.number ?? a.boolean ?? a.email ?? a.date ?? "";
-      fields[title] = fields[ref];
-    }
+  const answers = (r.answers as Array<Record<string, unknown>> | undefined) ?? [];
+  const fields: Record<string, unknown> = {};
+  for (const a of answers) {
+    const field = (a.field ?? {}) as Record<string, unknown>;
+    const ref = String(field.ref ?? field.id ?? "");
+    const title = String(field.title ?? ref);
+    fields[ref] = a.text ?? a.number ?? a.boolean ?? a.email ?? a.date ?? "";
+    fields[title] = fields[ref];
+  }
     return {
       responseId: r.response_id,
       submittedAt: r.submitted_at,
@@ -121,7 +123,7 @@ registerAdapter("typeform", "get_responses", async (ctx) => {
     output: {
       responses,
       total: body.total_items ?? 0,
-      hasMore: body.items?.length === pageSize,
+      hasMore: items.length === pageSize,
     }
   };
 });
@@ -162,7 +164,8 @@ registerDynamicFields("typeform", async ({ auth }) => {
   if (!res.ok) return [{ key: "formId", label: "Form", type: "string" as const }];
 
   const body = await res.json() as { items?: Array<{ id?: string; title?: string }> };
-  const forms = (body.items ?? []).filter((f) => f.id);
+  const items = (body.items as Array<Record<string, unknown>> | undefined) ?? [];
+  const forms = items.filter((f) => f.id);
 
   return [
     {
@@ -170,9 +173,9 @@ registerDynamicFields("typeform", async ({ auth }) => {
       label: "Form",
       type: "select" as const,
       options: forms.map((f) => ({
-        label: f.title || "Untitled",
-        value: String(f.id),
-        hint: f.id,
+        label: String(f.title ?? "Untitled"),
+        value: String(f.id ?? ""),
+        hint: String(f.id ?? ""),
       })),
     },
   ];

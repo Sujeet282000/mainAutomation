@@ -67,6 +67,54 @@ export async function streamSse(
   if (buf.trim()) consume(buf);
 }
 
+/** GET-based SSE reader for execution streaming */
+export async function streamGetSse(
+  path: string,
+  onEvent: (event: string, data: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+) {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  const workspaceId = getWorkspaceId();
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (workspaceId) headers["x-workspace-id"] = workspaceId;
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, { method: "GET", headers, signal });
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new Error(`Cannot reach the API at ${API_URL}.`);
+  }
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.hint ?? data.message ?? data.error ?? res.statusText);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    if (signal?.aborted) { reader.cancel(); break; }
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const chunks = buf.split("\n\n");
+    buf = chunks.pop() ?? "";
+    for (const chunk of chunks) {
+      let eventType = "message";
+      const lines = chunk.split("\n");
+      let dataLine = "";
+      for (const line of lines) {
+        if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+        if (line.startsWith("data: ")) dataLine = line.slice(6);
+        if (line.startsWith(": ")) continue; // heartbeat comment
+      }
+      if (dataLine) {
+        try { onEvent(eventType, JSON.parse(dataLine)); } catch { /* ignore */ }
+      }
+    }
+  }
+}
+
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     "content-type": "application/json",

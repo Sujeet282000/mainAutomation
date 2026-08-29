@@ -2294,6 +2294,35 @@ authed.post("/forms", async (req, res) => {
   res.json({ form: { id: row!.id, name: body.name } });
 });
 
+authed.patch("/forms/:id", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1).optional(),
+    tableId: z.string().uuid().nullable().optional(),
+    automationId: z.string().uuid().nullable().optional(),
+    fields: z.array(z.object({ key: z.string(), type: z.string(), label: z.string() })).optional(),
+  }).parse(req.body);
+
+  const existing = await queryOne<{ id: string; schema_json: Record<string, unknown> }>(
+    `SELECT id, schema_json FROM data_tables WHERE id = $1 AND org_id = $2 AND name LIKE 'form:%'`,
+    [req.params.id, req.orgId],
+  );
+  if (!existing) return res.status(404).json({ error: "not_found" });
+
+  const schema = { ...existing.schema_json } as Record<string, unknown>;
+  if (body.tableId !== undefined) schema.table_id = body.tableId;
+  if (body.automationId !== undefined) schema.automation_id = body.automationId;
+  if (body.fields) schema.fields = body.fields;
+
+  const updates: string[] = [];
+  const params: unknown[] = [];
+  let idx = 3;
+  if (body.name) { updates.push(`name = $${idx}`); params.push(`form:${body.name}`); idx++; }
+  updates.push(`schema_json = $${idx}`); params.push(JSON.stringify(schema));
+
+  await query(`UPDATE data_tables SET ${updates.join(', ')} WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId, ...params]);
+  res.json({ ok: true });
+});
+
 authed.delete("/forms/:id", async (req, res) => {
   await query(`DELETE FROM data_tables WHERE id = $1 AND org_id = $2 AND name LIKE 'form:%'`, [req.params.id, req.orgId]);
   res.json({ ok: true });

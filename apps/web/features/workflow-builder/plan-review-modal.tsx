@@ -5,6 +5,7 @@ import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronUp, Database
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { CopilotPlanResult } from "@/lib/copilot";
+import { AssetGraphVisualization, buildGraphFromPlan } from "@/features/copilot/asset-graph";
 
 type PlanStep = { label: string; type: "trigger" | "action" | "logic" | "table" | "form" | "agent" | "chatbot" | "interface" | "canvas"; app: string };
 
@@ -96,6 +97,28 @@ export function PlanReviewModal({ open, plan, loading, error, onConfirm, onCance
             </div>
           </div>
         ) : null}
+        {/* Asset graph visualization for multi-asset plans */}
+        {enhancedPlan?.steps && enhancedPlan.steps.length > 1 && (
+          <div className="mt-4">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">Asset graph</p>
+            <AssetGraphVisualization
+              graph={buildGraphFromPlan({
+                steps: enhancedPlan.steps.map((s: any) => ({
+                  id: s.id,
+                  type: s.type,
+                  label: s.label,
+                  appSlug: s.appSlug,
+                  description: s.description,
+                  connectionRequired: s.connectionRequired,
+                  connectionId: s.connectionId,
+                  dependsOn: s.dependsOn,
+                })),
+                connections: enhancedPlan.connections,
+              })}
+              compact
+            />
+          </div>
+        )}
         {missingInfo.length > 0 && <div className="mt-3 rounded-2xl border border-line bg-muted/40 p-4"><p className="text-xs font-semibold">Still needed</p><ul className="mt-2 space-y-1">{missingInfo.map((item: string) => <li key={item} className="text-xs text-ink-muted">• {item}</li>)}</ul></div>}
         {rejectedOps.length > 0 && <div className="mt-3 rounded-2xl border border-danger/30 bg-danger/5 p-4"><p className="text-xs font-semibold text-danger"><AlertTriangle className="mr-1 inline h-3 w-3" />Some steps could not be created</p><ul className="mt-2 space-y-1">{rejectedOps.map((item, i) => <li key={i} className="text-xs text-ink"><b>{String((item.operation as Record<string, unknown>)?.kind ?? "operation")}:</b> {item.reason}</li>)}</ul></div>}
         {needsConfirmation.length > 0 && <div className="mt-3 rounded-2xl border border-amber-300 bg-amber-50 p-4"><p className="text-xs font-semibold text-amber-800"><AlertTriangle className="mr-1 inline h-3 w-3" />These steps need your approval</p><ul className="mt-2 space-y-1">{needsConfirmation.map((op, i) => <li key={i} className="text-xs text-amber-700">• {op.kind === "remove_node" ? "Remove a step" : op.kind}</li>)}</ul></div>}

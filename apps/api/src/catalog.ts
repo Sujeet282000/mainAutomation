@@ -130,12 +130,20 @@ export const APP_CATALOG: AppManifest[] = [
   {
     slug: "http",
     name: "HTTP / API Request",
-    description: "Call any REST API.",
+    description: "Catch webhooks or call any REST API.",
     category: "developer",
     icon: "🌐",
     color: "#0ea5e9",
     authType: "none",
     operations: [
+      {
+        key: "catch_hook",
+        name: "Catch Webhook",
+        type: "trigger",
+        triggerMode: "webhook",
+        inputFields: [{ key: "secret", label: "Optional HMAC secret", type: "string" }],
+        outputSample: { body: {}, headers: {}, query: {} }
+      },
       {
         key: "request",
         name: "Custom Request",
@@ -639,14 +647,24 @@ export const APP_CATALOG: AppManifest[] = [
   {
     slug: "github",
     name: "GitHub",
-    description: "Issues, PRs, and repos.",
+    description: "Issues, PRs, repos, and comments.",
     category: "developer",
     icon: "🐙",
     color: "#24292f",
     authType: "oauth2",
     operations: [
       { key: "new_issue", name: "New Issue", type: "trigger", triggerMode: "webhook", inputFields: [] },
-      { key: "create_issue", name: "Create Issue", type: "action", inputFields: [{ key: "repo", label: "owner/repo", type: "string", required: true }, { key: "title", label: "Title", type: "string", required: true }, { key: "body", label: "Body", type: "text" }] }
+      { key: "push_event", name: "Push", type: "trigger", triggerMode: "webhook", inputFields: [] },
+      { key: "pull_request_event", name: "Pull Request", type: "trigger", triggerMode: "webhook", inputFields: [] },
+      { key: "issues_event", name: "Issues Event", type: "trigger", triggerMode: "webhook", inputFields: [] },
+      { key: "create_issue", name: "Create Issue", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }, { key: "title", label: "Title", type: "string", required: true }, { key: "body", label: "Body", type: "text" }, { key: "labels", label: "Labels (comma-separated)", type: "string" }, { key: "assignees", label: "Assignees (comma-separated)", type: "string" }] },
+      { key: "update_issue", name: "Update Issue", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }, { key: "issueNumber", label: "Issue number", type: "dynamic", required: true }, { key: "title", label: "Title", type: "string" }, { key: "body", label: "Body", type: "text" }, { key: "state", label: "State", type: "select", options: [{ label: "Open", value: "open" }, { label: "Closed", value: "closed" }] }] },
+      { key: "close_issue", name: "Close Issue", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }, { key: "issueNumber", label: "Issue number", type: "dynamic", required: true }] },
+      { key: "create_pr", name: "Create Pull Request", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }, { key: "title", label: "Title", type: "string", required: true }, { key: "head", label: "Head branch", type: "string", required: true }, { key: "base", label: "Base branch", type: "string" }, { key: "body", label: "Body", type: "text" }] },
+      { key: "merge_pr", name: "Merge PR", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }, { key: "prNumber", label: "PR number", type: "dynamic", required: true }, { key: "mergeMethod", label: "Merge method", type: "select", options: [{ label: "Merge", value: "merge" }, { label: "Squash", value: "squash" }, { label: "Rebase", value: "rebase" }] }] },
+      { key: "add_comment", name: "Add Comment", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }, { key: "issueNumber", label: "Issue/PR number", type: "dynamic", required: true }, { key: "body", label: "Comment", type: "text", required: true }] },
+      { key: "list_repos", name: "List Repositories", type: "action", inputFields: [{ key: "sort", label: "Sort by", type: "select", options: [{ label: "Recently updated", value: "updated" }, { label: "Recently created", value: "created" }, { label: "Recently pushed", value: "pushed" }, { label: "Name", value: "full_name" }] }, { key: "type", label: "Type", type: "select", options: [{ label: "Owner", value: "owner" }, { label: "All", value: "all" }, { label: "Public", value: "public" }, { label: "Private", value: "private" }] }, { key: "limit", label: "Limit", type: "number" }], outputSample: { repos: [{ full_name: "user/repo", description: "A repo", private: false }], total: 1 } },
+      { key: "get_repo", name: "Get Repository", type: "action", inputFields: [{ key: "repo", label: "Repository", type: "dynamic", required: true }] }
     ]
   },
   {
@@ -908,8 +926,6 @@ export const APP_CATALOG: AppManifest[] = [
       { key: "get_responses", name: "Get Responses", type: "action", inputFields: [{ key: "formId", label: "Form ID", type: "dynamic", required: true }, { key: "pageSize", label: "Limit", type: "number" }], outputSample: { responses: [{ responseId: "r1", submittedAt: "2024-01-01T00:00:00Z", answers: {} }], total: 1, hasMore: false } },
       { key: "create_form", name: "Create Form", type: "action", inputFields: [{ key: "title", label: "Title", type: "string", required: true }] }
     ]
-  },
-
   },
   {
     slug: "microsoft-teams",

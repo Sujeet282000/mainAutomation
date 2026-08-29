@@ -234,6 +234,26 @@ export async function* runCopilotEngine(opts: {
       target.label = pick.card.display;
     }
   }
+  // ── Resolve labels from catalog ──
+  // Ensure every node has a human-readable label from the catalog, not just the app slug.
+  for (const node of graph.nodes) {
+    if (node.appSlug && node.operation) {
+      const app = APP_CATALOG.find((a) => a.slug === node.appSlug);
+      if (app) {
+        const op = app.operations.find((o) => o.key === node.operation);
+        if (op && (!node.label || node.label === node.appSlug || node.label === app.name)) {
+          node.label = `${app.name} — ${op.name}`;
+        } else if (op && !node.label.includes("—")) {
+          // Label exists but doesn't include the app name separator
+          node.label = `${app.name} — ${op.name}`;
+        }
+      }
+    } else if (node.appSlug && (!node.label || node.label === node.appSlug)) {
+      const app = APP_CATALOG.find((a) => a.slug === node.appSlug);
+      if (app) node.label = app.name;
+    }
+  }
+
   yield {
     type: "reasoning",
     text: `Assembled ${graph.nodes.length} catalog steps. AI-selected operations are grounded to the registered catalog.`

@@ -257,6 +257,87 @@ export function registerUiCompat(authed: Router) {
     res.json(mapRunToExecution(run as any, steps as any));
   });
 
+  /** SSE stream: real-time step-by-step execution updates */
+  authed.get("/executions/:id/stream", async (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    let lastStepCount = 0;
+    let done = false;
+    const runId = req.params.id;
+    const orgId = req.orgId!;
+
+    const sendEvent = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Send initial state
+    const run = await queryOne(
+      `SELECT r.*, f.name as flow_name FROM flow_runs r JOIN flows f ON f.id = r.flow_id
+       WHERE r.id = $1 AND r.org_id = $2`,
+      [runId, orgId],
+    );
+    if (!run) { sendEvent("error", { message: "not_found" }); res.end(); return; }
+    const initialSteps = await query(
+      `SELECT * FROM run_steps WHERE run_id = $1 AND run_created_at = $2 ORDER BY sequence_no ASC`,
+      [runId, run.created_at],
+    );
+    lastStepCount = initialSteps.length;
+    sendEvent("snapshot", mapRunToExecution(run as any, initialSteps as any));
+
+    // Poll for new steps every 200ms until terminal status
+    const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "timeout"]);
+    const interval = setInterval(async () => {
+      try {
+        const currentRun = await queryOne(
+          `SELECT r.*, f.name as flow_name FROM flow_runs r JOIN flows f ON f.id = r.flow_id
+           WHERE r.id = $1 AND r.org_id = $2`,
+          [runId, orgId],
+        );
+        if (!currentRun) { done = true; return; }
+        const steps = await query(
+          `SELECT * FROM run_steps WHERE run_id = $1 AND run_created_at = $2 ORDER BY sequence_no ASC`,
+          [runId, currentRun.created_at],
+        );
+        // Emit new steps as individual events
+        for (let i = lastStepCount; i < steps.length; i++) {
+          const s = steps[i] as any;
+          sendEvent("step", {
+            stepId: s.step_id,
+            status: s.status,
+            sequenceNo: s.sequence_no,
+            durationMs: s.started_at && s.finished_at
+              ? new Date(s.finished_at).getTime() - new Date(s.started_at).getTime()
+              : null,
+            error: s.error_json,
+          });
+        }
+        lastStepCount = steps.length;
+
+        if (terminalStatuses.has(String(currentRun.status))) {
+          sendEvent("done", mapRunToExecution(currentRun as any, steps as any));
+          done = true;
+          clearInterval(interval);
+          res.end();
+        }
+      } catch {
+        // ignore polling errors
+      }
+    }, 200);
+
+    // Heartbeat every 5s to keep connection alive
+    const heartbeat = setInterval(() => { if (!done) res.write(`: heartbeat\n\n`); }, 5000);
+
+    req.on("close", () => {
+      clearInterval(interval);
+      clearInterval(heartbeat);
+      done = true;
+    });
+  });
+
   authed.post("/executions/:id/retry", async (req, res) => {
     const run = await queryOne<{ flow_id: string; context: { trigger?: Record<string, unknown> } }>(
       `SELECT flow_id, context FROM flow_runs WHERE id = $1 AND org_id = $2`,
