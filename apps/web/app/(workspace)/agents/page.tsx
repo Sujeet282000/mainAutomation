@@ -117,12 +117,7 @@ export default function AgentsPage() {
   const [createInstructions, setCreateInstructions] = useState("");
 
   return (
-    <div>
-      <PageHeader title="Agents" description="Proactive AI teammates that monitor triggers, use knowledge, and execute tool calls." actions={<div className="flex items-center gap-2"><PageInfo title="Agents" description="Agents are autonomous AI workers. They monitor triggers, use tools, and can run workflows." tips={["Give agents clear instructions on what to do and when.","Attach knowledge (notes, docs) so the agent has context.","Link a Workflow so the agent can execute actions.","Enable approval to require human sign-off before tool calls.","Test the agent with a message before going live."]} /><Button onClick={async () => {
-        if (!createName.trim()) return;
-        await api("/agents", { method: "POST", body: JSON.stringify({ name: createName, instructions: createInstructions || "You are a helpful assistant." }) });
-        setCreateName(""); setCreateInstructions(""); qc.invalidateQueries({ queryKey: ["agents"] });
-      }}><Plus className="mr-1 h-3.5 w-3.5" />New agent</Button></div>} />
+    <div>        <PageHeader title="Agents" description="Proactive AI teammates that monitor triggers, use knowledge, and execute tool calls." actions={<div className="flex items-center gap-2"><PageInfo title="Agents" description="Agents are autonomous AI workers. They monitor triggers, use tools, and can run workflows." tips={["Give agents clear instructions on what to do and when.","Attach knowledge (notes, docs) so the agent has context.","Link a Workflow so the agent can execute actions.","Enable approval to require human sign-off before tool calls.","Test the agent with a message before going live."]} /><Button onClick={() => { setCreateName("New Agent"); setCreateInstructions(""); }}><Plus className="mr-1 h-3.5 w-3.5" />New agent</Button></div>} />
 
       {!q.isLoading && !q.data?.agents.length && (
         <EmptyState icon={<Bot className="h-10 w-10" />} title="No agents yet" description="Create an AI agent with tools, knowledge, and linked workflows." />
@@ -132,6 +127,14 @@ export default function AgentsPage() {
         <Card className="mb-4 space-y-3">
           <Input value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Agent name" autoFocus />
           <textarea className="min-h-[60px] w-full rounded-lg border border-line bg-elevated p-3 text-sm" value={createInstructions} onChange={(e) => setCreateInstructions(e.target.value)} placeholder="What should this agent do?" />
+          <div className="flex gap-2">
+            <Button onClick={async () => {
+              if (!createName.trim()) return;
+              await api("/agents", { method: "POST", body: JSON.stringify({ name: createName, instructions: createInstructions || "You are a helpful assistant." }) });
+              setCreateName(""); setCreateInstructions(""); qc.invalidateQueries({ queryKey: ["agents"] });
+            }}>Create agent</Button>
+            <Button variant="ghost" onClick={() => { setCreateName(""); setCreateInstructions(""); }}>Cancel</Button>
+          </div>
         </Card>
       )}
 

@@ -501,6 +501,23 @@ export function registerUiCompat(authed: Router) {
               [sessionId, JSON.stringify(agentReply.operations), appliedGraph ? JSON.stringify(persistBuilderDraft(appliedGraph)) : null],
             );
           }
+          // Generate suggestions based on current workflow state and the agent reply
+          const { generateSuggestionsForAgent, generateClarificationForAgent } = await import("./copilot/copilot");
+          const agentSuggestions = generateSuggestionsForAgent(body.prompt, agentReply.message, graph, agentReply.needs_input);
+          const agentClarification = agentReply.needs_input?.length ? generateClarificationForAgent(body.prompt, agentReply.needs_input) : undefined;
+          // Generate operation cards for workflow modifications
+          const agentOpCards = applied && appliedGraph ? [{
+            title: "Workflow updated",
+            steps: (appliedGraph.nodes ?? []).map((n: { label?: string; appSlug?: string; id: string }) => ({
+              label: `${n.label ?? n.id} (${n.appSlug ?? "unknown"})`,
+              status: "completed" as const,
+            })),
+            status: "completed" as const,
+            actions: [
+              { label: "Test workflow", prompt: "Test this workflow" },
+              { label: "Add a step", prompt: "Add the next step" },
+            ],
+          }] : [];
           res.json({
             reply: agentReply.message,
             graph: applied ? appliedGraph : undefined,
@@ -509,7 +526,9 @@ export function registerUiCompat(authed: Router) {
             source: "python-agent",
             youDoFirst: [],
             iCan: agentReply.needs_input?.length ? ["Answer: " + agentReply.needs_input.join(", ")] : [],
-            operations: agentReply.operations ?? [],
+            operations: agentOpCards.length ? agentOpCards : undefined,
+            suggestions: agentSuggestions,
+            clarification: agentClarification,
             applied_operations: appliedOps,
             rejected_operations: rejectedOps,
             needs_confirmation: needsConfirmation,

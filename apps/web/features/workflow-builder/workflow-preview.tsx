@@ -51,7 +51,7 @@ export function WorkflowPreview({
               <div className="ml-2.5 flex h-3 w-px bg-violet-300" />
             )}
             {/* Step */}
-            <div className="flex items-center gap-1.5 rounded-lg border border-line bg-white/80 px-2 py-1">
+            <div className="flex items-center gap-1.5 rounded-lg border border-line bg-elevated/80 px-2 py-1">
               <span
                 className={cn(
                   "flex h-5 w-5 items-center justify-center rounded-full",

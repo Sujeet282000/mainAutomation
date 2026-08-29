@@ -803,6 +803,233 @@ export function explainLastTest(lastTest?: { ok?: boolean; ms?: number; body?: u
   return `The last test failed${duration}. ${preview} Fix that step or reconnect the account, then test again. Copilot will not publish.`;
 }
 
+export type CopilotSuggestion = { label: string; prompt: string; icon?: "zap" | "check" | "arrow" | "pencil" | "alert" };
+export type CopilotClarification = { question: string; options: Array<{ label: string; prompt: string; description?: string }> };
+export type CopilotOperation = { title: string; steps: Array<{ label: string; status: "pending" | "running" | "completed" | "failed" | "skipped"; detail?: string }>; status: "running" | "completed" | "failed"; actions?: Array<{ label: string; prompt: string }> };
+
+/** Generate context-aware clickable suggestion badges based on workflow state */
+function generateSuggestions(
+  chapter: string,
+  snapshot: { empty: boolean; nodeCount: number; steps: Array<{ issues: string[]; chapter: string; appSlug: string; type: string }> },
+  graph?: WorkflowGraph,
+  selectedStepId?: string | null
+): CopilotSuggestion[] {
+  // If a node is selected, show node-specific suggestions first
+  if (selectedStepId && graph) {
+    const node = graph.nodes.find((n) => n.id === selectedStepId);
+    if (node) {
+      const nodeApp = APP_CATALOG.find((a) => a.slug === node.appSlug);
+      const nodeOp = nodeApp?.operations.find((o) => o.key === node.operation);
+      const nodeSuggestions: CopilotSuggestion[] = [];
+      
+      // Explain this node
+      nodeSuggestions.push({ label: `Explain ${node.label ?? "this step"}`, prompt: `Explain this ${node.type} step`, icon: "check" });
+      
+      // Test this node
+      nodeSuggestions.push({ label: `Test ${node.label ?? "this step"}`, prompt: `Test this ${node.type} step`, icon: "zap" });
+      
+      // Node-specific actions based on app type
+      if (node.appSlug === "google-sheets") {
+        nodeSuggestions.push({ label: "Map fields", prompt: "Map fields from previous steps to this sheet", icon: "pencil" });
+        nodeSuggestions.push({ label: "Change sheet", prompt: "Change the spreadsheet or sheet for this step", icon: "pencil" });
+      } else if (node.appSlug === "gmail" || node.appSlug === "outlook") {
+        nodeSuggestions.push({ label: "Change recipient", prompt: "Change who receives this email", icon: "pencil" });
+        nodeSuggestions.push({ label: "Edit template", prompt: "Edit the email template", icon: "pencil" });
+      } else if (node.appSlug === "slack") {
+        nodeSuggestions.push({ label: "Change channel", prompt: "Change the Slack channel for this step", icon: "pencil" });
+        nodeSuggestions.push({ label: "Edit message", prompt: "Edit the Slack message template", icon: "pencil" });
+      } else if (node.appSlug === "openai" || node.appSlug === "anthropic" || node.appSlug === "gemini") {
+        nodeSuggestions.push({ label: "Edit prompt", prompt: "Edit the AI prompt for this step", icon: "pencil" });
+        nodeSuggestions.push({ label: "Change model", prompt: "Change the AI model for this step", icon: "pencil" });
+      } else if (node.appSlug === "paths" || node.appSlug === "filter") {
+        nodeSuggestions.push({ label: "Edit condition", prompt: "Edit the condition for this step", icon: "pencil" });
+        nodeSuggestions.push({ label: "Add branch", prompt: "Add another branch", icon: "arrow" });
+      }
+      
+      // Universal node actions
+      nodeSuggestions.push({ label: "Add step after", prompt: "Add the next step after this one", icon: "arrow" });
+      
+      // If there are issues on this node
+      if (snapshot.steps.some((s) => s.issues.length > 0)) {
+        nodeSuggestions.push({ label: "Fix issues", prompt: "Fix all workflow issues", icon: "alert" });
+      }
+      
+      return nodeSuggestions.slice(0, 8);
+    }
+  }
+  
+  if (snapshot.empty) {
+    return [
+      { label: "Gmail \u2192 Slack", prompt: "When a new Gmail arrives, send a summary to Slack", icon: "zap" },
+      { label: "Calendar \u2192 Sheets", prompt: "When a new calendar event is created, add it to Google Sheets", icon: "zap" },
+      { label: "Form \u2192 Email", prompt: "When a form is submitted, send a confirmation email", icon: "zap" },
+      { label: "Webhook \u2192 HTTP", prompt: "When a webhook arrives, POST the body to an HTTP endpoint", icon: "zap" },
+      { label: "Lead \u2192 AI \u2192 Sheets", prompt: "When a new lead arrives, analyze with AI and save to Sheets", icon: "zap" },
+      { label: "Schedule \u2192 AI", prompt: "Every morning, summarize tasks with AI and send to Slack", icon: "zap" },
+    ];
+  }
+  const suggestions: CopilotSuggestion[] = [];
+  if (chapter === "inspect" || chapter === "explain") {
+    suggestions.push({ label: "Explain this flow", prompt: "Explain this workflow in detail", icon: "check" });
+    suggestions.push({ label: "Find problems", prompt: "Find problems in this workflow", icon: "alert" });
+  }
+  if (chapter === "rebuild" || chapter === "add_step") {
+    suggestions.push({ label: "Add AI step", prompt: "Add an AI processing step", icon: "zap" });
+    suggestions.push({ label: "Add condition", prompt: "Add a condition/branch after this step", icon: "pencil" });
+    suggestions.push({ label: "Add notification", prompt: "Add a notification step", icon: "arrow" });
+  }
+  if (snapshot.steps.some((s) => s.issues.length > 0)) {
+    suggestions.push({ label: "Fix issues", prompt: "Fix all workflow issues", icon: "alert" });
+  }
+  suggestions.push({ label: "Test workflow", prompt: "Test this workflow", icon: "zap" });
+  suggestions.push({ label: "Add a step", prompt: "Add the next step", icon: "arrow" });
+  suggestions.push({ label: "Optimize", prompt: "Optimize this workflow", icon: "check" });
+  return suggestions;
+}
+
+/** Generate a clarification question when the request is ambiguous */
+function generateClarification(
+  prompt: string,
+  snapshot: { empty: boolean; nodeCount: number },
+  chapter?: string
+): CopilotClarification | undefined {
+  if (!snapshot.empty) return undefined;
+  if (chapter === "rebuild") return undefined;
+  const lower = prompt.toLowerCase();
+  if (/lead|prospect|customer/i.test(lower) && !/form|webhook|sheet|email|slack|notify|crm/i.test(lower)) {
+    return {
+      question: "Where do your leads come from?",
+      options: [
+        { label: "Form submission", prompt: "Create a lead automation: When someone submits a form, use AI to qualify the lead, add qualified leads to Google Sheets, and send a WhatsApp notification", description: "Website form, Typeform, etc." },
+        { label: "Google Sheets", prompt: "Create a lead automation: When a new row is added to Google Sheets, use AI to qualify the lead, add qualified leads to Google Sheets, and notify via Slack", description: "New row added to a sheet" },
+        { label: "Webhook", prompt: "Create a lead automation: When a webhook fires, use AI to qualify the lead, add qualified leads to Google Sheets, and send an email notification", description: "HTTP POST from any source" },
+        { label: "CRM integration", prompt: "Create a lead automation: When a new deal is created in HubSpot, use AI to qualify the lead, add qualified leads to Google Sheets, and notify via Slack", description: "New deal or contact" },
+      ]
+    };
+  }
+  if (/automat|workflow|zap|pipeline/i.test(lower) && !/form|webhook|sheet|email|slack|notify|trigger|when|whenever/i.test(lower)) {
+    return {
+      question: "What should this automation do?",
+      options: [
+        { label: "Send notifications", prompt: "Send email or Slack notifications", description: "Notify team of events" },
+        { label: "Sync data between apps", prompt: "Sync data between applications", description: "Keep data in sync" },
+        { label: "Process with AI", prompt: "Process data with AI", description: "Classify, summarize, or extract" },
+        { label: "Create records", prompt: "Create records in a database or CRM", description: "Add rows, contacts, etc." },
+      ]
+    };
+  }
+  if (/schedule|cron|every|daily|weekly|monthly/i.test(lower) && !/trigger|when|webhook|form/i.test(lower)) {
+    return {
+      question: "What should happen on schedule?",
+      options: [
+        { label: "Send report email", prompt: "Send a scheduled report email", description: "Daily/weekly summary" },
+        { label: "Sync data", prompt: "Sync data between apps on schedule", description: "Pull from one app, push to another" },
+        { label: "Run AI analysis", prompt: "Run AI analysis on schedule", description: "Process and summarize data" },
+        { label: "Check and notify", prompt: "Check conditions and notify if needed", description: "Monitor and alert" },
+      ]
+    };
+  }
+  return undefined;
+}
+
+/** Generate suggestions for the Python agent path */
+export function generateSuggestionsForAgent(
+  prompt: string,
+  reply: string,
+  graph?: WorkflowGraph,
+  needsInput?: string[]
+): CopilotSuggestion[] {
+  const suggestions: CopilotSuggestion[] = [];
+  if (!graph?.nodes?.length) {
+    suggestions.push({ label: "Create workflow", prompt: "Create a new workflow", icon: "zap" });
+    suggestions.push({ label: "Explain integrations", prompt: "What integrations are available?", icon: "check" });
+  } else {
+    suggestions.push({ label: "Test workflow", prompt: "Test this workflow", icon: "zap" });
+    suggestions.push({ label: "Add a step", prompt: "Add the next step", icon: "arrow" });
+    suggestions.push({ label: "Explain this flow", prompt: "Explain this workflow", icon: "check" });
+  }
+  if (needsInput?.length) {
+    suggestions.push({ label: "Show options", prompt: "What are my options?", icon: "pencil" });
+  }
+  if (/lead|customer|prospect/i.test(prompt)) {
+    suggestions.push({ label: "Add AI qualification", prompt: "Add an AI qualification step", icon: "zap" });
+    suggestions.push({ label: "Send notification", prompt: "Add a notification step", icon: "arrow" });
+  }
+  if (/fail|error|broken/i.test(prompt)) {
+    suggestions.push({ label: "Show errors", prompt: "Show me the errors", icon: "alert" });
+    suggestions.push({ label: "Retry run", prompt: "Retry the failed run", icon: "arrow" });
+  }
+  return suggestions.slice(0, 6);
+}
+
+/** Generate clarification for the Python agent path */
+export function generateClarificationForAgent(
+  prompt: string,
+  needsInput: string[]
+): CopilotClarification | undefined {
+  if (!needsInput.length) return undefined;
+  const lower = prompt.toLowerCase();
+  if (/lead|prospect|customer/i.test(lower)) {
+    return {
+      question: "Where do your leads come from?",
+      options: [
+        { label: "Form submission", prompt: "Use a form submission trigger", description: "Website form, Typeform, etc." },
+        { label: "Google Sheets", prompt: "Use Google Sheets trigger for new rows", description: "New row added to a sheet" },
+        { label: "Webhook", prompt: "Use a webhook trigger", description: "HTTP POST from any source" },
+        { label: "CRM integration", prompt: "Use CRM trigger (HubSpot, Salesforce)", description: "New deal or contact" },
+      ]
+    };
+  }
+  if (/automat|workflow|zap|pipeline/i.test(lower)) {
+    return {
+      question: "What should this automation do?",
+      options: [
+        { label: "Send notifications", prompt: "Send email or Slack notifications", description: "Notify team of events" },
+        { label: "Sync data between apps", prompt: "Sync data between applications", description: "Keep data in sync" },
+        { label: "Process with AI", prompt: "Process data with AI", description: "Classify, summarize, or extract" },
+        { label: "Create records", prompt: "Create records in a database or CRM", description: "Add rows, contacts, etc." },
+      ]
+    };
+  }
+  return {
+    question: `I need more information: ${needsInput[0]}`,
+    options: [
+      { label: "Form trigger", prompt: "Use a form submission trigger" },
+      { label: "Webhook trigger", prompt: "Use a webhook trigger" },
+      { label: "Schedule trigger", prompt: "Use a schedule trigger" },
+      { label: "Skip for now", prompt: "Skip and use defaults" },
+    ]
+  };
+}
+
+/** Generate operation cards showing workflow creation progress */
+function generateOperations(
+  result: { graph?: WorkflowGraph; chapter?: string; source: string; applied?: boolean },
+  snapshot: { empty: boolean; nodeCount: number; steps: Array<{ label: string; appSlug: string; type: string; chapter: string; issues: string[] }> }
+): CopilotOperation[] {
+  if (!result.graph || result.chapter === "inspect" || result.chapter === "explain" || result.chapter === "diagnose") return [];
+  if (snapshot.empty) return [];
+  const steps = snapshot.steps.map((s) => ({
+    label: `${s.label} (${s.appSlug})`,
+    status: s.issues.length > 0 ? ("failed" as const) : ("completed" as const),
+    detail: s.issues.length > 0 ? s.issues[0] : undefined,
+  }));
+  const allOk = steps.every((s) => s.status === "completed");
+  return [{
+    title: result.applied ? "Workflow updated" : "Workflow planned",
+    steps,
+    status: allOk ? "completed" : steps.some((s) => s.status === "failed") ? "failed" : "running",
+    actions: allOk
+      ? [
+          { label: "Test workflow", prompt: "Test this workflow" },
+          { label: "Add a step", prompt: "Add the next step" },
+        ]
+      : [
+          { label: "Fix issues", prompt: "Fix all workflow issues" },
+        ],
+  }];
+}
+
 export async function copilotChat(opts: {
   prompt: string;
   graph?: WorkflowGraph;
@@ -825,6 +1052,9 @@ export async function copilotChat(opts: {
   youDoFirst?: string[];
   iCan?: string[];
   outline?: string;
+  suggestions?: CopilotSuggestion[];
+  clarification?: CopilotClarification;
+  operations?: CopilotOperation[];
 }> {
   const mode = parseCopilotMode(opts.mode);
   const steps = opts.graph?.nodes?.length ?? 0;
@@ -871,7 +1101,10 @@ export async function copilotChat(opts: {
         ]
       ).catch(() => undefined);
     }
-    return { ...result, applied, youDoFirst: snap.youDoFirst ?? [], iCan: snap.iCan ?? [], outline: snap.outline };
+    const suggestions = generateSuggestions(result.chapter ?? "inspect", snap, result.graph, opts.selectedStepId);
+    const clarification = generateClarification(opts.prompt, snap, result.chapter);
+    const operations = generateOperations(result, snap);
+    return { ...result, applied, youDoFirst: snap.youDoFirst ?? [], iCan: snap.iCan ?? [], outline: snap.outline, suggestions, clarification, operations };
   };
 
   if (/\bpublish\b/i.test(opts.prompt)) {
@@ -890,14 +1123,108 @@ export async function copilotChat(opts: {
     });
   }
 
-  if (/\b(what.*(?:next|happening|wrong)|how.*fix|why.*(?:fail|not)|status)\b/i.test(opts.prompt)) {
+
+  // ── Conversational responses (natural language) ────────────────────────
+  if (/^(hi|hello|hey|howdy|how are you|what'?s up|hola|sup|yo)[\s!.?]*$/i.test(opts.prompt.trim())) {
+    const nodeCount = opts.graph?.nodes?.length ?? 0;
+    if (snapshot.empty) {
+      return finish({
+        reply: "Hey! I'm your AI automation assistant. I can help you:\n\n• Build workflows from a description\n• Modify existing automations\n• Explain what each step does\n• Find and fix problems\n• Test your workflows\n\nWhat would you like to automate?",
+        source: "copilot",
+        chapter: "inspect",
+      });
+    }
     return finish({
-      reply: await adviseWorkflow({ graph: opts.graph, lastTest: opts.lastTest }),
-      source: "workflow-advisor",
-      chapter: "diagnose"
+      reply: `Hey! I see your ${nodeCount}-step workflow (${labels}). ${snapshot.youDoFirst?.[0] ?? "What would you like me to help with?"}`,
+      source: "copilot",
+      chapter: "inspect",
     });
   }
 
+  if (/\b(thanks?|thank you|thx|ty)\b/i.test(opts.prompt.trim())) {
+    return finish({
+      reply: "You're welcome! Let me know if you need anything else — happy to help."
+        + (snapshot.nodeCount > 0 ? ` Your ${snapshot.nodeCount}-step workflow is looking good. ${snapshot.youDoFirst?.[0] ?? "Try testing it when you're ready."}` : ""),
+      source: "copilot",
+      chapter: "inspect",
+    });
+  }
+
+  if (/\b(help|what can you do|capabilities|features)\b/i.test(opts.prompt)) {
+    return finish({
+      reply: `I can help you with:\n\n🔧 **Build workflows** — Describe what you want, I'll create it\n🔍 **Explain workflows** — Ask me about any step or the whole flow\n🐛 **Find problems** — I'll check for issues and suggest fixes\n⚡ **Add steps** — "Add Slack notification" or "Add AI processing"\n🧪 **Test workflows** — I'll validate your automation\n🔄 **Modify workflows** — Change triggers, actions, or conditions\n📊 **Check status** — Ask about recent runs, connections, or errors\n\nJust describe what you want naturally — I'll figure out the rest.`,
+      source: "copilot",
+      chapter: "explain",
+    });
+  }
+
+  if (/\b(who are you|what are you|your name)\b/i.test(opts.prompt)) {
+    return finish({
+      reply: `I'm your AI Copilot — built right into your workflow builder. I understand your automations, connections, and execution history. I can build, explain, fix, and test workflows through natural conversation.\n\nTry something like:\n• "Create a lead automation"\n• "Why did my workflow fail?"\n• "Add a Slack notification after this step"\n• "Test this workflow"`,
+      source: "copilot",
+      chapter: "explain",
+    });
+  }
+
+  if (/\b(how (?:does|do)|explain|what does|tell me about|describe) (?:this|the) (?:workflow|automation|flow|step|node|zap)\b/i.test(opts.prompt)) {
+    if (opts.selectedStepId && opts.graph) {
+      const selectedNode = opts.graph.nodes.find((n) => n.id === opts.selectedStepId);
+      if (selectedNode) {
+        const nodeApp = appBySlug(selectedNode.appSlug);
+        const nodeOp = nodeApp?.operations.find((o) => o.key === selectedNode.operation);
+        const nodeConfig = selectedNode.config ?? {};
+        const configStr = Object.entries(nodeConfig).filter(([, v]) => v).map(([k, v]) => `• ${k}: ${v}`).join("\n");
+        return finish({
+          reply: `This step **${selectedNode.label ?? nodeOp?.name ?? selectedNode.appSlug}** (${selectedNode.appSlug}/${selectedNode.operation})\n\nType: ${selectedNode.type}\n${configStr ? `\nConfiguration:\n${configStr}` : "\nNo configuration set yet."}\n\n${nodeOp ? `This operation ${nodeOp.type === "trigger" ? "triggers when something happens" : "performs an action"} using ${nodeApp?.name ?? selectedNode.appSlug}.` : ""}`,
+          source: "copilot",
+          chapter: "explain",
+        });
+      }
+    }
+    return finish({
+      reply: describeDraft(snapshot) + "\n\nWould you like me to explain a specific step? Click on a node and ask me about it.",
+      source: "copilot",
+      chapter: "explain",
+    });
+  }
+
+  // Node-specific suggestions when a node is selected
+  if (opts.selectedStepId && opts.graph) {
+    const selectedNode = opts.graph.nodes.find((n) => n.id === opts.selectedStepId);
+    if (selectedNode && /\b(what can|what do|options|actions?|do|configure|set up|help|configure)\b/i.test(opts.prompt)) {
+      const nodeApp = appBySlug(selectedNode.appSlug);
+      const nodeOp = nodeApp?.operations.find((o) => o.key === selectedNode.operation);
+      const nodeSuggestions: CopilotSuggestion[] = [];
+      if (nodeApp) {
+        for (const field of nodeOp?.inputFields ?? []) {
+          if (field.required) {
+            nodeSuggestions.push({
+              label: `Set ${field.label}`,
+              prompt: `Configure the ${field.label} field for this step`,
+              icon: "pencil",
+            });
+          }
+        }
+        if (selectedNode.type === "trigger") {
+          nodeSuggestions.push({ label: "Test this trigger", prompt: "Test this trigger step", icon: "zap" });
+        } else {
+          nodeSuggestions.push({ label: "Test this step", prompt: "Test this action step", icon: "zap" });
+        }
+        nodeSuggestions.push({ label: "Replace with another app", prompt: "Replace this step with a different app", icon: "arrow" });
+        nodeSuggestions.push({ label: "Add step after this", prompt: "Add the next step", icon: "arrow" });
+        nodeSuggestions.push({ label: "Remove this step", prompt: "Remove this step", icon: "alert" });
+      }
+      const appName = nodeApp?.name ?? selectedNode.appSlug;
+      const baseResult = await finish({
+        reply: `This step is **${selectedNode.label ?? nodeOp?.name ?? appName}** using ${appName}. Here are some things I can help with:`,
+        source: "copilot",
+        chapter: "inspect",
+      });
+      return { ...baseResult, suggestions: nodeSuggestions.slice(0, 6) };
+    }
+  }
+
+  // Platform-level questions the orchestrator cannot answer
   // Platform-level questions the orchestrator cannot answer
   if (/\b(what (?:integrations?|apps?|actions?|triggers?) (?:are |is )?(?:available|supported|can i)|list (?:integrations?|apps?|connections?))\b/i.test(opts.prompt)) {
     const { listIntegrations } = await import("./copilot-tools");
@@ -922,6 +1249,7 @@ export async function copilotChat(opts: {
     return finish({ reply: `Your connected accounts:\n• ${list}`, source: "copilot-tools", chapter: "explain" });
   }
 
+  // Legacy greeting fallback (should not be reached due to handlers above)
   if (/\b(hi|hello|hey|thanks|thank you)[\s!.]*$/i.test(opts.prompt.trim())) {
     return finish({
       reply: snapshot.empty

@@ -3,28 +3,27 @@
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useState } from "react";
 import Link from "next/link";
+import { toast } from "sonner";
 import { api, setSession } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Logo } from "@/features/shell/logo";
+import { Spinner } from "@/components/ui/spinner";
 
 const schema = z.object({
   email: z.string().email(),
-  password: z.string().min(8)
+  password: z.string().min(8),
 });
 
 export default function LoginPage() {
   const form = useForm<z.infer<typeof schema>>({
     resolver: zodResolver(schema),
-    defaultValues: { email: "admin@algoverge.local", password: "ChangeMe123!" }
+    defaultValues: { email: "admin@algoverge.local", password: "ChangeMe123!" },
   });
-  const [error, setError] = useState("");
 
   async function onSubmit(values: z.infer<typeof schema>) {
-    setError("");
     try {
       const data = await api<{
         token: string;
@@ -33,12 +32,14 @@ export default function LoginPage() {
         workspaces?: Array<{ id: string }>;
       }>("/auth/login", {
         method: "POST",
-        body: JSON.stringify(values)
+        body: JSON.stringify(values),
       });
       setSession(data.token, data.organization?.id ?? data.workspace?.id ?? data.workspaces?.[0]?.id);
+      toast.success("Welcome back!", { description: "Redirecting to dashboard…" });
       window.location.href = "/dashboard";
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid email or password");
+      const msg = err instanceof Error ? err.message : "Invalid email or password";
+      toast.error("Login failed", { description: msg === "invalid_credentials" ? "Invalid email or password" : msg });
     }
   }
 
@@ -68,10 +69,14 @@ export default function LoginPage() {
           <form className="flex flex-col gap-3" onSubmit={form.handleSubmit(onSubmit)}>
             <Input placeholder="Email" {...form.register("email")} />
             <Input type="password" placeholder="Password" {...form.register("password")} />
-            {form.formState.errors.email && <p className="text-sm text-danger">{form.formState.errors.email.message}</p>}
-            {error && <p className="text-sm text-danger">{error === "invalid_credentials" ? "Invalid email or password" : error}</p>}
+            {form.formState.errors.email && (
+              <p className="text-sm text-danger">{form.formState.errors.email.message}</p>
+            )}
+            {form.formState.errors.password && (
+              <p className="text-sm text-danger">{form.formState.errors.password.message}</p>
+            )}
             <Button type="submit" disabled={form.formState.isSubmitting}>
-              Continue
+              {form.formState.isSubmitting ? <><Spinner size={14} className="mr-1" /> Signing in…</> : "Continue"}
             </Button>
             <Link href="/register" className="text-sm text-violet-700">
               Create an account

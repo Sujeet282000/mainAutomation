@@ -52,6 +52,19 @@
   * {
     border-color: rgb(var(--line));
   }
+
+  /* Smooth theme transitions — use data-theme-switching class during toggle */
+  .theme-transitioning,
+  .theme-transitioning *,
+  .theme-transitioning *::before,
+  .theme-transitioning *::after {
+    transition: background-color 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+                color 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+                border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+                fill 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+                stroke 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  }
 }
 
 .react-flow,
@@ -137,3 +150,45 @@
   height: 0;
   display: none;
 }
+
+/* ── Sidebar scroll ────────────────────────────────────────────────────── */
+.sidebar-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: rgb(var(--line));
+  border-radius: 4px;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ink-muted));
+}
+.sidebar-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--line)) transparent;
+}
+
+/* ── Landing page animations ───────────────────────────────────────────── */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in-right {
+  from { opacity: 0; transform: translateX(32px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(40px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up { animation: fade-in-up 0.7s cubic-bezier(0.4, 0, 0.2, 1) both; }
+.animate-fade-in-right { animation: fade-in-right 0.7s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
+.animate-fade-in { animation: fade-in 0.5s cubic-bezier(0.4, 0, 0.2, 1) both; }
+.animate-slide-up { animation: slide-up 0.6s cubic-bezier(0.4, 0, 0.2, 1) both; }

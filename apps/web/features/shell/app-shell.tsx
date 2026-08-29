@@ -187,7 +187,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-40 flex flex-col border-r border-line bg-elevated transition-all duration-300 ease-in-out lg:static",
+          "fixed inset-y-0 left-0 z-40 flex flex-col overflow-hidden border-r border-line bg-elevated transition-all duration-300 ease-in-out lg:static",
           editor || collapsed ? "w-[72px]" : "w-[232px]",
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
@@ -207,7 +207,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Navigation */}
-        <nav className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-2 py-3">
+        <nav className="sidebar-scroll flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-2 py-3">
           {NAV.map((group) => (
             <NavGroup
               key={group.label}
@@ -282,7 +282,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Link>
             <button
               className="rounded-lg p-2 text-ink-muted transition-colors hover:bg-muted"
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              onClick={() => {
+                // Add transition class for smooth theme switch
+                document.documentElement.classList.add('theme-transitioning');
+                setTheme(theme === "dark" ? "light" : "dark");
+                // Remove transition class after animation completes
+                setTimeout(() => document.documentElement.classList.remove('theme-transitioning'), 400);
+              }}
               aria-label="Toggle theme"
             >
               <Sun className="h-4 w-4 dark:hidden" />

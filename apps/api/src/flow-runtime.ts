@@ -27,18 +27,30 @@ export function loadBuilderGraph(draft: unknown): WorkflowGraph {
 }
 
 export async function ensureRunPartition() {
-  await query(`SELECT internal.create_flow_run_partitions(1)`).catch(async () => {
-    const start = new Date();
+  // Create partitions for current and next month to be safe
+  const months = [new Date()];
+  const nextMonth = new Date();
+  nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
+  months.push(nextMonth);
+
+  for (const date of months) {
+    const start = new Date(date);
     start.setUTCDate(1);
     start.setUTCHours(0, 0, 0, 0);
     const end = new Date(start);
     end.setUTCMonth(end.getUTCMonth() + 1);
     const name = `flow_runs_${start.getUTCFullYear()}_${String(start.getUTCMonth() + 1).padStart(2, "0")}`;
-    await query(
-      `CREATE TABLE IF NOT EXISTS public.${name} PARTITION OF public.flow_runs FOR VALUES FROM ($1) TO ($2)`,
-      [start.toISOString(), end.toISOString()],
-    ).catch(() => undefined);
-  });
+    const startStr = start.toISOString().replace("T", " ").replace(".000Z", "");
+    const endStr = end.toISOString().replace("T", " ").replace(".000Z", "");
+    try {
+      await query(
+        `CREATE TABLE IF NOT EXISTS public."${name}" PARTITION OF public.flow_runs FOR VALUES FROM ($1) TO ($2)`,
+        [startStr, endStr],
+      );
+    } catch {
+      // Partition may already exist — continue
+    }
+  }
 }
 
 export async function ensureFlowVersion(opts: {
@@ -219,7 +231,7 @@ export async function createAndRunFlow(opts: {
     // Update the flow with the project_id
     await query(`UPDATE flows SET project_id = $1 WHERE id = $2`, [projectId, flow.id]).catch(() => undefined);
   }
-  const runRows = await query<{ id: string; created_at: string }>(
+  const runRows = await query<{ id: string; created_at: Date }>(
     `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, status, context)
      VALUES ($1,$2,$3,$4,$5,'running',$6) RETURNING id, created_at`,
     [
@@ -233,6 +245,12 @@ export async function createAndRunFlow(opts: {
   );
   const run = runRows[0];
   if (!run) throw new Error("Failed to create execution run record.");
+  // Normalize created_at to exact PostgreSQL timestamp format to match partition boundaries
+  // PostgreSQL returns timestamptz which we need to match exactly for the FK constraint
+  const createdAtDate = run.created_at instanceof Date ? run.created_at : new Date(run.created_at);
+  // Use the raw date string from PostgreSQL RETURNING — convert Date to ISO and strip Z
+  // This ensures the value matches what PostgreSQL stored in the partition
+  const runCreatedAt = createdAtDate.toISOString().replace('T', ' ').replace('.000Z', '');
   const ctx = { trigger: opts.payload ?? { ping: true }, steps: {} as Record<string, Record<string, unknown>> };
   const ordered: WorkflowGraph["nodes"] = [];
   const seen = new Set<string>();
@@ -258,7 +276,7 @@ export async function createAndRunFlow(opts: {
          VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,$9,now())`,
         [
           run!.id,
-          run!.created_at,
+          runCreatedAt,
           opts.orgId,
           node.id,
           stepTypeOf(node),
@@ -276,7 +294,7 @@ export async function createAndRunFlow(opts: {
          VALUES ($1,$2,$3,$4,$5,$6,'failed',$7,$8,$9,now())`,
         [
           run!.id,
-          run!.created_at,
+          runCreatedAt,
           opts.orgId,
           node.id,
           stepTypeOf(node),
@@ -292,8 +310,8 @@ export async function createAndRunFlow(opts: {
   }
 
   await query(
-    `UPDATE flow_runs SET status = $2, finished_at = now(), context = $3, steps_billable = $4 WHERE id = $1`,
-    [run!.id, failed ? "failed" : "succeeded", JSON.stringify(ctx), Math.max(0, seq - 1)],
+    `UPDATE flow_runs SET status = $2, finished_at = now(), context = $3, steps_billable = $4 WHERE id = $1 AND org_id = $5`,
+    [run!.id, failed ? "failed" : "succeeded", JSON.stringify(ctx), Math.max(0, seq - 1), opts.orgId],
   );
   return { id: run!.id };
 }

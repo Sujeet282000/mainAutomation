@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpDown, Bot, Calculator, Database, Eye, Filter, Grid3X3, Link2, MoreHorizontal, Plus, Search, Settings2, Trash2, Zap } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -10,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
 import { PageInfo } from "@/components/ui/page-info";
 import { EmptyState } from "@/components/ui/empty-state";
+import { SkeletonCardGrid } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { TableCellRenderer, FieldTypeBadge, type TableField, type TableRecord } from "@/features/tables/table-runtime";
 
@@ -184,7 +186,7 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                   className="h-8 text-xs"
                 />
                 <select
-                  className="w-full rounded-lg border border-line bg-white px-2 py-1.5 text-xs"
+                  className="w-full rounded-lg border border-line bg-elevated px-2 py-1.5 text-xs"
                   value={editFieldConfig.type ?? "text"}
                   onChange={(e) => setEditFieldConfig((p) => ({ ...p, type: e.target.value }))}
                 >
@@ -227,7 +229,7 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                 {editFieldConfig.type === "linked" && (
                   <>
                     <select
-                      className="w-full rounded-lg border border-line bg-white px-2 py-1.5 text-xs"
+                      className="w-full rounded-lg border border-line bg-elevated px-2 py-1.5 text-xs"
                       value={editFieldConfig.linkedTableId ?? ""}
                       onChange={(e) => setEditFieldConfig((p) => ({ ...p, linkedTableId: e.target.value }))}
                     >
@@ -260,8 +262,13 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
         </div>
         <div className="border-t border-line p-3">
           <Button className="w-full" size="sm" onClick={async () => {
-            await api(`/tables/${table.id}`, { method: "PATCH", body: JSON.stringify({ schema: { fields } }) });
-            qc.invalidateQueries({ queryKey: ["tables"] });
+            try {
+              await api(`/tables/${table.id}`, { method: "PATCH", body: JSON.stringify({ schema: { fields } }) });
+              qc.invalidateQueries({ queryKey: ["tables"] });
+              toast.success("Fields saved");
+            } catch (err) {
+              toast.error("Failed to save fields", { description: err instanceof Error ? err.message : "Unknown error" });
+            }
           }}>Save fields</Button>
         </div>
       </div>
@@ -319,8 +326,13 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                       ))}
                       <td>
                         <button className="text-ink-muted hover:text-danger" onClick={async () => {
-                          await api(`/tables/${table.id}/records/${r.id}`, { method: "DELETE" });
-                          loadRecords();
+                          try {
+                            await api(`/tables/${table.id}/records/${r.id}`, { method: "DELETE" });
+                            loadRecords();
+                            toast.success("Record deleted");
+                          } catch (err) {
+                            toast.error("Failed to delete record", { description: err instanceof Error ? err.message : "Unknown error" });
+                          }
                         }}><Trash2 className="h-3 w-3" /></button>
                       </td>
                     </tr>
@@ -348,7 +360,7 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                     />
                   ) : f.type === "select" ? (
                     <select
-                      className="w-full rounded-lg border border-line bg-white px-3 py-2 text-xs"
+                      className="w-full rounded-lg border border-line bg-elevated px-3 py-2 text-xs"
                       value={draft[f.key] ?? ""}
                       onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
                     >
@@ -463,16 +475,22 @@ export default function TablesPage() {
             <Input value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Table name (e.g. Leads, Customers)" className="max-w-xs" autoFocus />
             <Button onClick={async () => {
               if (!createName.trim()) return;
-              await api("/tables", { method: "POST", body: JSON.stringify({ name: createName, schema: { fields: [{ key: "name", type: "text", label: "Name" }] } }) });
-              setCreateName("");
-              setShowCreate(false);
-              qc.invalidateQueries({ queryKey: ["tables"] });
+              try {
+                await api("/tables", { method: "POST", body: JSON.stringify({ name: createName, schema: { fields: [{ key: "name", type: "text", label: "Name" }] } }) });
+                setCreateName("");
+                setShowCreate(false);
+                qc.invalidateQueries({ queryKey: ["tables"] });
+                toast.success("Table created", { description: `${createName} is ready` });
+              } catch (err) {
+                toast.error("Failed to create table", { description: err instanceof Error ? err.message : "Unknown error" });
+              }
             }}>Create</Button>
             <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
           </div>
         </Card>
       )}
 
+      {list.isLoading && <SkeletonCardGrid count={6} />}
       {!list.isLoading && !list.data?.tables.length && (
         <EmptyState
           icon={<Database className="h-10 w-10" />}
@@ -485,8 +503,13 @@ export default function TablesPage() {
         {(list.data?.tables ?? []).map((t) => (
           <TableCard key={t.id} table={t} onOpen={() => setOpen(t)} onDelete={async () => {
             if (confirm(`Delete "${t.name}"? This cannot be undone.`)) {
-              await api(`/tables/${t.id}`, { method: "DELETE" });
-              qc.invalidateQueries({ queryKey: ["tables"] });
+              try {
+                await api(`/tables/${t.id}`, { method: "DELETE" });
+                qc.invalidateQueries({ queryKey: ["tables"] });
+                toast.success("Table deleted");
+              } catch (err) {
+                toast.error("Failed to delete table", { description: err instanceof Error ? err.message : "Unknown error" });
+              }
             }
           }} />
         ))}

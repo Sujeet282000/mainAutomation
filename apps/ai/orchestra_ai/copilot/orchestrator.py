@@ -27,6 +27,17 @@ from orchestra_ai.copilot.models import (
     Todo,
     TriggerIntent,
 )
+from orchestra_ai.copilot.ranker import rank_candidates, rank_triggers, rank_actions, select_best
+from orchestra_ai.copilot.critic import critique_graph, repair_graph
+from orchestra_ai.copilot.confidence import (
+    ConfidenceReport,
+    estimate_intent_confidence,
+    estimate_trigger_confidence,
+    estimate_operation_confidence,
+    estimate_connection_confidence,
+    estimate_graph_confidence,
+)
+from orchestra_ai.memory.store import get_memory_store
 from orchestra_ai.gateway.gateway import CallSpec, Message, ModelGateway, Purpose
 from orchestra_ai.node.client import NodeApiClient
 from orchestra_ai.prompts.registry import PromptRegistry
@@ -169,13 +180,30 @@ class CopilotOrchestrator:
             )
             yield sse("stage", {"stage": Stage.RETRIEVE, "status": "done"})
 
-            # ── Stage 3: Constrained selection ───────────────────────────
+            # ── Stage 3: Constrained selection (with ranking) ──────────
             yield sse("stage", {"stage": Stage.SELECT, "status": "start"})
-            selected_trigger = trigger_cards[0] if trigger_cards else None
-            selected_actions = [
-                (action, cards[0] if cards else None)
-                for action, cards in ((a, action_cards.get(a.order, [])) for a in spec.actions)
-            ]
+
+            # Rank triggers by relevance
+            ranked_triggers = rank_candidates(
+                spec.trigger.search_text or spec.trigger.app_hint or spec.summary,
+                trigger_cards,
+                kind="trigger",
+            )
+            selected_trigger = select_best(ranked_triggers) or (trigger_cards[0] if trigger_cards else None)
+            if selected_trigger:
+                yield sse("reasoning", {
+                    "stage": Stage.SELECT,
+                    "text": f"Selected trigger: {selected_trigger.name}/{selected_trigger.operation_name} (score: {selected_trigger.score:.1f}, reasons: {', '.join(selected_trigger.reasons[:3])})",
+                })
+
+            # Rank actions by relevance
+            selected_actions = []
+            for action in spec.actions:
+                cards = action_cards.get(action.order, [])
+                ranked = rank_candidates(f"{action.operation_hint} {action.purpose}", cards, kind="action")
+                best = select_best(ranked)
+                selected_actions.append((action, best or (cards[0] if cards else None)))
+
             yield sse("stage", {"stage": Stage.SELECT, "status": "done"})
 
             # ── Stage 4: Connection resolution ───────────────────────────
@@ -214,9 +242,47 @@ class CopilotOrchestrator:
 
             # ── Stages 5-6: Schema hydration and field mapping ───────────
             yield sse("stage", {"stage": Stage.SCHEMAS, "status": "start"})
+            schemas_hydrated = 0
+            all_schemas: dict[str, dict] = {}
+            for piece in {str(p) for p in pieces if p}:
+                try:
+                    schema_data = await self._node.search_catalog(piece, None)
+                    if schema_data:
+                        all_schemas[piece] = schema_data[0] if schema_data else {}
+                        schemas_hydrated += 1
+                except Exception:
+                    pass
+            yield sse("reasoning", {
+                "stage": Stage.SCHEMAS,
+                "text": f"Hydrated schemas for {schemas_hydrated} app(s).",
+            })
             yield sse("stage", {"stage": Stage.SCHEMAS, "status": "done"})
 
             yield sse("stage", {"stage": Stage.MAPPING, "status": "start"})
+            field_mappings: dict[str, dict[str, str]] = {}
+            for action_intent, action_card in selected_actions:
+                if not action_card:
+                    continue
+                slug = action_card.get("slug", "")
+                # Try to auto-map trigger outputs to action inputs
+                trigger_slug = (selected_trigger or {}).get("slug", "")
+                if trigger_slug and slug:
+                    # Simple heuristic: map common fields
+                    trigger_prefix = f"trigger.{trigger_slug}"
+                    action_prefix = f"{slug}"
+                    auto_map: dict[str, str] = {}
+                    # Map email fields
+                    auto_map["email"] = f"{trigger_prefix}.from"
+                    auto_map["name"] = f"{trigger_prefix}.sender_name"
+                    auto_map["message"] = f"{trigger_prefix}.body"
+                    auto_map["subject"] = f"{trigger_prefix}.subject"
+                    auto_map["text"] = f"{trigger_prefix}.body"
+                    auto_map["title"] = f"{trigger_prefix}.subject"
+                    field_mappings[action_card.get("key", "action")] = auto_map
+            yield sse("reasoning", {
+                "stage": Stage.MAPPING,
+                "text": f"Generated {sum(len(m) for m in field_mappings.values())} field mapping(s) across {len(field_mappings)} step(s).",
+            })
             yield sse("stage", {"stage": Stage.MAPPING, "status": "done"})
 
             # ── Stage 7: Graph assembly ──────────────────────────────────
@@ -235,19 +301,32 @@ class CopilotOrchestrator:
 
             # ── Stages 8-9: Validate and repair ─────────────────────────
             yield sse("stage", {"stage": Stage.VALIDATE, "status": "start"})
-            issues: list[dict[str, Any]] = []
-            try:
-                issues = await self._node.validate(definition, attribution)
-            except Exception:
-                issues = []
-            yield sse(
-                "reasoning",
-                {
-                    "stage": Stage.VALIDATE,
-                    "text": f"Validated: {len(issues)} remaining issue(s).",
-                },
-            )
+            # Use the critic to validate the graph
+            connected_apps = list(connections.keys()) if connections else []
+            critic_result = critique_graph(definition, connected_apps=connected_apps)
+            issues = [{"code": i.code, "message": i.message, "severity": i.severity} for i in critic_result.issues]
+            warnings = [{"code": w.code, "message": w.message, "severity": w.severity} for w in critic_result.warnings]
+            yield sse("reasoning", {
+                "stage": Stage.VALIDATE,
+                "text": f"Critic: {len(issues)} error(s), {len(warnings)} warning(s).",
+            })
             yield sse("stage", {"stage": Stage.VALIDATE, "status": "done"})
+
+            # Repair loop
+            repair_passes = 0
+            if issues:
+                yield sse("stage", {"stage": Stage.REPAIR, "status": "start"})
+                repair_result = repair_graph(definition, connected_apps=connected_apps)
+                repair_passes = repair_result.pass_count
+                if repair_result.fixes_applied:
+                    definition = repair_result.graph  # use repaired graph
+                    issues = [{"code": i.code, "message": i.message, "severity": i.severity} for i in repair_result.issues]
+                    warnings = [{"code": w.code, "message": w.message, "severity": w.severity} for w in repair_result.warnings]
+                    yield sse("reasoning", {
+                        "stage": Stage.REPAIR,
+                        "text": f"Repaired: {len(repair_result.fixes_applied)} fix(es) applied in {repair_passes} pass(es).",
+                    })
+                yield sse("stage", {"stage": Stage.REPAIR, "status": "done"})
 
             # ── Stage 10: Persist as draft ───────────────────────────────
             yield sse("stage", {"stage": Stage.PERSIST, "status": "start"})
@@ -257,20 +336,60 @@ class CopilotOrchestrator:
             for todo in todos:
                 yield sse("todo", todo.model_dump())
 
+            # Compute per-decision confidence
+            confidence = ConfidenceReport(
+                intent=estimate_intent_confidence(request_text, spec.model_dump()),
+                trigger=estimate_trigger_confidence(selected_trigger, trigger_cards),
+                operations=estimate_operation_confidence(
+                    [card for _, card in selected_actions if card],
+                    [action_cards.get(a.order, []) for a in spec.actions],
+                ),
+                connections=estimate_connection_confidence(connections, pieces),
+                graph=estimate_graph_confidence(critic_result.valid, len(issues), len(warnings)),
+            )
+            confidence.compute_overall()
+
+            # Store workflow memory for future edits
+            try:
+                mem = get_memory_store()
+                mem.remember_workflow(
+                    flow_id,
+                    "last_trigger",
+                    spec.trigger.app_hint or spec.trigger.kind,
+                    source="system",
+                    reason="Store trigger for future edits",
+                )
+                for action_intent, action_card in selected_actions:
+                    if action_card:
+                        mem.remember_workflow(
+                            flow_id,
+                            f"action_{action_intent.order}",
+                            f"{action_card.get('slug', '')}/{action_card.get('key', '')}",
+                            source="system",
+                            reason="Store action for future edits",
+                        )
+            except Exception:
+                pass  # memory is best-effort
+
             result = GenerationResult(
                 session_id=session_id,
                 flow_id=flow_id,
                 definition=definition,
                 todos=todos,
                 issues=issues,
-                publishable=True,
-                repair_passes=0,
-                confidence=0.8,
+                publishable=critic_result.valid,
+                repair_passes=repair_passes,
+                confidence=confidence.overall,
                 cost_usd=0.0,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
 
-            yield sse("proposal", {**result.model_dump(), "graph": definition, "summary": spec.summary})
+            yield sse("proposal", {
+                **result.model_dump(),
+                "graph": definition,
+                "summary": spec.summary,
+                "confidence": confidence.model_dump(),
+            })
             yield sse(
                 "result",
                 {

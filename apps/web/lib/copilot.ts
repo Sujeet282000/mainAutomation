@@ -256,3 +256,63 @@ export async function planCopilotWorkflow(opts: {
     }),
   });
 }
+
+// ── Graph Patch API ──────────────────────────────────────────────────────
+
+export type GraphPatchOp = {
+  op: "add_node" | "remove_node" | "update_node" | "replace_node" | "connect" | "disconnect" | "update_config" | "map_field" | "add_delay" | "add_approval";
+  target_node_id?: string;
+  after_node_id?: string;
+  before_node_id?: string;
+  node?: Record<string, unknown>;
+  source?: string;
+  target?: string;
+  field?: string;
+  value?: unknown;
+  expression?: string;
+  config?: Record<string, unknown>;
+};
+
+export type GraphPatchResult = {
+  ok: boolean;
+  graph: { nodes: unknown[]; edges: unknown[] };
+  applied: Array<{ op: string; target?: string }>;
+  rejected: Array<{ op: string; issue: string }>;
+};
+
+/** Apply incremental graph patches instead of full rebuild */
+export async function applyGraphPatches(opts: {
+  flowId?: string;
+  graph?: Record<string, unknown>;
+  patches: GraphPatchOp[];
+  description?: string;
+}) {
+  return api<GraphPatchResult>("/copilot/patch", {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+}
+
+// ── Context Engine API ───────────────────────────────────────────────────
+
+export type CopilotContext = {
+  workspace: { id: string; name: string; timezone: string };
+  workflow: { id: string; name: string; status: string; graph: Record<string, unknown>; nodeCount: number; nodesSummary: Array<{ id: string; appSlug: string; operation: string; label: string }> } | null;
+  connections: Array<{ id: string; name: string; app_slug: string; status: string }>;
+  recentRuns: Array<{ id: string; status: string; flow_name: string; created_at: string }>;
+  catalog: { totalApps: number; totalOperations: number; liveAdapters: string[]; topApps: Array<{ slug: string; name: string; ops: number }> };
+  selectedNodeId?: string;
+  page?: string;
+};
+
+/** Get assembled context for a Copilot request */
+export async function getCopilotContext(opts: {
+  flowId?: string;
+  selectedNodeId?: string;
+  page?: string;
+}) {
+  return api<CopilotContext>("/copilot/context", {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+}

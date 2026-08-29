@@ -4,7 +4,7 @@
 // Frontend and backend MUST use these types to prevent drift.
 // =============================================================================
 
-export { AutomationPlanSchema, PlanStepSchema, PlanConnectionSchema, AttentionItemSchema } from "./copilot";
-export { IntegrationReadinessSchema, AppReadinessSchema, ReadinessStatsSchema } from "./readiness";
-export { TestStepRequestSchema, TestStepResultSchema } from "./test-step";
-export { ConnectionStateSchema, ConnectionInfoSchema } from "./connection";
+export * from "./copilot";
+export * from "./readiness";
+export * from "./test-step";
+export * from "./connection";

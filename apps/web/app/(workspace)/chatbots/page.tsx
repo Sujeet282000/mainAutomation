@@ -79,11 +79,7 @@ export default function ChatbotsPage() {
                 "Test the bot in-app before going live.",
               ]}
             />
-            <Button onClick={async () => {
-              if (!createName.trim()) return;
-              await api("/chatbots", { method: "POST", body: JSON.stringify({ name: createName, instructions: createInstructions || "You are a helpful assistant.", knowledge: "" }) });
-              setCreateName(""); setCreateInstructions(""); qc.invalidateQueries({ queryKey: ["chatbots"] });
-            }}><Plus className="mr-1 h-3.5 w-3.5" />New chatbot</Button>
+            <Button onClick={() => { setCreateName("New Chatbot"); setCreateInstructions(""); }}><Plus className="mr-1 h-3.5 w-3.5" />New chatbot</Button>
           </div>
         }
       />
@@ -96,6 +92,14 @@ export default function ChatbotsPage() {
         <Card className="mb-4 space-y-3">
           <Input value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Chatbot name" autoFocus />
           <textarea className="min-h-[60px] w-full rounded-lg border border-line bg-elevated p-3 text-sm" value={createInstructions} onChange={(e) => setCreateInstructions(e.target.value)} placeholder="Instructions for the chatbot" />
+          <div className="flex gap-2">
+            <Button onClick={async () => {
+              if (!createName.trim()) return;
+              await api("/chatbots", { method: "POST", body: JSON.stringify({ name: createName, instructions: createInstructions || "You are a helpful assistant.", knowledge: "" }) });
+              setCreateName(""); setCreateInstructions(""); qc.invalidateQueries({ queryKey: ["chatbots"] });
+            }}>Create chatbot</Button>
+            <Button variant="ghost" onClick={() => { setCreateName(""); setCreateInstructions(""); }}>Cancel</Button>
+          </div>
         </Card>
       )}
 

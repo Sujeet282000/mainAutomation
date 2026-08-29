@@ -1,10 +1,11 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LayoutGrid, List, MoreHorizontal, Plus, Search, Workflow } from "lucide-react";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { summarizeGraph, type GraphPayload } from "@/lib/graph";
 import { AppIcon } from "@/components/app-icon";
@@ -14,6 +15,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { SkeletonCardGrid, SkeletonStatGrid } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 type Auto = {
@@ -56,7 +58,17 @@ export default function AutomationsPage() {
     onSuccess: (data, variables) => {
       qc.invalidateQueries({ queryKey: ["automations"] });
       setMenu(null);
-      if (variables.type === "duplicate" && "automation" in data) router.push(`/automations/${data.automation.id}/editor`);
+      if (variables.type === "duplicate") {
+        toast.success("Workflow duplicated");
+        if ("automation" in data) router.push(`/automations/${data.automation.id}/editor`);
+      } else if (variables.type === "delete") {
+        toast.success("Workflow deleted");
+      } else {
+        toast.success(`Workflow ${variables.status === "on" ? "turned on" : "turned off"}`);
+      }
+    },
+    onError: (err) => {
+      toast.error("Action failed", { description: err instanceof Error ? err.message : "Unknown error" });
     }
   });
 
@@ -64,7 +76,11 @@ export default function AutomationsPage() {
     mutationFn: () => api<{ automation: { id: string } }>("/automations", { method: "POST", body: JSON.stringify({ name: "Untitled automation" }) }),
     onSuccess: (d) => {
       qc.invalidateQueries({ queryKey: ["automations"] });
+      toast.success("Workflow created");
       router.push(`/automations/${d.automation.id}/editor`);
+    },
+    onError: (err) => {
+      toast.error("Failed to create workflow", { description: err instanceof Error ? err.message : "Unknown error" });
     }
   });
 
@@ -93,11 +109,15 @@ export default function AutomationsPage() {
         }
       />
 
-      <div className="mb-5 grid gap-3 sm:grid-cols-3">
-        <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">All workflows</p><p className="mt-1 text-2xl font-semibold">{list.data?.automations.length ?? 0}</p></div>
-        <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Live</p><p className="mt-1 text-2xl font-semibold text-ok">{(list.data?.automations ?? []).filter((a) => a.status === "on").length}</p></div>
-        <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Drafts to finish</p><p className="mt-1 text-2xl font-semibold text-violet-700">{(list.data?.automations ?? []).filter((a) => a.status === "draft").length}</p></div>
-      </div>
+      {list.isLoading ? (
+        <SkeletonStatGrid count={3} />
+      ) : (
+        <div className="mb-5 grid gap-3 sm:grid-cols-3">
+          <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">All workflows</p><p className="mt-1 text-2xl font-semibold">{list.data?.automations.length ?? 0}</p></div>
+          <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Live</p><p className="mt-1 text-2xl font-semibold text-ok">{(list.data?.automations ?? []).filter((a) => a.status === "on").length}</p></div>
+          <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Drafts to finish</p><p className="mt-1 text-2xl font-semibold text-violet-700">{(list.data?.automations ?? []).filter((a) => a.status === "draft").length}</p></div>
+        </div>
+      )}
 
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative max-w-sm flex-1">
@@ -126,18 +146,12 @@ export default function AutomationsPage() {
       </div>
 
       {list.isError && <p className="mb-4 text-sm text-danger">{(list.error as Error).message}</p>}
-      {action.isError && <p className="mb-4 text-sm text-danger">{(action.error as Error).message}</p>}
-      {list.isLoading && (
-        <div className="space-y-2">
-          <div className="h-20 animate-pulse rounded-xl bg-muted" />
-          <div className="h-20 animate-pulse rounded-xl bg-muted" />
-        </div>
-      )}
+      {list.isLoading && <SkeletonCardGrid count={6} />}
       {!list.isLoading && !items.length && (
         <EmptyState
           icon={<Workflow className="h-10 w-10" />}
           title="No workflows yet"
-        description="Connect a trigger to an action. Open the flow builder or start from a template."
+          description="Connect a trigger to an action. Open the flow builder or start from a template."
           actionLabel="Create workflow"
           onAction={() => create.mutate()}
         />

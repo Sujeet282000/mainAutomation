@@ -1,12 +1,18 @@
 "use client";
 
-import { AlertTriangle, Check, Clock, Loader2, Plug, RefreshCw } from "lucide-react";
+import { AlertTriangle, Check, Clock, Loader2, PauseCircle, Plug, RefreshCw, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-export type ConnectionState = "connected" | "needs_attention" | "expired" | "not_configured";
+import type { ConnectionState as ContractConnectionState } from "@algoverge/contracts";
 
-type ConnectionInfo = {
+// Re-export the contract type for backward compat
+export type ConnectionState = ContractConnectionState;
+
+import type { ConnectionInfo as ContractConnectionInfo } from "@algoverge/contracts";
+
+// Extend the contract type with frontend-specific fields
+export type ConnectionInfo = Partial<ContractConnectionInfo> & {
   connectionId?: string | null;
   connectionName?: string;
   connectionStatus?: string;
@@ -56,6 +62,22 @@ const STATE_CONFIG: Record<ConnectionState, {
     borderColor: "border-line",
     label: "Not connected",
     description: "No account connected yet",
+  },
+  broken: {
+    icon: XCircle,
+    color: "text-danger",
+    bgColor: "bg-danger/10",
+    borderColor: "border-danger/30",
+    label: "Broken",
+    description: "Connection is broken and needs to be re-created",
+  },
+  not_enabled: {
+    icon: PauseCircle,
+    color: "text-ink-muted",
+    bgColor: "bg-muted/50",
+    borderColor: "border-line",
+    label: "Not enabled",
+    description: "Connection exists but is not enabled",
   },
 };
 

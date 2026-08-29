@@ -2,6 +2,7 @@ import {
   Activity,
   Blocks,
   Bot,
+  BarChart3,
   CheckSquare,
   CreditCard,
   FileInput,
@@ -29,6 +30,7 @@ export const NAV = [
       { href: "/apps", label: "Apps", icon: Plug },
       { href: "/connections", label: "Connections", icon: Unplug },
       { href: "/integrations/health", label: "Integration Health", icon: Zap },
+      { href: "/analytics", label: "Analytics", icon: BarChart3 },
     ]
   },
   {
@@ -77,6 +79,7 @@ export const COMMANDS = [
   { href: "/chatbots", label: "Go to Chatbots" },
   { href: "/approvals", label: "Go to Approvals" },
   { href: "/integrations/health", label: "Integration Health" },
+  { href: "/analytics", label: "Analytics" },
   { href: "/developer", label: "Developer keys & MCP" },
   { href: "/billing", label: "Billing & usage" },
   { href: "/audit", label: "Audit log" },

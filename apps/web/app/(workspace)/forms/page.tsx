@@ -13,7 +13,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/utils";
 
 type Field = { key: string; type: string; label: string; required?: boolean; placeholder?: string };
-type FormRow = { id: string; name: string; slug: string; fields: Field[]; table_id?: string | null; automation_id?: string | null; created_at?: string };
+type FormRow = { id: string; name: string; slug: string; fields: Field[]; table_id?: string | null; automation_id?: string | null; created_at?: string; submission_count?: number };
 type Submission = { id: string; data: Record<string, unknown>; created_at: string };
 
 const FIELD_TYPES = [
@@ -101,7 +101,7 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
       <div className="flex flex-1 overflow-hidden">
         {/* Form preview */}
         <div className="flex flex-1 items-start justify-center overflow-auto bg-muted/20 p-8">
-          <div className="w-full max-w-lg rounded-2xl border border-line bg-white p-6 shadow-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-line bg-elevated p-6 shadow-sm">
             <h2 className="mb-1 text-lg font-semibold">{form.name}</h2>
             <p className="mb-6 text-xs text-ink-muted">
               {connectTableId ? "Submissions will be saved to the connected table." : "Submissions are stored with this form."}
@@ -165,7 +165,7 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
               Connect a table to store form submissions automatically. Each submission creates a new row.
             </p>
             <select
-              className="w-full rounded-lg border border-line bg-white px-2.5 py-2 text-xs"
+              className="w-full rounded-lg border border-line bg-elevated px-2.5 py-2 text-xs"
               value={connectTableId}
               onChange={(e) => setConnectTableId(e.target.value)}
             >
@@ -209,7 +209,7 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
               Connect a workflow to run automatically when someone submits this form.
             </p>
             <select
-              className="w-full rounded-lg border border-line bg-white px-2.5 py-2 text-xs"
+              className="w-full rounded-lg border border-line bg-elevated px-2.5 py-2 text-xs"
               value={connectWorkflowId}
               onChange={(e) => setConnectWorkflowId(e.target.value)}
             >
@@ -320,7 +320,7 @@ export default function FormsPage() {
             </div>
             <div>
               <label className="mb-0.5 block text-[9px] text-ink-muted">Connect to table (optional)</label>
-              <select className="rounded-lg border border-line bg-white px-2.5 py-2 text-xs" value={tableId} onChange={(e) => setTableId(e.target.value)}>
+              <select className="rounded-lg border border-line bg-elevated px-2.5 py-2 text-xs" value={tableId} onChange={(e) => setTableId(e.target.value)}>
                 <option value="">No table</option>
                 {(tables.data?.tables ?? []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
@@ -360,7 +360,7 @@ export default function FormsPage() {
                   <div>
                     <h3 className="text-sm font-semibold">{f.name}</h3>
                     <p className="text-[11px] text-ink-muted">
-                      {f.fields.length} fields · {f.table_id ? "→ Table connected" : "Standalone"}
+                      {f.fields.length} fields · {f.submission_count ?? 0} submissions{f.table_id ? " · → Table" : ""}
                     </p>
                   </div>
                 </div>

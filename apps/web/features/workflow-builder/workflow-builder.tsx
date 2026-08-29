@@ -178,7 +178,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const [eventOpen, setEventOpen] = useState(false);
   const [valueOpen, setValueOpen] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(true);
+  const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotModal, setCopilotModal] = useState(false);
   const [msgModal, setMsgModal] = useState<{ title: string; body: string } | null>(null);
   const [copilotPrompt, setCopilotPrompt] = useState("");
@@ -1105,6 +1105,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 youDoFirst?: string[];
                 iCan?: string[];
                 events?: Array<{ type: string; stage?: string; label?: string; text?: string; kind?: string; message?: string }>;
+                suggestions?: Array<{ label: string; prompt: string; icon?: string }>;
+                clarification?: { question: string; options: Array<{ label: string; prompt: string; description?: string }> };
+                operations?: Array<{ title: string; steps: Array<{ label: string; status: string; detail?: string }>; status: string; actions?: Array<{ label: string; prompt: string }> }>;
               }>("/ai/copilot/chat", {
                 method: "POST",
                 body: JSON.stringify({
@@ -1146,7 +1149,12 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               setGraph(g.nodes, g.edges);
               setMsg(d.summary ?? "Copilot updated the draft. Test, then publish yourself.");
             }
-            return d;
+            return {
+              ...d,
+              suggestions: d.suggestions as Array<{ label: string; prompt: string; icon?: "zap" | "check" | "arrow" | "pencil" | "alert" }> | undefined,
+              clarification: d.clarification,
+              operations: d.operations as Array<{ title: string; steps: Array<{ label: string; status: "pending" | "running" | "completed" | "failed" | "skipped"; detail?: string }>; status: "running" | "completed" | "failed"; actions?: Array<{ label: string; prompt: string }> }> | undefined,
+            };
           }}
         />
         <div className="relative min-h-0 min-w-0 flex-1">
@@ -1845,6 +1853,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                     youDoFirst?: string[];
                     iCan?: string[];
                     events?: Array<{ type: string; stage?: string; label?: string; text?: string; kind?: string; message?: string }>;
+                    suggestions?: Array<{ label: string; prompt: string; icon?: string }>;
+                    clarification?: { question: string; options: Array<{ label: string; prompt: string; description?: string }> };
+                    operations?: Array<{ title: string; steps: Array<{ label: string; status: string; detail?: string }>; status: string; actions?: Array<{ label: string; prompt: string }> }>;
                   }>("/ai/copilot/chat", {
                     method: "POST",
                     body: JSON.stringify({
@@ -1886,7 +1897,12 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                   setGraph(g.nodes, g.edges);
                   setMsg(d.summary ?? "Copilot updated the draft. Test, then publish yourself.");
                 }
-                return d;
+                return {
+                  ...d,
+                  suggestions: d.suggestions as Array<{ label: string; prompt: string; icon?: "zap" | "check" | "arrow" | "pencil" | "alert" }> | undefined,
+                  clarification: d.clarification,
+                  operations: d.operations as Array<{ title: string; steps: Array<{ label: string; status: "pending" | "running" | "completed" | "failed" | "skipped"; detail?: string }>; status: "running" | "completed" | "failed"; actions?: Array<{ label: string; prompt: string }> }> | undefined,
+                };
               }}
               onApply={async (graph, sessionId) => {
                 copilotCheckpoint.current = toApi(nodes, edges);

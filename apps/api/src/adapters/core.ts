@@ -117,15 +117,15 @@ registerAdapter("code", "javascript", async ({ input, auth }) => {
   return { output: { result: sandbox.result ?? sandbox } };
 });
 
-async function ownedTable(tableId: unknown, workspaceId: string) {
-  const table = await queryOne<{ id: string }>(`select id from data_tables where id=$1 and workspace_id=$2`, [tableId, workspaceId]);
+async function ownedTable(tableId: unknown, orgId: string) {
+  const table = await queryOne<{ id: string }>(`select id from data_tables where id=$1 and org_id=$2`, [tableId, orgId]);
   if (!table) throw new Error("Table is unavailable in this workspace.");
   return table;
 }
 
 registerAdapter("tables", "create_record", async ({ input, workspaceId }) => {
   await ownedTable(input.tableId, workspaceId);
-  const row = await queryOne(`insert into table_records (table_id, data) values ($1,$2) returning *`, [input.tableId, JSON.stringify(input.data ?? {})]);
+  const row = await queryOne(`insert into data_table_rows (org_id, table_id, data) values ($1,$2,$3) returning *`, [workspaceId, input.tableId, JSON.stringify(input.data ?? {})]);
   return { output: row ?? {} };
 });
 
@@ -133,8 +133,8 @@ registerAdapter("tables", "find_record", async ({ input, workspaceId }) => {
   await ownedTable(input.tableId, workspaceId);
   const q = input.query as Record<string, unknown> | undefined;
   const rows = await query<{ id: string; data: Record<string, unknown> }>(
-    `select * from table_records where table_id=$1 order by created_at desc limit 50`,
-    [input.tableId]
+    `select * from data_table_rows where table_id=$1 and org_id=$2 order by created_at desc limit 50`,
+    [input.tableId, workspaceId]
   );
   if (!q || Object.keys(q).length === 0) return { output: rows[0] ?? {} };
   const match = rows.find((row) =>
@@ -146,8 +146,8 @@ registerAdapter("tables", "find_record", async ({ input, workspaceId }) => {
 registerAdapter("tables", "update_record", async ({ input, workspaceId }) => {
   await ownedTable(input.tableId, workspaceId);
   const row = await queryOne(
-    `update table_records set data = coalesce(data,'{}'::jsonb) || $3::jsonb where id=$1 and table_id=$2 returning *`,
-    [input.recordId, input.tableId, JSON.stringify(input.data ?? {})]
+    `update data_table_rows set data = coalesce(data,'{}'::jsonb) || $3::jsonb where id=$1 and table_id=$2 and org_id=$4 returning *`,
+    [input.recordId, input.tableId, JSON.stringify(input.data ?? {}), workspaceId]
   );
   if (!row) throw new Error("Table record not found.");
   return { output: row };
@@ -155,7 +155,7 @@ registerAdapter("tables", "update_record", async ({ input, workspaceId }) => {
 
 registerAdapter("tables", "delete_record", async ({ input, workspaceId }) => {
   await ownedTable(input.tableId, workspaceId);
-  const deleted = await queryOne(`delete from table_records where id=$1 and table_id=$2 returning id`, [input.recordId, input.tableId]);
+  const deleted = await queryOne(`delete from data_table_rows where id=$1 and table_id=$2 and org_id=$3 returning id`, [input.recordId, input.tableId, workspaceId]);
   if (!deleted) throw new Error("Table record not found.");
   return { output: { deleted: true, recordId: input.recordId } };
 });

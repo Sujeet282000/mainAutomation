@@ -1011,14 +1011,8 @@ authed.get("/copilot/readiness/:slug", async (req, res) => {
 
 // POST /copilot/test-step — Test a single workflow step against a real provider
 authed.post("/copilot/test-step", requireRole("owner", "admin", "editor"), async (req, res) => {
-  const body = z
-    .object({
-      appSlug: z.string(),
-      operation: z.string(),
-      connectionId: z.string().uuid().optional(),
-      config: z.record(z.unknown()).default({}),
-    })
-    .parse(req.body);
+  const { TestStepRequest } = await import("@algoverge/contracts");
+  const body = TestStepRequest.parse(req.body);
 
   const { getFixture } = await import("./test-data-fixtures");
   const { getAdapter } = await import("./adapters/registry");
@@ -1105,6 +1099,233 @@ authed.get("/copilot/status", async (req, res) => {
     ok: true,
     plane: ai.reachable ? "python" : "node",
     ...ai,
+  });
+});
+
+// ── Graph Patch API ─────────────────────────────────────────────────────────
+// POST /copilot/patch — Apply incremental graph edits instead of full rebuild
+authed.post("/copilot/patch", requireRole("owner", "admin", "editor"), async (req, res) => {
+  const body = z
+    .object({
+      flowId: z.string().uuid().optional(),
+      graph: z.record(z.unknown()).optional(),
+      patches: z.array(z.object({
+        op: z.enum(["add_node", "remove_node", "update_node", "replace_node", "connect", "disconnect", "update_config", "map_field", "add_delay", "add_approval"]),
+        target_node_id: z.string().optional(),
+        after_node_id: z.string().optional(),
+        before_node_id: z.string().optional(),
+        node: z.record(z.unknown()).optional(),
+        source: z.string().optional(),
+        target: z.string().optional(),
+        field: z.string().optional(),
+        value: z.unknown().optional(),
+        expression: z.string().optional(),
+        config: z.record(z.unknown()).optional(),
+      })),
+      description: z.string().optional(),
+    })
+    .parse(req.body);
+
+  // Resolve the graph to patch
+  let graph = body.graph as Record<string, unknown> | undefined;
+  if (!graph && body.flowId) {
+    const flow = await queryOne<{ draft_definition: unknown }>(
+      `SELECT draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
+      [body.flowId, req.orgId],
+    );
+    if (flow) graph = loadBuilderGraph(flow.draft_definition) as Record<string, unknown>;
+  }
+  if (!graph) return res.status(400).json({ error: "no_graph" });
+
+  // Apply patches using the Python graph patch engine (if available)
+  // Falls back to a simple Node.js implementation
+  try {
+    const ai = await probeAiService();
+    if (ai.reachable) {
+      // Delegate to Python graph patch engine
+      const result = await signedAiJson("/copilot/patch", {
+        graph,
+        patches: body.patches,
+      }, req.orgId!);
+      if (result) {
+        // Persist if flowId provided
+        if (body.flowId && result.graph) {
+          const draft = persistBuilderDraft(result.graph);
+          await query(
+            `UPDATE flows SET draft_definition = $3, updated_at = now(), updated_by = $4 WHERE id = $1 AND org_id = $2`,
+            [body.flowId, req.orgId, JSON.stringify(draft), req.user!.userId],
+          );
+        }
+        return res.json({ ok: true, ...result });
+      }
+    }
+  } catch {
+    // Fall through to Node.js implementation
+  }
+
+  // Node.js fallback: simple graph patch application
+  const nodes = (graph.nodes ?? []) as Array<Record<string, unknown>>;
+  const edges = (graph.edges ?? []) as Array<Record<string, unknown>>;
+  const nodeIds = new Set(nodes.map((n) => String(n.id)));
+  const applied: string[] = [];
+  const rejected: Array<{ op: string; issue: string }> = [];
+
+  for (const patch of body.patches) {
+    try {
+      if (patch.op === "add_node" && patch.node && patch.after_node_id) {
+        if (!nodeIds.has(patch.after_node_id)) {
+          rejected.push({ op: patch.op, issue: `Node ${patch.after_node_id} not found` });
+          continue;
+        }
+        const newNode = { ...patch.node };
+        if (!newNode.id) newNode.id = `step_${Date.now().toString(36)}`;
+        if (!newNode.id) newNode.id = `step_${Date.now().toString(36)}`;
+        nodes.push(newNode);
+        edges.push({ id: `e-${patch.after_node_id}-${newNode.id}`, source: patch.after_node_id, target: newNode.id });
+        applied.push(patch.op);
+      } else if (patch.op === "remove_node" && patch.target_node_id) {
+        if (patch.target_node_id === "trigger") {
+          rejected.push({ op: patch.op, issue: "Cannot remove trigger" });
+          continue;
+        }
+        const idx = nodes.findIndex((n) => n.id === patch.target_node_id);
+        if (idx === -1) {
+          rejected.push({ op: patch.op, issue: `Node ${patch.target_node_id} not found` });
+          continue;
+        }
+        // Reconnect: find incoming and outgoing edges
+        const incoming = edges.filter((e) => e.target === patch.target_node_id);
+        const outgoing = edges.filter((e) => e.source === patch.target_node_id);
+        // Remove node and its edges
+        nodes.splice(idx, 1);
+        for (let i = edges.length - 1; i >= 0; i--) {
+          if (edges[i].source === patch.target_node_id || edges[i].target === patch.target_node_id) {
+            edges.splice(i, 1);
+          }
+        }
+        // Reconnect
+        for (const inc of incoming) {
+          for (const out of outgoing) {
+            edges.push({ id: `e-${inc.source}-${out.target}`, source: inc.source, target: out.target });
+          }
+        }
+        applied.push(patch.op);
+      } else if (patch.op === "replace_node" && patch.target_node_id && patch.node) {
+        const idx = nodes.findIndex((n) => n.id === patch.target_node_id);
+        if (idx === -1) {
+          rejected.push({ op: patch.op, issue: `Node ${patch.target_node_id} not found` });
+          continue;
+        }
+        const replacement = { ...patch.node, id: patch.target_node_id, position: nodes[idx].position };
+        nodes[idx] = replacement;
+        applied.push(patch.op);
+      } else if (patch.op === "map_field" && patch.target_node_id && patch.field) {
+        const node = nodes.find((n) => n.id === patch.target_node_id);
+        if (!node) {
+          rejected.push({ op: patch.op, issue: `Node ${patch.target_node_id} not found` });
+          continue;
+        }
+        const config = (node.config ?? {}) as Record<string, unknown>;
+        const mappings = (config.mappings ?? {}) as Record<string, unknown>;
+        mappings[String(patch.field)] = patch.expression ?? patch.value ?? "";
+        config.mappings = mappings;
+        node.config = config;
+        applied.push(patch.op);
+      } else if (patch.op === "connect" && patch.source && patch.target) {
+        if (!nodeIds.has(patch.source) || !nodeIds.has(patch.target)) {
+          rejected.push({ op: patch.op, issue: "Source or target not found" });
+          continue;
+        }
+        const exists = edges.some((e) => e.source === patch.source && e.target === patch.target);
+        if (!exists) {
+          edges.push({ id: `e-${patch.source}-${patch.target}`, source: patch.source, target: patch.target });
+        }
+        applied.push(patch.op);
+      } else {
+        rejected.push({ op: patch.op, issue: `Unsupported or incomplete patch: ${patch.op}` });
+      }
+    } catch (err) {
+      rejected.push({ op: patch.op, issue: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  const resultGraph = { ...graph, nodes, edges };
+
+  // Persist if flowId provided
+  if (body.flowId) {
+    const draft = persistBuilderDraft(resultGraph);
+    await query(
+      `UPDATE flows SET draft_definition = $3, updated_at = now(), updated_by = $4 WHERE id = $1 AND org_id = $2`,
+      [body.flowId, req.orgId, JSON.stringify(draft), req.user!.userId],
+    );
+  }
+
+  // Audit log
+  await query(
+    `INSERT INTO audit_logs (org_id, actor_id, actor_kind, action, target_type, target_id, metadata)
+     VALUES ($1, $2, 'user', 'graph_patch', 'flow', $3, $4)`,
+    [req.orgId, req.user!.userId, body.flowId ?? null, JSON.stringify({ applied, rejected, description: body.description })],
+  ).catch(() => undefined);
+
+  res.json({ ok: rejected.length === 0, graph: resultGraph, applied, rejected });
+});
+
+// POST /copilot/context — Get assembled context for a Copilot request
+authed.post("/copilot/context", async (req, res) => {
+  const body = z
+    .object({
+      flowId: z.string().uuid().optional(),
+      selectedNodeId: z.string().optional(),
+      page: z.string().optional(),
+    })
+    .parse(req.body);
+
+  // Build context package
+  const workspace = await queryOne<{ id: string; name: string; settings?: Record<string, unknown> }>(
+    `SELECT id, name, settings FROM organizations WHERE id = $1`,
+    [req.orgId],
+  );
+  const connections = await query(
+    `SELECT id, piece_name as app_slug, label as name, status FROM connections WHERE org_id = $1`,
+    [req.orgId],
+  );
+  const recentRuns = await query(
+    `SELECT id, status, flow_name, created_at FROM flow_runs WHERE org_id = $1 ORDER BY created_at DESC LIMIT 5`,
+    [req.orgId],
+  );
+  const { listCatalogApps } = await import("./catalog/catalog");
+  const catalogApps = listCatalogApps();
+  const { listRegisteredAdapters } = await import("./adapters");
+  const adapters = listRegisteredAdapters();
+
+  let workflowData: Record<string, unknown> | null = null;
+  if (body.flowId) {
+    const flow = await queryOne<{ id: string; name: string; status: string; draft_definition: unknown }>(
+      `SELECT id, name, status, draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
+      [body.flowId, req.orgId],
+    );
+    if (flow) workflowData = { ...flow, graph: loadBuilderGraph(flow.draft_definition) };
+  }
+
+  res.json({
+    workspace: {
+      id: req.orgId,
+      name: workspace?.name ?? "",
+      timezone: workspace?.settings?.timezone ?? "UTC",
+    },
+    workflow: workflowData,
+    connections: connections.map((c: any) => ({
+      id: c.id, name: c.name, app_slug: c.app_slug, status: c.status,
+    })),
+    recentRuns: recentRuns,
+    catalog: {
+      totalApps: catalogApps.length,
+      totalOperations: catalogApps.reduce((sum, a) => sum + (a.operations?.length ?? 0), 0),
+      liveAdapters: adapters,
+      topApps: catalogApps.slice(0, 20).map((a) => ({ slug: a.slug, name: a.name, ops: a.operations?.length ?? 0 })),
+    },
+    selectedNodeId: body.selectedNodeId,
+    page: body.page,
   });
 });
 
@@ -2099,7 +2320,16 @@ authed.post("/templates/:slug/use", async (req, res) => {
 
 authed.get("/tables", async (req, res) => {
   const rows = await query(
-    `SELECT * FROM data_tables WHERE org_id = $1 AND name NOT LIKE 'form:%' ORDER BY created_at DESC`,
+    `SELECT t.*, COALESCE(rc.cnt, 0)::int AS record_count
+     FROM data_tables t
+     LEFT JOIN (
+       SELECT table_id, COUNT(*) AS cnt
+       FROM data_table_rows
+       WHERE org_id = $1
+       GROUP BY table_id
+     ) rc ON rc.table_id = t.id
+     WHERE t.org_id = $1 AND t.name NOT LIKE 'form:%'
+     ORDER BY t.created_at DESC`,
     [req.orgId],
   );
   res.json({ tables: rows });
@@ -2262,7 +2492,16 @@ authed.put("/variables", async (req, res) => {
 authed.get("/forms", async (req, res) => {
   // Store forms in data_tables with a 'form' prefix for simplicity
   const rows = await query(
-    `SELECT * FROM data_tables WHERE org_id = $1 AND name LIKE 'form:%' ORDER BY created_at DESC`,
+    `SELECT t.*, COALESCE(sc.cnt, 0)::int AS submission_count
+     FROM data_tables t
+     LEFT JOIN (
+       SELECT table_id, COUNT(*) AS cnt
+       FROM data_table_rows
+       WHERE org_id = $1
+       GROUP BY table_id
+     ) sc ON sc.table_id = t.id
+     WHERE t.org_id = $1 AND t.name LIKE 'form:%'
+     ORDER BY t.created_at DESC`,
     [req.orgId],
   );
   const forms = rows.map((r: any) => ({
@@ -2272,6 +2511,7 @@ authed.get("/forms", async (req, res) => {
     fields: r.schema_json?.fields ?? [],
     table_id: r.schema_json?.table_id ?? null,
     automation_id: r.schema_json?.automation_id ?? null,
+    submission_count: r.submission_count ?? 0,
   }));
   res.json({ forms });
 });

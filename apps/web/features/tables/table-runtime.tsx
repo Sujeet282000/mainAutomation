@@ -270,7 +270,7 @@ export function TableCellRenderer({
       );
     case "checkbox":
       return (
-        <span className={cn("inline-flex h-5 w-5 items-center justify-center rounded border", value ? "border-teal bg-teal/10 text-teal" : "border-line bg-white text-ink-muted")}>
+        <span className={cn("inline-flex h-5 w-5 items-center justify-center rounded border", value ? "border-teal bg-teal/10 text-teal" : "border-line bg-elevated text-ink-muted")}>
           {value ? "✓" : ""}
         </span>
       );

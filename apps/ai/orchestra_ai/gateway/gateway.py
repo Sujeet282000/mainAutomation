@@ -76,6 +76,13 @@ ROUTES: dict[str, ModelRoute] = {
     Purpose.EMBED: ModelRoute("openai", "text-embedding-3-small", 0.0, 0),
 }
 
+# Model registry lookup — use registry profiles for dynamic routing
+try:
+    from orchestra_ai.gateway.registry import select_model, TaskTier, MODEL_PROFILES
+    _HAS_REGISTRY = True
+except ImportError:
+    _HAS_REGISTRY = False
+
 PRICE_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4.1": (Decimal("2.00"), Decimal("8.00")),
     "gpt-4.1-mini": (Decimal("0.40"), Decimal("1.60")),
@@ -249,6 +256,25 @@ class ModelGateway:
         if spec.model != configured.model:
             raise ValueError("MODEL_OVERRIDE_NOT_PERMITTED")
         return configured
+
+    def select_for_task(self, task: str, **kwargs) -> ModelRoute | None:
+        """Use the model registry to select the best model for a task."""
+        if not _HAS_REGISTRY:
+            return None
+        profile = select_model(task, **kwargs)
+        if profile is None:
+            return None
+        # Map provider name to our provider enum
+        provider_map = {"openai": "openai", "anthropic": "anthropic", "google": "anthropic"}  # fallback google→anthropic
+        provider = provider_map.get(profile.provider, "openai")
+        return ModelRoute(
+            provider=provider,
+            model=profile.model,
+            temperature=0.1,
+            max_tokens=4096,
+            fallback_provider="openai",
+            fallback_model="gpt-4.1-mini",
+        )
 
     @staticmethod
     def _price(model: str, tokens_in: int, tokens_out: int, byo_key: bool) -> Decimal:

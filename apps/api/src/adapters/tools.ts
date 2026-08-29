@@ -100,16 +100,16 @@ registerAdapter("manager", "turn_off", async ({ input, workspaceId }) => {
   return { output: { automationId: input.automationId, status: "off" } };
 });
 
-registerAdapter("tables", "update_record", async ({ input }) => {
+registerAdapter("tables", "update_record", async ({ input, workspaceId }) => {
   const row = await queryOne(
-    `update table_records set data=$2, updated_at=now() where id=$1 returning *`,
-    [input.recordId, JSON.stringify(input.data ?? {})]
+    `update data_table_rows set data=$2, updated_at=now() where id=$1 and org_id=$3 returning *`,
+    [input.recordId, JSON.stringify(input.data ?? {}), workspaceId]
   );
   return { output: row ?? {} };
 });
 
-registerAdapter("tables", "delete_record", async ({ input }) => {
-  await query(`delete from table_records where id=$1`, [input.recordId]);
+registerAdapter("tables", "delete_record", async ({ input, workspaceId }) => {
+  await query(`delete from data_table_rows where id=$1 and org_id=$2`, [input.recordId, workspaceId]);
   return { output: { deleted: true, id: input.recordId } };
 });
 

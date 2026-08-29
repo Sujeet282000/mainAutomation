@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "description": "Orchestra — AI-Native Workflow Automation and Orchestration Platform",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "concurrently -n api,web,worker,scheduler,ai -c blue,green,magenta,yellow,cyan \"npm run dev -w @algoverge/api\" \"npm run dev -w @algoverge/web\" \"npm run dev -w @algoverge/worker\" \"npm run dev:scheduler\" \"npm run dev:ai\"",
     "dev:api": "npm run dev -w @algoverge/api",
@@ -21,8 +24,11 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "postcss": "^8.5.26",
     "turbo": "^2.4.4",
     "typescript": "^5.8.2"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
