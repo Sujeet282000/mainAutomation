@@ -7,16 +7,16 @@ import type { AutomationPlan, PlanStep, WorkflowGraph } from "@algoverge/shared"
 import { AutomationPlan as AutomationPlanSchema } from "@algoverge/shared";
 import type { CopilotMode, CopilotEvent } from "./copilot-pipeline";
 import { copilotTodos } from "./copilot-pipeline";
-import { APP_CATALOG } from "./catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 import { planCopilotIntent, type PlannedCopilotIntent } from "./copilot-planner";
-import { getCatalogReadiness, hasLiveAdapter } from "./catalog-readiness";
+import { getCatalogReadiness, hasLiveAdapter } from "../catalog/catalog-readiness";
 import { resolveConnections } from "./copilot-connection-resolver";
 import { buildDataLineage, generateFieldMappings } from "./copilot-field-mapper";
 import { validatePlan, compilePlanToGraph, atomicBuild } from "./copilot-graph-builder";
 import { inspectDraft, isStarterDraft } from "./copilot-orchestrator";
 import { mentionsWorkflowIntent } from "./copilot";
 import type { GraphNode } from "@algoverge/shared";
-import { queryOne } from "./db";
+import { queryOne } from "../db";
 
 // ─── Intent-to-Plan Converter ────────────────────────────────────────────────
 
@@ -214,7 +214,7 @@ export async function* runEnhancedCopilot(opts: {
   const intent = await planCopilotIntent({
     prompt,
     graph: opts.graph,
-    catalog: (await import("./pieces/registry")).pieceRegistry.cards(),
+    catalog: (await import("../pieces/registry")).pieceRegistry.cards(),
   });
 
   if (!intent) {
@@ -232,7 +232,7 @@ export async function* runEnhancedCopilot(opts: {
 
   const plan = intentToPlan(
     intent,
-    (await import("./pieces/registry")).pieceRegistry.cards(),
+    (await import("../pieces/registry")).pieceRegistry.cards(),
     opts.graph
   );
 

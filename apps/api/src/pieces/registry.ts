@@ -1,6 +1,6 @@
 import type { ActionDef, PieceDef, TriggerDef } from "@algoverge/pieces-sdk";
 import { firstPartyPieces } from "@algoverge/pieces";
-import { APP_CATALOG } from "../catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 import { catalogAppToPiece } from "./from-catalog";
 
 export interface OperationCard {

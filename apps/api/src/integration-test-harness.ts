@@ -3,8 +3,8 @@
 // Checks: manifest completeness, adapter availability, acceptance checklist
 // =============================================================================
 
-import { APP_CATALOG } from "./catalog";
-import { getCatalogReadiness, type AppReadiness } from "./catalog-readiness";
+import { APP_CATALOG } from "./catalog/catalog";
+import { getCatalogReadiness, type AppReadiness } from "./catalog/catalog-readiness";
 import { listRegisteredAdapters } from "./adapters/registry";
 
 export type AcceptanceChecklist = {

@@ -6,12 +6,12 @@
 
 import type { WorkflowGraph } from "@algoverge/shared";
 import { coerceWorkflowGraph } from "@algoverge/core";
-import { APP_CATALOG } from "./catalog";
-import { query, queryOne } from "./db";
-import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
-import { pickForCopilot } from "./connections";
-import { pieceRegistry } from "./pieces/registry";
-import { validateWorkflowGraph } from "./workflow-validation";
+import { APP_CATALOG } from "../catalog/catalog";
+import { query, queryOne } from "../db";
+import { persistBuilderDraft, loadBuilderGraph } from "../flow-runtime";
+import { pickForCopilot } from "../connections";
+import { pieceRegistry } from "../pieces/registry";
+import { validateWorkflowGraph } from "../workflow-validation";
 
 export interface CopilotToolContext {
   workspaceId: string;

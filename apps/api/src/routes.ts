@@ -20,9 +20,9 @@ import { definitionHash } from "@algoverge/core";
 import { oauthRouter } from "./oauth";
 import { registerUiCompat, applyAutomationGraphShape } from "./ui-compat";
 import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
-import { copilotGraph, copilotChat } from "./copilot";
-import { runCopilotEngine } from "./copilot-engine";
-import { ensureProjectId, refineCopilotSession, streamCopilotSession } from "./copilot-http";
+import { copilotGraph, copilotChat } from "./copilot/copilot";
+import { runCopilotEngine } from "./copilot/copilot-engine";
+import { ensureProjectId, refineCopilotSession, streamCopilotSession } from "./copilot/copilot-http";
 import { probeAiService, signedAiJson } from "./ai-service";
 
 export const router = Router();
@@ -53,7 +53,7 @@ router.get("/meta", (_req, res) => {
 });
 
 router.get("/catalog", async (req, res) => {
-  const { listCatalogApps } = await import("./catalog");
+  const { listCatalogApps } = await import("./catalog/catalog");
   res.json({ apps: listCatalogApps(req.query.q as string | undefined) });
 });
 
@@ -957,7 +957,7 @@ authed.post("/copilot/build", requireRole("owner", "admin", "editor"), async (re
     .parse(req.body);
 
   try {
-    const { buildPlanAtomically } = await import("./copilot-plan-builder");
+    const { buildPlanAtomically } = await import("./copilot/copilot-plan-builder");
     const { AutomationPlan } = await import("@algoverge/shared");
 
     // Validate plan structure
@@ -982,7 +982,7 @@ authed.post("/copilot/build", requireRole("owner", "admin", "editor"), async (re
 
 // GET /copilot/readiness — Show integration readiness stats with acceptance checklist
 authed.get("/copilot/readiness", async (req, res) => {
-  const { getCatalogReadiness, getReadinessStats } = await import("./catalog-readiness");
+  const { getCatalogReadiness, getReadinessStats } = await import("./catalog/catalog-readiness");
   const { generateAcceptanceChecklist, generateAcceptanceReport } = await import("./integration-test-harness");
   const stats = getReadinessStats();
   const apps = [...getCatalogReadiness().values()];
@@ -999,7 +999,7 @@ authed.get("/copilot/readiness", async (req, res) => {
 
 // GET /copilot/readiness/:slug — Show detailed readiness for a specific app
 authed.get("/copilot/readiness/:slug", async (req, res) => {
-  const { getCatalogReadiness } = await import("./catalog-readiness");
+  const { getCatalogReadiness } = await import("./catalog/catalog-readiness");
   const { generateAcceptanceChecklist } = await import("./integration-test-harness");
   const { getAppFixtures } = await import("./test-data-fixtures");
   const app = getCatalogReadiness().get(req.params.slug);
@@ -1574,12 +1574,12 @@ authed.get("/webhook-events", async (req, res) => {
 // ============================================================================
 
 authed.get("/apps", async (req, res) => {
-  const { listCatalogApps } = await import("./catalog");
+  const { listCatalogApps } = await import("./catalog/catalog");
   res.json({ apps: listCatalogApps(req.query.q as string | undefined) });
 });
 
 authed.get("/apps/:slug", async (req, res) => {
-  const { getApp, presentCatalogApp } = await import("./catalog");
+  const { getApp, presentCatalogApp } = await import("./catalog/catalog");
   const app = getApp(req.params.slug);
   if (!app) return res.status(404).json({ error: "not_found" });
   res.json({ app: presentCatalogApp(app) });
@@ -1924,7 +1924,7 @@ authed.post("/agent-approvals/:id/decide", async (req, res) => {
 });
 
 authed.get("/sdk/apps", async (_req, res) => {
-  const { listCatalogApps } = await import("./catalog");
+  const { listCatalogApps } = await import("./catalog/catalog");
   res.json({ apps: listCatalogApps() });
 });
 

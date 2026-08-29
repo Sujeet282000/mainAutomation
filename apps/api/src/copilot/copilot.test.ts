@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { copilotChat, explainLastTest, isCatalogGraph, refineGraph } from "./copilot";
 import { copilotShouldPersist, parseCopilotMode } from "./copilot-pipeline";
-import { diagnoseFromFailure } from "./diagnose";
-import { deterministicWorkflowAdvice } from "./workflow-advisor";
+import { diagnoseFromFailure } from "../diagnose";
+import { deterministicWorkflowAdvice } from "../workflow-advisor";
 
 test("Copilot accepts a catalog-valid trigger and action graph", () => {
   assert.equal(

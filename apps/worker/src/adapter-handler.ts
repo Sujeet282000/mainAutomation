@@ -14,7 +14,7 @@ export const adapterStepHandler: StepHandler = {
     const appSlug = String(piece?.name ?? raw.appSlug ?? raw.app ?? raw.type ?? "");
     const operation = String(raw.operation ?? raw.operationId ?? props.operation ?? raw.action ?? "");
     const connectionId = raw.connectionId ? String(raw.connectionId) : undefined;
-    const workspaceId = String(run.projectId ?? run.orgId);
+    const workspaceId = run.orgId;
 
     if (!appSlug || !operation) {
       return { kind: "error", error: new EngineError("validation", "INVALID_STEP") };

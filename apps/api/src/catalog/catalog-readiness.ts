@@ -4,7 +4,7 @@
 // =============================================================================
 
 import { APP_CATALOG } from "./catalog";
-import { listRegisteredAdapters } from "./adapters/registry";
+import { listRegisteredAdapters } from "../adapters/registry";
 
 export type ReadinessStatus =
   | "catalog_only"      // Only in the catalog manifest

@@ -1,7 +1,7 @@
 import { normalizeWorkflowGraph, type WorkflowGraph, type GraphNode } from "@algoverge/shared";
 import { resolveValue } from "@algoverge/core";
 import { runAdapter } from "./adapters";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { loadConnectionAuth } from "./connections";
 import { redact } from "./crypto";
 import { query, queryOne } from "./db";

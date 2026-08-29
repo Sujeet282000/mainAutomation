@@ -1,4 +1,4 @@
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { decryptJson, encryptJson } from "./crypto";
 import { query, queryOne } from "./db";
 

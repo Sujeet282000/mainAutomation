@@ -14,6 +14,8 @@ __pycache__
 .pytest_cache
 *.tsbuildinfo
 apps/web/.next
+apps/web/next-env.d.ts
 apps/ai/.venv
 .freebuff/
 .kilo/
+.cursor/

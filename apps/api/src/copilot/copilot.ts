@@ -1,9 +1,9 @@
 import type { AppManifest, AppOperation, GraphNode, WorkflowGraph } from "@algoverge/shared";
-import { env } from "./config";
-import { APP_CATALOG } from "./catalog";
-import { query } from "./db";
-import { pickForCopilot } from "./connections";
-import { pieceRegistry } from "./pieces/registry";
+import { env } from "../config";
+import { APP_CATALOG } from "../catalog/catalog";
+import { query } from "../db";
+import { pickForCopilot } from "../connections";
+import { pieceRegistry } from "../pieces/registry";
 import { copilotShouldPersist, parseCopilotMode, type CopilotMode } from "./copilot-pipeline";
 import {
   classifyCopilotChapter,
@@ -12,7 +12,7 @@ import {
   isStarterDraft,
   orchestrateCopilot
 } from "./copilot-orchestrator";
-import { adviseWorkflow } from "./workflow-advisor";
+import { adviseWorkflow } from "../workflow-advisor";
 
 const HINTS: Array<{ re: RegExp; slug: string }> = [
   { re: /gmail|inbox|email/i, slug: "gmail" },
@@ -844,7 +844,7 @@ export async function copilotChat(opts: {
     const applied = Boolean(result.graph) && copilotShouldPersist(mode) && result.chapter !== "inspect" && result.chapter !== "explain" && result.chapter !== "diagnose";
     if (result.graph && opts.automationId && opts.workspaceId && applied) {
       try {
-        const { persistCopilotDraft } = await import("./flow-versions");
+        const { persistCopilotDraft } = await import("../flow-versions");
         await persistCopilotDraft({ automationId: opts.automationId, workspaceId: opts.workspaceId, graph: result.graph });
       } catch {
         /* chat still returns the graph so the canvas can apply it */

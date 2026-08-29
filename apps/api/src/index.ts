@@ -10,7 +10,7 @@ import { ensureProductSchema } from "./ensure-schema";
 import { webhookRouter } from "./triggers/webhook-ingress";
 import { tickSchedules } from "./schedules";
 import { tickPolling } from "./poll";
-import { copilotApprovalRouter } from "./copilot-approval";
+import { copilotApprovalRouter } from "./copilot/copilot-approval";
 
 // Prevent unhandled promise rejections from crashing the process
 process.on("unhandledRejection", (reason) => {

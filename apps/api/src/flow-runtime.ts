@@ -1,7 +1,7 @@
 import { coerceWorkflowGraph, definitionHash, graphToFlowDefinition } from "@algoverge/core";
 import type { WorkflowGraph } from "@algoverge/shared";
 import { runAdapter } from "./adapters";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { encryptJson, decryptJson } from "./crypto";
 import { query, queryOne } from "./db";
 

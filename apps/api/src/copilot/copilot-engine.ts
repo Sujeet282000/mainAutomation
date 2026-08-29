@@ -1,15 +1,15 @@
 import { z } from "zod";
 import type { WorkflowGraph } from "@algoverge/shared";
 import { ModelGateway } from "@algoverge/model-gateway";
-import { APP_CATALOG } from "./catalog";
-import { pickForCopilot } from "./connections";
+import { APP_CATALOG } from "../catalog/catalog";
+import { pickForCopilot } from "../connections";
 import { graphFromPrompt, graphFromLanguageModel, isCatalogGraph, bindExistingConnections, mentionsWorkflowIntent, graphFromCatalogPicks } from "./copilot";
 import { fillEmptyFields, inspectDraft, isStarterDraft } from "./copilot-orchestrator";
 import type { CopilotEvent, CopilotMode } from "./copilot-pipeline";
 import { copilotTodos } from "./copilot-pipeline";
-import { CatalogIndex } from "./pieces/catalog-index";
-import { pieceRegistry, type OperationCard } from "./pieces/registry";
-import { validateWorkflowGraph } from "./workflow-validation";
+import { CatalogIndex } from "../pieces/catalog-index";
+import { pieceRegistry, type OperationCard } from "../pieces/registry";
+import { validateWorkflowGraph } from "../workflow-validation";
 import { planCopilotIntent, type PlannedCopilotIntent } from "./copilot-planner";
 import { classifyIntent } from "@algoverge/shared";
 

@@ -1,5 +1,5 @@
 import type { WorkflowGraph } from "@algoverge/shared";
-import { APP_CATALOG } from "./catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 
 export type CopilotMode = "auto_build" | "ask_as_you_build";
 

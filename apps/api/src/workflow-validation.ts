@@ -1,5 +1,5 @@
 import { type WorkflowGraph, normalizeWorkflowGraph } from "@algoverge/shared";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { query } from "./db";
 import { connectionsAreCompatible } from "./connections";
 

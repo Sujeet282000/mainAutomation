@@ -4,7 +4,7 @@ import { encryptJson, randomToken } from "./crypto";
 import { query, queryOne } from "./db";
 import { authMiddleware, workspaceMiddleware } from "./auth";
 import { nextConnectionName } from "./connections";
-import { getConnectionSetup } from "./app-connection-policy";
+import { getConnectionSetup } from "./catalog/app-connection-policy";
 
 export const oauthRouter = Router();
 

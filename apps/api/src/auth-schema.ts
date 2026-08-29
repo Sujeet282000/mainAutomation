@@ -1,5 +1,5 @@
 import type { AppManifest } from "@algoverge/shared";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 
 export type AuthField = {
   key: string;

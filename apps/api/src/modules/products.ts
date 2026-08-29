@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { normalizeWorkflowGraph } from "@algoverge/shared";
-import { APP_CATALOG } from "../catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 import { randomToken } from "../crypto";
 import { loadConnectionAuth } from "../connections";
 import { query, queryOne } from "../db";

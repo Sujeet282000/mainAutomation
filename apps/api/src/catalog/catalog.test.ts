@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { APP_CATALOG, getApp, listCatalogApps } from "./catalog";
-import { graphFromCatalogPicks, graphFromPrompt, isCatalogGraph } from "./copilot";
+import { graphFromCatalogPicks, graphFromPrompt, isCatalogGraph } from "../copilot/copilot";
 
 test("catalog seed covers 33-category apps with unique slugs", () => {
   const slugs = APP_CATALOG.map((a) => a.slug);

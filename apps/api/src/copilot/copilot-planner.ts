@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { completeAi } from "./ai-runtime";
+import { completeAi } from "../ai-runtime";
 import type { WorkflowGraph } from "@algoverge/shared";
 
 const PlannedIntent = z.object({

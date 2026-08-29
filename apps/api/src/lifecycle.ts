@@ -1,4 +1,4 @@
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { query } from "./db";
 import { catchHookUrl } from "./webhook-crypto";
 import { normalizeWorkflowGraph, type WorkflowGraph } from "@algoverge/shared";

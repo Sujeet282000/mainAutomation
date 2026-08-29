@@ -5,9 +5,9 @@
 
 import type { AutomationPlan, PlanStep, WorkflowGraph, GraphNode, GraphEdge } from "@algoverge/shared";
 import { PlanValidationResult } from "@algoverge/shared";
-import { APP_CATALOG } from "./catalog";
-import { query, queryOne } from "./db";
-import { validateWorkflowGraph } from "./workflow-validation";
+import { APP_CATALOG } from "../catalog/catalog";
+import { query, queryOne } from "../db";
+import { validateWorkflowGraph } from "../workflow-validation";
 import { v4 as uuid } from "uuid";
 
 // ─── Graph Compiler ──────────────────────────────────────────────────────────

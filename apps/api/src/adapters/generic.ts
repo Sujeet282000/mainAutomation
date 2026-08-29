@@ -1,4 +1,4 @@
-import { APP_CATALOG } from "../catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 import { getAdapter, registerAdapter } from "./registry";
 import { authHeaders, requireOk } from "./http";
 import type { AdapterResult } from "./types";

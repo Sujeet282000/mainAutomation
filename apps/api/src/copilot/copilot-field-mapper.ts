@@ -4,7 +4,7 @@
 // =============================================================================
 
 import type { AutomationPlan, PlanStep, DataRef, FieldMapping } from "@algoverge/shared";
-import { APP_CATALOG } from "./catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 
 // ─── Semantic Aliases ────────────────────────────────────────────────────────
 

@@ -1,15 +1,15 @@
 import type { Router, Request, Response } from "express";
 import { z } from "zod";
 import { coerceWorkflowGraph } from "@algoverge/core";
-import { APP_CATALOG, getApp, listCatalogApps } from "./catalog";
+import { APP_CATALOG, getApp, listCatalogApps } from "./catalog/catalog";
 import { authSchemaForSlug, credentialShapeError, validateAuthCredentials } from "./auth-schema";
 import { getDynamicFieldsHandler } from "./adapters";
 import { query, queryOne } from "./db";
 import { persistBuilderDraft, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
 import { validateWorkflowGraph } from "./workflow-validation";
-import { copilotGraph, copilotChat } from "./copilot";
-import { runCopilotEngine } from "./copilot-engine";
-import { parseCopilotMode } from "./copilot-pipeline";
+import { copilotGraph, copilotChat } from "./copilot/copilot";
+import { runCopilotEngine } from "./copilot/copilot-engine";
+import { parseCopilotMode } from "./copilot/copilot-pipeline";
 import { diagnoseFromFailure } from "./diagnose";
 import { signedAiJson, probeAiService } from "./ai-service";
 
@@ -363,7 +363,7 @@ export function registerUiCompat(authed: Router) {
 
     // Use streamCopilotSession which tries Python AI first, falls back to Node engine
     try {
-      const { streamCopilotSession } = await import("./copilot-http");
+      const { streamCopilotSession } = await import("./copilot/copilot-http");
       await streamCopilotSession({
         req: req as any,
         res: res as any,
@@ -487,7 +487,7 @@ export function registerUiCompat(authed: Router) {
           let sessionId: string | undefined;
           const needsApproval = needsConfirmation.length > 0 || rejectedOps.length > 0;
           if (needsApproval && agentReply.operations?.length) {
-            const { ensureProjectId } = await import("./copilot-http");
+            const { ensureProjectId } = await import("./copilot/copilot-http");
             const projectId = await ensureProjectId(req.orgId!);
             const created = await queryOne<{ id: string }>(
               `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
@@ -631,7 +631,7 @@ export function registerUiCompat(authed: Router) {
           // endpoint can re-validate them at approval time.
           let sessionId: string | undefined;
           if (body.automationId) {
-            const { ensureProjectId } = await import("./copilot-http");
+            const { ensureProjectId } = await import("./copilot/copilot-http");
             const projectId = await ensureProjectId(req.orgId!);
             const created = await queryOne<{ id: string }>(
               `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)

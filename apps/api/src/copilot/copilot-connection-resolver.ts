@@ -3,8 +3,8 @@
 // Priority: exact account match → workspace default → recently used → most used → needs attention
 // =============================================================================
 
-import { query } from "./db";
-import { pickForCopilot } from "./connections";
+import { query } from "../db";
+import { pickForCopilot } from "../connections";
 import type { AutomationPlan, PlanConnection } from "@algoverge/shared";
 
 type ConnectionRow = {

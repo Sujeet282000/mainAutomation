@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { query, queryOne } from "./db";
 import { createExecution } from "./engine";
 import { hmacSha256Hex, timingSafeEqualHex } from "./webhook-crypto";

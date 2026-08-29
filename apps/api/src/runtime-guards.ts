@@ -1,4 +1,4 @@
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 
 export class StepError extends Error {
   retryable: boolean;

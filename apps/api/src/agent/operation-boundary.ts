@@ -1,5 +1,5 @@
 import type { GraphNode, WorkflowGraph } from "@algoverge/shared";
-import { APP_CATALOG } from "../catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 import { pieceRegistry } from "../pieces/registry";
 import { validateWorkflowGraph } from "../workflow-validation";
 import { AgentOperation, parseAgentOperations, AGENT_MUTATING_OPERATION_TYPES, type AgentOperation as AgentOperationType } from "./operations";

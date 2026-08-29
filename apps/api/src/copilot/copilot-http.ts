@@ -1,15 +1,15 @@
 import type { Request, Response } from "express";
 import { coerceWorkflowGraph } from "@algoverge/core";
 import type { AutomationPlan } from "@algoverge/shared";
-import { query, queryOne } from "./db";
-import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
+import { query, queryOne } from "../db";
+import { persistBuilderDraft, loadBuilderGraph } from "../flow-runtime";
 import { copilotChat } from "./copilot";
 import { runCopilotEngine } from "./copilot-engine";
 import { runEnhancedCopilot, buildPlanAtomically } from "./copilot-plan-builder";
 import { parseCopilotMode } from "./copilot-pipeline";
-import { probeAiService, signedAiJson, streamAiCopilotGenerate } from "./ai-service";
-import { listCatalogApps } from "./catalog";
-import { applyAgentOperations, type AgentOperation } from "./agent-operation-applier";
+import { probeAiService, signedAiJson, streamAiCopilotGenerate } from "../ai-service";
+import { listCatalogApps } from "../catalog/catalog";
+import { applyAgentOperations, type AgentOperation } from "../agent-operation-applier";
 
 const STAGE_FOR_DB: Record<string, string> = { connect: "connections", schema: "schemas", map: "mapping" };
 const PERSISTABLE_EVENTS = new Set(["stage", "reasoning", "proposal", "applied", "todo", "usage", "done", "error"]);

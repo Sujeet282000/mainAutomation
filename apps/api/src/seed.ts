@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { APP_CATALOG } from "./catalog";
+import { APP_CATALOG } from "./catalog/catalog";
 import { env } from "./config";
 import { pool, query } from "./db";
 

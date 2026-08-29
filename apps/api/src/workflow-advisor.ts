@@ -1,7 +1,7 @@
 import type { WorkflowGraph } from "@algoverge/shared";
 import { completeAi, screenOutput } from "./ai-runtime";
 import { diagnoseFromFailure } from "./diagnose";
-import { inspectDraft } from "./copilot-orchestrator";
+import { inspectDraft } from "./copilot/copilot-orchestrator";
 
 export type WorkflowAdviceInput = {
   graph?: WorkflowGraph;

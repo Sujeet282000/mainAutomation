@@ -1,5 +1,5 @@
 import type { AppManifest, AppOperation, GraphNode, WorkflowGraph } from "@algoverge/shared";
-import { APP_CATALOG } from "./catalog";
+import { APP_CATALOG } from "../catalog/catalog";
 import type { CopilotMode } from "./copilot-pipeline";
 
 export type CopilotChapter =

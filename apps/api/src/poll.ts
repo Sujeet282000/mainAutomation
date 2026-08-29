@@ -1,5 +1,5 @@
 import type { WorkflowGraph } from "@algoverge/shared";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { loadCompatibleConnectionAuth } from "./connections";
 import { query, queryOne } from "./db";
 import { createExecution } from "./engine";

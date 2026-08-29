@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { WorkflowGraph, GraphNode, GraphEdge } from "@algoverge/shared";
 import { normalizeWorkflowGraph } from "@algoverge/shared";
-import { getApp } from "./catalog";
+import { getApp } from "./catalog/catalog";
 import { invokeTool } from "./tool-registry";
 import { validateWorkflowGraph } from "./workflow-validation";
 import { queryOne } from "./db";
