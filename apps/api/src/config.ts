@@ -48,6 +48,7 @@ export const env = {
   openai: process.env.OPENAI_API_KEY ?? "",
   anthropic: process.env.ANTHROPIC_API_KEY ?? "",
   gemini: process.env.GEMINI_API_KEY ?? "",
+  localLlmUrl: process.env.LOCAL_LLM_BASE_URL ?? "",
   meta: {
     appId: process.env.META_APP_ID ?? "",
     appSecret: process.env.META_APP_SECRET ?? "",

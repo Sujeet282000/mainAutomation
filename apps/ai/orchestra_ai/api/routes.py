@@ -269,3 +269,23 @@ async def explain_error(
     return {
         "explanation": "Open the failed step, read the error, reconnect if it is auth, and test that step before publishing."
     }
+
+
+# ── System Planner ───────────────────────────────────────────────────────────
+
+class SystemPlanRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=5000)
+    context: dict[str, Any] | None = None
+
+
+@router.post("/system-plan")
+async def system_plan(
+    body: SystemPlanRequest,
+    ctx: Annotated[Ctx, Depends(require_service_token)],
+) -> dict[str, Any]:
+    """Level 1 planning — decompose user intent into products, capabilities,
+    entry surface, and resource graph.  This sits above the workflow planner."""
+    from orchestra_ai.copilot.system_planner import plan_system
+
+    plan = plan_system(body.prompt, body.context)
+    return plan.model_dump()

@@ -4,15 +4,47 @@ import { APP_CATALOG } from "../catalog/catalog";
 import { query } from "../db";
 import { pickForCopilot } from "../connections";
 import { pieceRegistry } from "../pieces/registry";
+import { completeAi } from "../ai-runtime";
 import { copilotShouldPersist, parseCopilotMode, type CopilotMode } from "./copilot-pipeline";
 import {
   classifyCopilotChapter,
   describeDraft,
   inspectDraft,
   isStarterDraft,
-  orchestrateCopilot
+  orchestrateCopilot,
+  type DraftSnapshot
 } from "./copilot-orchestrator";
 import { adviseWorkflow } from "../workflow-advisor";
+
+/**
+ * Strip leaked chain-of-thought from LLM responses.
+ * Models sometimes ignore instructions and expose internal reasoning.
+ * This helper cleans the most common patterns.
+ */
+function stripThinking(text: string): string {
+  if (!text) return text;
+  let cleaned = text;
+  // Remove "Thinking..." prefix
+  cleaned = cleaned.replace(/^\s*Thinking\.\.\.\s*/i, "");
+  // Aggressive chain-of-thought removal — patterns that expose internal LLM reasoning
+  const thinkingPatterns = [
+    /^(?:The user is asking me to|The user wants me to|Let me (?:analyze|think|consider|look|check|examine|inspect|understand|review)|I should (?:first|start|begin|check|look|analyze)|Looking at (?:the|this|what)|Given the context|The user might be|I need to (?:first|check|look|see|understand|analyze)|Wait\s*[-—,]|But wait\s*[-—,]|Actually\s*[-—,]|Now\s*[-—,]|So\s*[-—,]).*$/gm,
+    /^\d+\.\s+(?:The user|Let me|I should|I need|Looking|Given|The workflow|Step \d)/gm,
+    /^\s*(?:First,|Second,|Third,)?\s*(?:I(?:'ll| will| should| need to| can)|Let me|The user|Looking at|Given that|I notice|I see that|The current state)/gm,
+    /(?:I can see you have|This appears to be|The user said|Let me first test|But first,|But I need to know|I need to see what)/g,
+    /(?:Let me explain what(?:'s| is) needed|ask for the action step direction|explain what(?:'s| is) needed and ask)/g,
+  ];
+  for (const pat of thinkingPatterns) {
+    cleaned = cleaned.replace(pat, (match) => {
+      const lower = match.toLowerCase();
+      if (/^(first|second|third),?\s+(?:let me|i should|i need)/i.test(lower)) return "";
+      return match;
+    });
+  }
+  // Collapse multiple blank lines
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  return cleaned.trim();
+}
 
 const HINTS: Array<{ re: RegExp; slug: string }> = [
   { re: /gmail|inbox|email/i, slug: "gmail" },
@@ -783,7 +815,7 @@ export function shouldRefineFromChat(prompt: string) {
   if (isExplainOnlyPrompt(prompt)) return false;
   if (/\b(fix|incomplete|map fields|authenticate|connect accounts|finish)\b/i.test(prompt)) return true;
   if (mentionsWorkflowIntent(prompt)) return true;
-  return /\b(use|change|switch|replace|set|add|instead)\b/i.test(prompt) && mentionedApps(prompt).length > 0;
+  return /\b(use|change|switch|replace|set|add|instead|update|modify)\b/i.test(prompt) && mentionedApps(prompt).length > 0;
 }
 
 export function explainLastTest(lastTest?: { ok?: boolean; ms?: number; body?: unknown } | null) {
@@ -1030,6 +1062,71 @@ function generateOperations(
   }];
 }
 
+/** Detect whether the prompt is a general conversational question rather
+ * than a workflow build/modify/test/diagnose request. */
+function isConversationalQuestion(prompt: string, snapshot: DraftSnapshot): boolean {
+  const lower = prompt.toLowerCase().trim();
+  // Short greetings — already handled above, but guard double-match
+  if (/^(hi|hello|hey|thanks|thank you)[\s!.?]*$/i.test(lower)) return false;
+  // Already handled by explicit patterns above (help, who-are-you, explain, publish)
+  if (/\b(what can you do|capabilities|features|who are you|your name|publish|turn on)\b/i.test(lower)) return false;
+  // Workflow-modification keywords → not conversational
+  if (/\b(build|generate|create|add|insert|append|remove|delete|replace|change|switch|set|use|fix|fill|map|autocomplete|connect|authenticate|rebuild|start over|update|modify)\b/i.test(lower)) return false;
+  if (/\b(when |whenever |then |also )\b/i.test(lower) && snapshot.generic) return false;
+  // If the prompt is a question (contains ?) or a general knowledge phrase, route to LLM
+  const isQuestion = lower.includes("?");
+  const hasQuestionWord = /^(what|how|why|where|when|who|which|can|could|should|would|is|are|do|does|will)\b/i.test(lower);
+  // Longer free-form text that doesn't look like a workflow instruction
+  const looksLikeFreeForm = lower.length > 12 && !mentionsWorkflowIntent(prompt);
+  return isQuestion || hasQuestionWord || looksLikeFreeForm;
+}
+
+/** Use the LLM to answer a general conversational question with workflow context. */
+async function answerWithLlm(
+  prompt: string,
+  graph: WorkflowGraph | undefined,
+  snapshot: DraftSnapshot,
+  history?: Array<{ role: "user" | "assistant"; content: string; ts?: string }>,
+): Promise<string | null> {
+  const catalogSummary = APP_CATALOG.slice(0, 40)
+    .map((a) => `${a.name} (${a.slug}): ${a.operations.map((o) => o.key).join(", ")}`)
+    .join("\n");
+  const workflowContext = snapshot.empty
+    ? "The canvas is currently empty — no steps configured yet."
+    : `Current workflow (${snapshot.nodeCount} steps):\n${snapshot.steps.map((s) => `${s.index}. ${s.label} (${s.appSlug}) [${s.chapter}]`).join("\n")}`;
+  const system = [
+    "You are Orchestra Copilot, a concise workflow automation assistant.",
+    "CRITICAL: Never expose chain-of-thought, internal reasoning, or thinking-out-loud in your response.",
+    "NEVER start with 'Let me analyze', 'I should first', 'Looking at', 'The user might be', or numbered internal analysis.",
+    "Start directly with the conclusion or answer. Be confident and direct.",
+    "Answer the user's question helpfully and concisely.",
+    "If the question is about their current workflow, use the provided workflow context.",
+    "If it's a general knowledge question about automation, integrations, or the platform, answer it.",
+    "Keep answers to 2-4 short paragraphs max. Use markdown for readability.",
+    "End with a clear next step when appropriate.",
+  ].join(" ");
+
+  // Build message with conversation history for multi-turn context
+  const historyBlock = history?.length
+    ? history.map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`).join("\n")
+    : "";
+  const userMessage = [
+    `Available integrations:\n${catalogSummary}`,
+    `\nWorkflow context:\n${workflowContext}`,
+    historyBlock ? `\nConversation so far:\n${historyBlock}` : "",
+    `\nUser question: ${prompt}`,
+  ].filter(Boolean).join("\n");
+
+  const result = await completeAi({
+    intent: "reason",
+    prompt: userMessage,
+    system,
+    piiFilter: false,
+  });
+  if (result.text) return result.text;
+  return null;
+}
+
 export async function copilotChat(opts: {
   prompt: string;
   graph?: WorkflowGraph;
@@ -1042,6 +1139,7 @@ export async function copilotChat(opts: {
   mode?: CopilotMode;
   selectedStepId?: string | null;
   lastTest?: { ok?: boolean; body?: unknown; ms?: number } | null;
+  history?: Array<{ role: "user" | "assistant"; content: string; ts?: string }>;
 }): Promise<{
   reply: string;
   source: string;
@@ -1055,6 +1153,7 @@ export async function copilotChat(opts: {
   suggestions?: CopilotSuggestion[];
   clarification?: CopilotClarification;
   operations?: CopilotOperation[];
+  thinking?: string;
 }> {
   const mode = parseCopilotMode(opts.mode);
   const steps = opts.graph?.nodes?.length ?? 0;
@@ -1104,7 +1203,31 @@ export async function copilotChat(opts: {
     const suggestions = generateSuggestions(result.chapter ?? "inspect", snap, result.graph, opts.selectedStepId);
     const clarification = generateClarification(opts.prompt, snap, result.chapter);
     const operations = generateOperations(result, snap);
-    return { ...result, applied, youDoFirst: snap.youDoFirst ?? [], iCan: snap.iCan ?? [], outline: snap.outline, suggestions, clarification, operations };
+    // Strip any leaked chain-of-thought from the reply before sending to user
+    // Generate contextual thinking text based on what the copilot did
+    const chapter = result.chapter ?? "inspect";
+    let thinking = "";
+    if (chapter === "rebuild") {
+      const nodeCount = result.graph?.nodes?.length ?? 0;
+      thinking = `Assembled a ${nodeCount}-step workflow from your description.`;
+    } else if (chapter === "add_step") {
+      thinking = "Added a new step to your existing workflow.";
+    } else if (chapter === "change_step") {
+      thinking = "Updated the specified step in your workflow.";
+    } else if (chapter === "fill_fields" || chapter === "autocomplete") {
+      thinking = "Filled in empty fields using data from previous steps.";
+    } else if (chapter === "explain") {
+      thinking = "Reviewed the current workflow and prepared an explanation.";
+    } else if (chapter === "diagnose") {
+      thinking = "Analyzed the last test result for issues.";
+    } else {
+      const nodeCount = snap.nodeCount;
+      thinking = nodeCount > 0
+        ? `Inspected your ${nodeCount}-step workflow. ${snap.issues.length ? `${snap.issues.length} issue(s) found.` : "No issues found."}
+${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow looks ready to test."}`
+        : "The canvas is empty. Describe a trigger and actions to get started.";
+    }
+    return { ...result, reply: stripThinking(result.reply), applied, youDoFirst: snap.youDoFirst ?? [], iCan: snap.iCan ?? [], outline: snap.outline, suggestions, clarification, operations, thinking };
   };
 
   if (/\bpublish\b/i.test(opts.prompt)) {
@@ -1260,6 +1383,17 @@ export async function copilotChat(opts: {
     });
   }
 
+  // ── LLM-powered conversational fallback ──────────────────────────────
+  // When no workflow-modification pattern matched above, detect general
+  // questions and use the LLM to answer them with full workflow context.
+  const isConversational = isConversationalQuestion(opts.prompt, snapshot);
+  if (isConversational) {
+    const llmReply = await answerWithLlm(opts.prompt, opts.graph, snapshot, opts.history);
+    if (llmReply) {
+      return finish({ reply: stripThinking(llmReply), source: "copilot-llm", chapter: "explain" });
+    }
+  }
+
   const turn = orchestrateCopilot({
     prompt: opts.prompt,
     graph: opts.graph,
@@ -1310,4 +1444,96 @@ export async function copilotChat(opts: {
     source: "copilot-orchestrator",
     chapter: turn.chapter
   });
+}
+
+// ── System Planner (Level 1) ───────────────────────────────────────────────
+// Decomposes user intent into products, capabilities, entry surface,
+// and resource graph — like Zapier's product-level reasoning.
+
+const PRODUCT_HINTS: Array<{ re: RegExp; product: string }> = [
+  { re: /\b(form|submission|intake|capture form|web form)\b/i, product: "form" },
+  { re: /\b(table|database|crm|sheet|spreadsheet|row|record|store)\b/i, product: "table" },
+  { re: /\b(automat|workflow|zap|pipeline|flow|process)\b/i, product: "workflow" },
+  { re: /\b(agent|ai agent|autonomous|tool.?call|reason)\b/i, product: "agent" },
+  { re: /\b(chatbot|chat bot|assistant|support bot|qa bot)\b/i, product: "chatbot" },
+  { re: /\b(dashboard|interface|view|ui|portal|app)\b/i, product: "interface" },
+];
+
+const CAPABILITY_HINTS: Array<{ re: RegExp; cap: string; product: string }> = [
+  { re: /\b(form|submit|submission|intake|capture|collect|sign.?up|register|webhook|catch hook|collected|captures?)\b/i, cap: "collect", product: "form" },
+  { re: /\b(store|save|record|database|table|crm|sheet|spreadsheet|row|log|add to|put in|stored|saving?)\b/i, cap: "store", product: "table" },
+  { re: /\b(when|whenever|on new|every time|trigger|start|each time)\b/i, cap: "trigger", product: "workflow" },
+  { re: /\b(ai|classify|analyze|summar|score|extract|parse|transform|enrich|qualif|identify|determine|qualified?|scoring?)\b/i, cap: "transform", product: "workflow" },
+  { re: /\b(if|else|condition|branch|route|path|filter|hot|warm|cold|scored?|only when|unless|depending on)\b/i, cap: "decide", product: "workflow" },
+  { re: /\b(send to|route to|forward|assign|distribute|escalat|routed?|sent to|sales)\b/i, cap: "route", product: "workflow" },
+  { re: /\b(notif|alert|messag|slack|email|sms|whatsapp|telegram|discord|tell|inform|let know|remind|notified?)\b/i, cap: "notify", product: "workflow" },
+  { re: /\b(search|find|lookup|check.*exist|check.*already)\b/i, cap: "search", product: "table" },
+  { re: /\b(enrich|augment|score|rank|prioritiz|lead score)\b/i, cap: "enrich", product: "workflow" },
+  { re: /\b(approve|confirm|review|human|approval|ask me)\b/i, cap: "approve", product: "workflow" },
+];
+
+const CONNECTION_HINTS: Array<{ re: RegExp; slug: string }> = [
+  { re: /\b(slack)\b/i, slug: "slack" },
+  { re: /\b(gmail|email)\b/i, slug: "gmail" },
+  { re: /\b(google sheet|sheets?|spreadsheet)\b/i, slug: "google-sheets" },
+  { re: /\b(google calendar|calendar)\b/i, slug: "google-calendar" },
+  { re: /\b(hubspot|crm)\b/i, slug: "hubspot" },
+  { re: /\b(salesforce)\b/i, slug: "salesforce" },
+  { re: /\b(notion)\b/i, slug: "notion" },
+  { re: /\b(github)\b/i, slug: "github" },
+  { re: /\b(stripe|payment)\b/i, slug: "stripe" },
+  { re: /\b(whatsapp)\b/i, slug: "whatsapp" },
+];
+
+export function planSystem(prompt: string) {
+  const caps = CAPABILITY_HINTS.filter((h) => h.re.test(prompt));
+  const products = [...new Set(PRODUCT_HINTS.filter((h) => h.re.test(prompt)).map((h) => h.product))];
+  const connections = [...new Set(CONNECTION_HINTS.filter((h) => h.re.test(prompt)).map((h) => h.slug))];
+
+  // Ensure products cover capability needs
+  for (const c of caps) {
+    if (!products.includes(c.product)) products.push(c.product);
+  }
+  if (!products.includes("workflow")) products.push("workflow");
+
+  const capList = caps.map((c, i) => ({ type: c.cap, description: c.cap, product: c.product, app_hint: null as string | null, order: i, depends_on: [] as number[] }));
+  const resourceGraph = capList.map((c, i) => ({ index: i, product: c.product, capability: c.type, description: c.description, app_hint: c.app_hint, depends_on: c.depends_on }));
+
+  // Entry surface
+  const productSet = new Set(products);
+  let entrySurface = "flow_builder";
+  if (productSet.size >= 3) entrySurface = "canvas";
+  else if (productSet.has("form") && productSet.has("table") && productSet.size === 2) entrySurface = "form_builder";
+  else if (productSet.has("chatbot")) entrySurface = "chatbot_builder";
+  else if (productSet.has("agent") && !productSet.has("workflow")) entrySurface = "agent_builder";
+  else if (capList.length >= 4) entrySurface = "canvas";
+
+  const primary = productSet.has("workflow") ? "workflow" : products[0] || "workflow";
+  const summaryParts: string[] = [];
+  if (productSet.has("form")) summaryParts.push("Form for data collection");
+  if (productSet.has("table")) summaryParts.push("Table for storage");
+  if (productSet.has("workflow")) summaryParts.push("Workflow for automation");
+  if (productSet.has("agent")) summaryParts.push("AI Agent for reasoning");
+  if (productSet.has("chatbot")) summaryParts.push("Chatbot for user interaction");
+
+  return {
+    goal: prompt.slice(0, 200),
+    summary: summaryParts.join(" + ") || "Automation workflow",
+    capabilities: capList,
+    products_used: products,
+    entry_surface: entrySurface,
+    primary_product: primary,
+    resource_graph: resourceGraph,
+    needs_connections: connections,
+    confidence: Math.min(0.9, 0.5 + capList.length * 0.08),
+    reasoning: `Detected ${capList.length} capabilities across ${products.length} products`,
+    is_single_product: productSet.size <= 1 && capList.length <= 2,
+    recommended_actions: [
+      ...(productSet.has("form") ? ["Create a form to collect data"] : []),
+      ...(productSet.has("table") ? ["Create a table to store records"] : []),
+      ...(productSet.has("workflow") ? ["Create an automation workflow"] : []),
+      ...(productSet.has("agent") ? ["Create an AI agent for intelligent processing"] : []),
+      ...(connections.length ? [`Connect to: ${connections.join(", ")}`] : []),
+    ],
+  };
 }

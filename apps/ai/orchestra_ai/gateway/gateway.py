@@ -28,6 +28,8 @@ from tenacity import (
 from orchestra_ai.gateway.providers import (
     ByoKey,
     JsonSchema,
+    LocalOpenAICompatibleAdapter,
+    GeminiAdapter,
     ProviderAdapter,
     ProviderError,
     ProviderName,
@@ -87,6 +89,8 @@ PRICE_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4.1": (Decimal("2.00"), Decimal("8.00")),
     "gpt-4.1-mini": (Decimal("0.40"), Decimal("1.60")),
     "claude-sonnet-4-5": (Decimal("3.00"), Decimal("15.00")),
+    "gemini-3.7-flash": (Decimal("0.075"), Decimal("0.30")),
+    "gemini-3.1-pro": (Decimal("1.25"), Decimal("5.00")),
     "text-embedding-3-small": (Decimal("0.02"), Decimal("0.00")),
 }
 
@@ -264,8 +268,13 @@ class ModelGateway:
         profile = select_model(task, **kwargs)
         if profile is None:
             return None
-        # Map provider name to our provider enum
-        provider_map = {"openai": "openai", "anthropic": "anthropic", "google": "anthropic"}  # fallback google→anthropic
+        # Map provider name to our provider enum — google is now a real provider
+        provider_map: dict[str, ProviderName] = {
+            "openai": "openai",
+            "anthropic": "anthropic",
+            "google": "google",
+            "local": "local",
+        }
         provider = provider_map.get(profile.provider, "openai")
         return ModelRoute(
             provider=provider,
@@ -581,10 +590,14 @@ def provider_status() -> dict[str, Any]:
     settings = get_settings()
     openai = live_secret(settings.openai_api_key) is not None
     anthropic = live_secret(settings.anthropic_api_key) is not None
+    gemini = live_secret(settings.gemini_api_key) is not None
+    local_url = settings.local_base_url
     return {
         "openai": openai,
         "anthropic": anthropic,
-        "mode": "live" if (openai or anthropic) else "heuristic",
+        "gemini": gemini,
+        "local": bool(local_url),
+        "mode": "live" if (openai or anthropic or gemini) else "local" if local_url else "heuristic",
     }
 
 
@@ -627,12 +640,19 @@ def get_gateway() -> "ModelGateway":
         providers: dict[str, ProviderAdapter] = {}
         openai_key = live_secret(_settings.openai_api_key)
         anthropic_key = live_secret(_settings.anthropic_api_key)
+        gemini_key = live_secret(_settings.gemini_api_key)
         if openai_key:
             providers["openai"] = OpenAIAdapter(_http, openai_key, _settings.openai_base_url)
         if anthropic_key:
             providers["anthropic"] = AnthropicAdapter(_http, anthropic_key, _settings.anthropic_base_url)
+        if gemini_key:
+            providers["google"] = GeminiAdapter(_http, gemini_key, _settings.gemini_base_url)
+        # Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, LocalAI)
+        providers["local"] = LocalOpenAICompatibleAdapter(
+            _http, _settings.local_api_key, _settings.local_base_url,
+        )
 
-        if not providers:
+        if not (providers.get("openai") or providers.get("anthropic") or providers.get("google")):
             class DevProvider(ProviderAdapter):
                 """Returns mock structured responses for development without API keys."""
                 async def complete(self, **kwargs):

@@ -40,6 +40,8 @@ router.get("/health", async (_req, res) => {
       mode: ai.mode,
       openaiConfigured: ai.openaiConfigured,
       anthropicConfigured: ai.anthropicConfigured,
+      geminiConfigured: ai.geminiConfigured,
+      localConfigured: ai.localConfigured,
     },
   });
 });
@@ -864,6 +866,51 @@ authed.post("/copilot/sessions/:id/refine", async (req, res) => {
   res.json(result);
 });
 
+// POST /copilot/sessions/:id/stream-chat — SSE streaming chat with live operation cards
+authed.post("/copilot/sessions/:id/stream-chat", async (req, res) => {
+  const body = z
+    .object({
+      prompt: z.string().min(1),
+      graph: z.unknown().optional(),
+      flowId: z.string().uuid().nullable().optional(),
+      mode: z.string().optional(),
+      selectedStepId: z.string().nullable().optional(),
+      lastTest: z.object({ ok: z.boolean().optional(), body: z.unknown().optional(), ms: z.number().optional() }).nullable().optional(),
+    })
+    .parse(req.body);
+  const prompt = body.prompt;
+
+  const session = await queryOne<{ id: string }>(
+    `SELECT id FROM copilot_sessions WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
+  if (!session) return res.status(404).json({ error: "not_found" });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const { streamCopilotChat } = await import("./copilot/copilot-http");
+  try {
+    await streamCopilotChat({
+      req,
+      res,
+      sessionId: session.id,
+      orgId: req.orgId!,
+      prompt,
+      graph: body.graph,
+      flowId: body.flowId ?? undefined,
+      mode: body.mode,
+      selectedStepId: body.selectedStepId ?? undefined,
+      lastTest: body.lastTest ?? null,
+    });
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ type: "error", message: err instanceof Error ? err.message : "Stream error" })}\n\n`);
+  }
+  res.end();
+});
+
 // POST /copilot/sessions/:id/answer — ask_as_you_build answers (Node)
 authed.post("/copilot/sessions/:id/answer", async (req, res) => {
   const body = z
@@ -1307,6 +1354,31 @@ authed.post("/copilot/context", async (req, res) => {
     if (flow) workflowData = { ...flow, graph: loadBuilderGraph(flow.draft_definition) };
   }
 
+  // ── Tables (data tables + forms stored in data_tables) ──
+  const tables = await query(
+    `SELECT id, name, slug, schema_json FROM data_tables WHERE org_id = $1 ORDER BY created_at DESC LIMIT 30`,
+    [req.orgId],
+  );
+  const forms = tables.filter((t: any) => t.name?.startsWith("form:")).map((t: any) => ({
+    id: t.id, name: t.name.replace("form:", ""), schema: t.schema_json,
+  }));
+  const dataTables = tables.filter((t: any) => !t.name?.startsWith("form:")).map((t: any) => ({
+    id: t.id, name: t.name, slug: t.slug, columns: t.schema_json?.columns ?? [],
+  }));
+
+  // ── Agents ──
+  const agents = await query(
+    `SELECT id, name, status, config FROM agents WHERE org_id = $1 ORDER BY created_at DESC LIMIT 20`,
+    [req.orgId],
+  ).catch(() => []);
+
+  // ── Execution History (last 10 runs with step-level detail) ──
+  const executionHistory = await query(
+    `SELECT id, status, flow_name, created_at, finished_at, error
+     FROM flow_runs WHERE org_id = $1 ORDER BY created_at DESC LIMIT 10`,
+    [req.orgId],
+  );
+
   res.json({
     workspace: {
       id: req.orgId,
@@ -1318,6 +1390,10 @@ authed.post("/copilot/context", async (req, res) => {
       id: c.id, name: c.name, app_slug: c.app_slug, status: c.status,
     })),
     recentRuns: recentRuns,
+    tables: dataTables,
+    forms,
+    agents: agents.map((a: any) => ({ id: a.id, name: a.name, status: a.status })),
+    executionHistory,
     catalog: {
       totalApps: catalogApps.length,
       totalOperations: catalogApps.reduce((sum, a) => sum + (a.operations?.length ?? 0), 0),
@@ -1327,6 +1403,34 @@ authed.post("/copilot/context", async (req, res) => {
     selectedNodeId: body.selectedNodeId,
     page: body.page,
   });
+});
+
+// POST /copilot/system-plan — Level 1 planning: decompose intent into products + capabilities
+authed.post("/copilot/system-plan", async (req, res) => {
+  const body = z.object({ prompt: z.string().min(1) }).parse(req.body);
+
+  // Try Python AI service first for intelligent system planning
+  const ai = await probeAiService();
+  if (ai.reachable) {
+    try {
+      const plan = await signedAiJson<{
+        goal: string; summary: string; products_used: string[];
+        entry_surface: string; primary_product: string; confidence: number;
+        capabilities: Array<{ type: string; description: string; product: string; app_hint?: string }>;
+        resource_graph: Array<{ index: number; product: string; capability: string; description: string; app_hint?: string; depends_on: number[] }>;
+        needs_connections: string[]; recommended_actions: string[]; is_single_product: boolean;
+      }>("/copilot/system-plan", { prompt: body.prompt }, req.orgId!);
+      if (plan) {
+        res.json(plan);
+        return;
+      }
+    } catch { /* fall through to local */ }
+  }
+
+  // Local heuristic fallback
+  const { planSystem } = await import("./copilot/copilot");
+  const plan = planSystem(body.prompt);
+  res.json(plan);
 });
 
 authed.post("/copilot/generate", async (req, res) => {

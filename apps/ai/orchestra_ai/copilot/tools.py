@@ -26,6 +26,51 @@ class CopilotTool(BaseModel):
 # ── Tool Definitions ─────────────────────────────────────────────────────
 
 COPILOT_TOOLS: list[CopilotTool] = [
+    # ── Table operations ──
+    CopilotTool(
+        name="query_table",
+        description="Query a data table by name or ID. Returns rows matching the query. Use this when the user asks about their data (leads, customers, orders, etc.).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "table_name": {"type": "string", "description": "Table name or ID"},
+                "query": {"type": "string", "description": "Natural language query or SQL-like filter"},
+                "limit": {"type": "integer", "description": "Max rows to return (default 10)"},
+            },
+            "required": ["table_name"],
+        },
+    ),
+    CopilotTool(
+        name="list_tables",
+        description="List all data tables in the workspace with their schemas. Use to discover what data is available.",
+        parameters={"type": "object", "properties": {}},
+    ),
+    # ── Form operations ──
+    CopilotTool(
+        name="get_form_schema",
+        description="Get the schema/fields of a form. Use to understand what data a form collects.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "form_name": {"type": "string", "description": "Form name or ID"},
+            },
+            "required": ["form_name"],
+        },
+    ),
+    # ── Execution history ──
+    CopilotTool(
+        name="get_execution_history",
+        description="Get recent workflow execution history. Use to diagnose failures, find patterns, or answer questions about past runs.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "flow_id": {"type": "string", "description": "Filter by workflow ID"},
+                "status": {"type": "string", "enum": ["success", "failed", "running"], "description": "Filter by status"},
+                "limit": {"type": "integer", "description": "Max runs to return (default 10)"},
+            },
+        },
+    ),
+    # ── Existing tools ──
     CopilotTool(
         name="search_apps",
         description="Search the integration catalog for apps matching a query. Returns app slugs, names, and operation counts.",
@@ -209,6 +254,45 @@ async def execute_copilot_tool(
                 return {"run_id": run_id, "status": "unknown"}
         except Exception as e:
             return {"error": str(e)}
+
+    elif tool_name == "query_table":
+        table_name = args.get("table_name", "")
+        query_text = args.get("query", "")
+        limit = args.get("limit", 10)
+        try:
+            if node_client:
+                results = await node_client.query_table(table_name, query_text, limit)
+                return {"table": table_name, "rows": results, "count": len(results)}
+        except Exception as e:
+            return {"error": str(e), "rows": []}
+
+    elif tool_name == "list_tables":
+        try:
+            if node_client:
+                results = await node_client.list_tables()
+                return {"tables": results, "count": len(results)}
+        except Exception as e:
+            return {"error": str(e), "tables": []}
+
+    elif tool_name == "get_form_schema":
+        form_name = args.get("form_name", "")
+        try:
+            if node_client:
+                result = await node_client.get_form_schema(form_name)
+                return {"form": form_name, "schema": result}
+        except Exception as e:
+            return {"error": str(e)}
+
+    elif tool_name == "get_execution_history":
+        flow_id = args.get("flow_id")
+        status = args.get("status")
+        limit = args.get("limit", 10)
+        try:
+            if node_client:
+                results = await node_client.get_execution_history(flow_id, status, limit)
+                return {"runs": results, "count": len(results)}
+        except Exception as e:
+            return {"error": str(e), "runs": []}
 
     elif tool_name == "search_templates":
         return {"templates": [], "count": 0}

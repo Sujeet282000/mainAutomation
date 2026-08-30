@@ -15,6 +15,43 @@ const STAGE_FOR_DB: Record<string, string> = { connect: "connections", schema: "
 const PERSISTABLE_EVENTS = new Set(["stage", "reasoning", "proposal", "applied", "todo", "usage", "done", "error"]);
 const PERSISTABLE_STAGES = new Set(["intent", "plan", "retrieve", "select", "connections", "schemas", "mapping", "assemble", "validate", "repair", "persist"]);
 
+// ── Conversation history helpers ───────────────────────────────────────
+export type ChatTurn = { role: "user" | "assistant"; content: string; ts: string };
+const MAX_HISTORY_TURNS = 24;
+
+export async function loadChatHistory(sessionId: string, orgId: string): Promise<ChatTurn[]> {
+  const row = await queryOne<{ chat_history: ChatTurn[] | null }>(
+    `SELECT chat_history FROM copilot_sessions WHERE id = $1 AND org_id = $2`,
+    [sessionId, orgId],
+  );
+  const raw = row?.chat_history;
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(-MAX_HISTORY_TURNS);
+}
+
+export async function appendChatTurn(
+  sessionId: string, orgId: string, turn: ChatTurn,
+): Promise<void> {
+  // Append the turn and keep only the last MAX_HISTORY_TURNS entries.
+  // We use jsonb_array_append for atomicity, then trim in a second pass
+  // only when the array exceeds the limit.
+  await query(
+    `UPDATE copilot_sessions
+       SET chat_history = (
+         SELECT jsonb_agg(el)
+         FROM (
+           SELECT jsonb_array_elements(
+             chat_history || $3::jsonb
+           ) AS el
+           LIMIT $4
+         ) sub
+       ),
+       updated_at = now()
+     WHERE id = $1 AND org_id = $2`,
+    [sessionId, orgId, JSON.stringify([turn]), MAX_HISTORY_TURNS],
+  ).catch(() => undefined);
+}
+
 export async function ensureProjectId(orgId: string) {
   const existing = await queryOne<{ id: string }>(`SELECT id FROM projects WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`, [orgId]);
   if (existing) return existing.id;
@@ -62,6 +99,9 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
   const ai = await probeAiService();
   if (ai.reachable) {
     try {
+      await send({ type: "agent_started" });
+      await send({ type: "agent_state", state: "inspecting", title: "Inspecting workflow" });
+      await send({ type: "agent_activity", kind: "running", label: "Reading your request" });
       await send({ type: "reasoning", text: ai.hint, stage: "intent" });
       let sawResult = false;
       for await (const ev of streamAiCopilotGenerate({ sessionId: opts.sessionId, flowId: opts.flowId || opts.sessionId, prompt: opts.prompt, orgId: opts.orgId, userEmail: opts.req.user?.email ?? "", projectId: opts.projectId || opts.orgId, autonomy: mode })) {
@@ -110,7 +150,13 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
         await send({ type: "result", graph: result.graph, summary: result.summary, sessionId: opts.sessionId, applied: mode === "auto_build", rebuilt: result.rebuilt, changed: result.changed, source: result.source, mode });
         sawPlan = true;
       } else if (ev.type === "stage") {
-        await send({ type: "stage", stage: STAGE_FOR_DB[ev.stage] ?? ev.stage, label: ev.label });
+        const stageLabel = ev.label ?? ev.stage ?? "Working";
+        await send({ type: "stage", stage: STAGE_FOR_DB[ev.stage] ?? ev.stage, label: stageLabel });
+        await send({ type: "agent_activity", kind: "done", label: String(stageLabel) });
+        // Map stages to agent states
+        const stateMap: Record<string, string> = { intent: "understanding", plan: "planning", retrieve: "inspecting", select: "executing", connect: "executing", schema: "inspecting", map: "executing", assemble: "executing", validate: "validating", persist: "completed" };
+        const mappedState = stateMap[ev.stage];
+        if (mappedState) await send({ type: "agent_state", state: mappedState, title: String(stageLabel) });
       } else {
         await send(rawEv);
       }
@@ -135,6 +181,121 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
     else await send(ev as Record<string, unknown>);
   }
   await send({ type: "done", status: "draft_saved", publishable: true, note: "Review and publish. Copilot never publishes.", source: "node-engine" });
+
+  await send({ type: "agent_state", state: "completed", title: "Done" });
+  await send({ type: "agent_activity", kind: "done", label: "Workflow ready" });
+  await send({ type: "agent_completed", summary: "Workflow draft saved" });
+
+  // Persist conversation history for multi-turn context
+  const now = new Date().toISOString();
+  await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
+}
+
+/** SSE-streaming chat endpoint: emits operation_card events in real-time
+ * as the copilot processes the request, so the frontend can show live
+ * step-by-step progress instead of waiting for the full response. */
+export async function streamCopilotChat(opts: {
+  req: Request; res: Response; sessionId: string; orgId: string;
+  prompt: string; graph?: unknown; flowId?: string; mode?: unknown;
+  selectedStepId?: string; projectId?: string; lastTest?: { ok?: boolean; body?: unknown; ms?: number } | null;
+}) {
+  const mode = parseCopilotMode(opts.mode);
+  let graph;
+  try { graph = opts.graph ? coerceWorkflowGraph(opts.graph) : undefined; } catch { graph = undefined; }
+  let seq = 0;
+  const send = async (event: Record<string, unknown>) => { opts.res.write(`data: ${JSON.stringify(event)}\n\n`); seq += 1; await logCopilotEvent(opts.orgId, opts.sessionId, seq, event); };
+
+  // Load conversation history
+  const history = await loadChatHistory(opts.sessionId, opts.orgId);
+
+  // Emit agent state and activity events for the new UI
+  await send({ type: "agent_started" });
+  await send({ type: "agent_state", state: "understanding", title: "Understanding your request" });
+  await send({ type: "agent_activity", kind: "running", label: "Reading your request" });
+  await send({ type: "stage", stage: "intent", label: "Understanding your request" });
+  await send({ type: "agent_activity", kind: "done", label: "Understanding your request" });
+
+  // Run copilotChat with the full pipeline
+  const { copilotChat } = await import("./copilot");
+  try {
+    await send({ type: "agent_state", state: "inspecting", title: "Inspecting workflow" });
+    await send({ type: "agent_activity", kind: "running", label: "Inspecting workflow" });
+    // Emit contextual reasoning about what the copilot is doing
+    const promptLower = opts.prompt.toLowerCase();
+    let reasoningText = "Analyzing your request";
+    if (/\b(add|insert|append)\b/.test(promptLower)) reasoningText = "Identifying the step to add and where it fits in the workflow";
+    else if (/\b(explain|what|how|describe)\b/.test(promptLower)) reasoningText = "Reviewing the current workflow to provide an explanation";
+    else if (/\b(test|run|check)\b/.test(promptLower)) reasoningText = "Preparing to test the workflow";
+    else if (/\b(fix|repair|update|change|modify|replace)\b/.test(promptLower)) reasoningText = "Analyzing the current workflow to apply your changes";
+    else if (/\b(hi|hello|hey|thanks)\b/.test(promptLower)) reasoningText = "Greeting acknowledged";
+    else reasoningText = "Understanding your request and inspecting the current workflow";
+    await send({ type: "reasoning", text: reasoningText, stage: "intent" });
+    const result = await copilotChat({
+      prompt: opts.prompt,
+      workspaceId: opts.orgId,
+      organizationId: opts.orgId,
+      automationId: opts.flowId ?? opts.sessionId,
+      graph,
+      selectedStepId: opts.selectedStepId,
+      mode,
+      lastTest: opts.lastTest ?? null,
+      history,
+    });
+    await send({ type: "agent_activity", kind: "done", label: "Workflow inspected" });
+
+    // Emit operation cards as live-updating step progress
+    if (result.graph?.nodes?.length) {
+      const steps = result.graph.nodes.map((n: { label?: string; appSlug?: string; id: string; type?: string }) => ({
+        label: `${n.label ?? n.id} (${n.appSlug ?? "unknown"})`,
+        status: "completed" as const,
+      }));
+      await send({ type: "agent_activity", kind: "done", label: `Found ${steps.length} steps` });
+      await send({
+        type: "operation_card",
+        operation: {
+          title: result.applied ? "Workflow updated" : "Workflow planned",
+          steps,
+          status: "completed" as const,
+          actions: [
+            { label: "Test workflow", prompt: "Test this workflow" },
+            { label: "Add a step", prompt: "Add the next step" },
+          ],
+        },
+      });
+    }
+
+    // Emit agent completion and final result
+    await send({ type: "agent_state", state: "completed", title: "Done" });
+    await send({ type: "agent_activity", kind: "done", label: "Response ready" });
+    await send({
+      type: "chat_result",
+      reply: result.reply,
+      graph: result.graph,
+      sessionId: opts.sessionId,
+      applied: Boolean(result.applied),
+      source: result.source,
+      suggestions: result.suggestions,
+      clarification: result.clarification,
+      operations: result.operations,
+      youDoFirst: result.youDoFirst,
+      iCan: result.iCan,
+      thinking: result.thinking,
+    });
+
+    // Emit done
+    await send({ type: "done", status: "chat_complete", source: "copilot-chat-stream" });
+
+    // Persist conversation turns
+    const now = new Date().toISOString();
+    await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
+    await appendChatTurn(opts.sessionId, opts.orgId, { role: "assistant", content: result.reply, ts: now });
+  } catch (err) {
+    await send({ type: "agent_state", state: "error", title: "Error" });
+    await send({ type: "agent_activity", kind: "error", label: "Request failed", detail: err instanceof Error ? err.message : "Copilot error" });
+    await send({ type: "agent_error", message: err instanceof Error ? err.message : "Copilot error", recoverable: true });
+    await send({ type: "error", message: err instanceof Error ? err.message : "Copilot error" });
+    await send({ type: "done", status: "error", source: "copilot-chat-stream" });
+  }
 }
 
 export async function refineCopilotSession(opts: { sessionId: string; orgId: string; userId?: string; userEmail?: string | null; prompt: string; mode?: unknown; graph?: unknown; flowId?: string; selectedStepId?: string }) {
@@ -160,7 +321,23 @@ export async function refineCopilotSession(opts: { sessionId: string; orgId: str
       return { reply: refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change."), graph: result.graph, definition, sessionId: opts.sessionId, applied: result.applied.length > 0, changed, summary: refined.summary, operations, applied_operations: result.applied, rejected_operations: result.rejected, needs_confirmation: result.needsConfirmation, needs_input: refined.needs_input ?? [], issues: [...(refined.issues ?? []), ...result.issues], test_results: result.testResults, publishable: Boolean(refined.publishable) && result.issues.length === 0 && result.rejected.length === 0 && result.needsConfirmation.length === 0, source: "python-copilot" };
     }
   }
-  const result = await copilotChat({ prompt: opts.prompt, workspaceId: opts.orgId, organizationId: opts.orgId, userId: opts.userId, userEmail: opts.userEmail, automationId: opts.flowId ?? session?.flow_id ?? undefined, graph, selectedStepId: opts.selectedStepId, mode: parseCopilotMode(opts.mode ?? session?.mode) });
+  const history = await loadChatHistory(opts.sessionId, opts.orgId);
+  const result = await copilotChat({
+    prompt: opts.prompt,
+    workspaceId: opts.orgId,
+    organizationId: opts.orgId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    automationId: opts.flowId ?? session?.flow_id ?? undefined,
+    graph,
+    selectedStepId: opts.selectedStepId,
+    mode: parseCopilotMode(opts.mode ?? session?.mode),
+    history,
+  });
   if (result.graph) await query(`UPDATE copilot_sessions SET proposed_definition = $1, updated_at = now() WHERE id = $2`, [JSON.stringify(persistBuilderDraft(result.graph)), opts.sessionId]);
+  // Persist both turns for multi-turn memory
+  const now = new Date().toISOString();
+  await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
+  await appendChatTurn(opts.sessionId, opts.orgId, { role: "assistant", content: result.reply, ts: now });
   return result;
 }

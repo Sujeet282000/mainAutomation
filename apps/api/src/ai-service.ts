@@ -6,7 +6,9 @@ export type AiPlaneStatus = {
   mode: "live" | "heuristic" | "down";
   openaiConfigured: boolean;
   anthropicConfigured: boolean;
-  pythonProviders?: { openai?: boolean; anthropic?: boolean; mode?: string };
+  geminiConfigured: boolean;
+  localConfigured: boolean;
+  pythonProviders?: { openai?: boolean; anthropic?: boolean; gemini?: boolean; mode?: string };
   hint: string;
 };
 
@@ -17,7 +19,9 @@ function compactJson(value: unknown) {
 export function providerHints() {
   const openai = Boolean(env.openai) && /^sk-(?!ant)/.test(env.openai) && !/^xox/i.test(env.openai);
   const anthropic = Boolean(env.anthropic) && (env.anthropic.startsWith("sk-ant") || env.anthropic.startsWith("sk-ant-"));
-  return { openaiConfigured: openai, anthropicConfigured: anthropic };
+  const gemini = Boolean(env.gemini);
+  const local = Boolean(env.localLlmUrl);
+  return { openaiConfigured: openai, anthropicConfigured: anthropic, geminiConfigured: gemini, localConfigured: local };
 }
 
 export function signedAiHeaders(method: string, path: string, rawBody: string, orgId: string, requestId: string) {

@@ -840,7 +840,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     try {
       await streamSse(
         "/ai/copilot/generate",
-        { prompt: prompt || copilotPrompt || `Build: ${title}`, automationId, mode: copilotMode, graph: toApi(nodes, edges), selectedStepId: selectedId },
+        { prompt: prompt || copilotPrompt || `Build: ${title}`, automationId, mode: copilotMode, graph: toApi(nodes, edges), selectedStepId: selectedId ?? undefined },
         (ev) => {
           if (ev.type === "stage") {
             setCopilotStages((current) => [
@@ -1116,7 +1116,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                   plan: "free",
                   automationId,
                   mode: copilotMode,
-                  selectedStepId: selectedId,
+                  selectedStepId: selectedId ?? undefined,
                   lastTest: testResultRef.current
                 })
               });
@@ -1154,6 +1154,34 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               suggestions: d.suggestions as Array<{ label: string; prompt: string; icon?: "zap" | "check" | "arrow" | "pencil" | "alert" }> | undefined,
               clarification: d.clarification,
               operations: d.operations as Array<{ title: string; steps: Array<{ label: string; status: "pending" | "running" | "completed" | "failed" | "skipped"; detail?: string }>; status: "running" | "completed" | "failed"; actions?: Array<{ label: string; prompt: string }> }> | undefined,
+            };
+          }}
+          streamChat={async (prompt, onEvent, signal) => {
+            const { streamCopilotChat } = await import("@/lib/copilot");
+            const session = await api<{ sessionId: string }>("/copilot/sessions", {
+              method: "POST",
+              body: JSON.stringify({ prompt, flowId: automationId, mode: copilotMode }),
+            });
+            let finalResult: any = { reply: "" };
+            await streamCopilotChat(
+              { sessionId: session.sessionId, prompt, graph: toApi(nodes, edges), flowId: automationId, mode: copilotMode, selectedStepId: selectedId ?? undefined, lastTest: testResultRef.current },
+              (ev) => {
+                if (ev.type === "chat_result") {
+                  finalResult = ev;
+                }
+                onEvent(ev);
+              },
+              signal,
+            );
+            return {
+              reply: finalResult.reply ?? "",
+              graph: finalResult.graph,
+              sessionId: finalResult.sessionId ?? session.sessionId,
+              applied: finalResult.applied,
+              suggestions: finalResult.suggestions,
+              clarification: finalResult.clarification,
+              operations: finalResult.operations,
+              systemPlan: finalResult.systemPlan,
             };
           }}
         />
@@ -1864,7 +1892,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                       plan: "free",
                       automationId,
                       mode: copilotMode,
-                      selectedStepId: selectedId,
+                      selectedStepId: selectedId ?? undefined,
                       lastTest: testResultRef.current
                     })
                   });
@@ -1943,6 +1971,33 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               }}
               incomingPrompt={injectPrompt}
               onIncomingPromptHandled={() => setInjectPrompt(null)}
+              streamChat={async (prompt, onEvent, signal) => {
+                const { streamCopilotChat } = await import("@/lib/copilot");
+                const session = await api<{ sessionId: string }>("/copilot/sessions", {
+                  method: "POST",
+                  body: JSON.stringify({ prompt, flowId: automationId, mode: copilotMode }),
+                });
+                let finalResult: any = { reply: "" };
+                await streamCopilotChat(
+                  { sessionId: session.sessionId, prompt, graph: toApi(nodes, edges), flowId: automationId, mode: copilotMode, selectedStepId: selectedId ?? undefined, lastTest: testResultRef.current },
+                  (ev) => {
+                    if (ev.type === "chat_result") finalResult = ev;
+                    onEvent(ev);
+                  },
+                  signal,
+                );
+                return {
+                  reply: finalResult.reply ?? "",
+                  graph: finalResult.graph,
+                  sessionId: finalResult.sessionId ?? session.sessionId,
+                  applied: finalResult.applied,
+                  suggestions: finalResult.suggestions,
+                  clarification: finalResult.clarification,
+                  operations: finalResult.operations,
+                  systemPlan: finalResult.systemPlan,
+                  thinking: finalResult.thinking,
+                };
+              }}
             />
           </div>
         </div>

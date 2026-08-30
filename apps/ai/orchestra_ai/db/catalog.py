@@ -80,6 +80,7 @@ class CatalogRepository:
         operation_id: str,
         card: dict[str, Any],
         vector: list[float],
+        model: str = "text-embedding-3-small",
     ) -> None:
         """Upsert an embedding for a catalog operation."""
         response = await self._client.post(
@@ -88,7 +89,7 @@ class CatalogRepository:
             json={
                 "p_operation_id": operation_id,
                 "p_content_hash": content_hash(card),
-                "p_embedding_model": "text-embedding-3-small",
+                "p_embedding_model": model,
                 "p_embedding_text_version": EMBEDDING_TEXT_VERSION,
                 "p_embedding": vector,
                 "p_search_text": operation_embedding_text(card),

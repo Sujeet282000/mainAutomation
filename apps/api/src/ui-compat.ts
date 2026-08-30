@@ -540,7 +540,9 @@ export function registerUiCompat(authed: Router) {
       }
     }
 
-    // Local heuristic fallback
+    // Local heuristic fallback (with conversation history)
+    const { loadChatHistory, appendChatTurn } = await import("./copilot/copilot-http");
+    const history = body.automationId ? await loadChatHistory(body.automationId, req.orgId!) : [];
     const result = await copilotChat({
       prompt: body.prompt,
       workspaceId: req.orgId,
@@ -552,7 +554,14 @@ export function registerUiCompat(authed: Router) {
       selectedStepId: body.selectedStepId,
       mode: parseCopilotMode(body.mode),
       lastTest: body.lastTest ?? null,
+      history,
     });
+    // Persist turns for multi-turn memory
+    if (body.automationId) {
+      const now = new Date().toISOString();
+      await appendChatTurn(body.automationId, req.orgId!, { role: "user", content: body.prompt, ts: now });
+      await appendChatTurn(body.automationId, req.orgId!, { role: "assistant", content: result.reply, ts: now });
+    }
     res.json(result);
   });
 

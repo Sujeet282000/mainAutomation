@@ -126,7 +126,20 @@ SAFETY AND CONFIRMATION:
 27. Ordinary graph construction can remain unconfirmed in auto-build mode.
 28. Mark destructive or high-impact external actions/tests requires_confirmation=true when authorization is not explicit.
 29. Never claim an action was tested successfully unless an actual execution result is supplied in context.
-30. Never expose chain-of-thought. `plan`, `message` and `risks` are concise user-safe summaries only.
+30. CRITICAL — CHAIN-OF-THOUGHT IS STRICTLY FORBIDDEN:
+    The `message` field MUST NEVER contain internal reasoning, analysis steps, deliberation, or thinking-out-loud.
+    NEVER write: "Let me analyze...", "I should first...", "Looking at the issues...", "The user might be...", "Wait...", "I need to check...", "Given the context...", numbered internal analysis lists, or any other form of private reasoning.
+    The `message` is displayed DIRECTLY to the user as the final polished response.
+    `plan` and `risks` are also concise user-safe summaries only.
+    CORRECT message examples:
+      - "I see 2 incomplete steps. Step 1 needs a Google Calendar event. Step 2 needs an action."
+      - "I'll add a Slack notification after the CRM step."
+      - "Your workflow is ready. 3 steps configured, 1 needs a connection."
+    WRONG message examples:
+      - "Let me think about what the user is asking..."
+      - "Looking at the current state, I can see that..."
+      - "The user wants me to... so I should..."
+      - Numbered lists of internal analysis steps
 
 DECISION QUALITY:
 31. Prefer deterministic, minimal edits over speculative redesigns.
@@ -134,7 +147,7 @@ DECISION QUALITY:
 33. When confidence is high, do not ask unnecessary confirmation questions; return the useful plan and operations.
 34. When confidence is low because the target cannot be resolved safely, ask one concise clarification instead of guessing.
 35. When no graph change is needed, return an empty operations list.
-36. Keep the user-facing message concise but informative: say what you understood and what will happen, without exposing hidden reasoning.
+36. The user-facing message must sound like a confident, concise assistant — not like an AI thinking aloud. Start with the conclusion, not the analysis.
 
 SUPPORTED OPERATIONS:
 add_node, remove_node, update_node, connect_nodes, disconnect_nodes, configure_node, map_field, validate_workflow, test_action, explain_run.
@@ -145,7 +158,7 @@ Return JSON matching AgentReply exactly."""
 LEGACY_SYSTEM = """You are Orchestra Copilot, a workflow automation agent.
 
 ## Core behavior
-You think before you answer. When the user asks you to build or modify a workflow:
+You respond as a concise, confident workflow assistant. Never expose internal reasoning or chain-of-thought in your response. When the user asks you to build or modify a workflow:
 
 1. CLASSIFY the intent first:
    - BUILD_WORKFLOW: Create a new workflow from scratch
@@ -239,6 +252,10 @@ async def chat(
         ),
         output_model=AgentReply,
     )
+    # Post-process: strip any leaked chain-of-thought from the message
+    stripped = _strip_thinking(result.message)
+    result.message = stripped or result.message  # Fall back to original if stripping removes everything
+    result.plan = [_strip_thinking(p) or p for p in result.plan]
     return result
 
 
@@ -280,3 +297,48 @@ def _build_workflow_summary(workflow: dict[str, Any] | None) -> dict[str, Any]:
         ],
         "edges": edges,
     }
+
+
+def _strip_thinking(text: str) -> str:
+    """Strip leaked chain-of-thought from LLM output."""
+    if not text:
+        return text
+    import re
+    cleaned = text
+    # Remove Thinking... prefix
+    cleaned = re.sub(r'^\s*Thinking\.\.\.\s*', '', cleaned, flags=re.IGNORECASE)
+    # Remove common chain-of-thought openings
+    thinking_starts = [
+        r'^The user is asking me to.*$',
+        r'^The user wants me to.*$',
+        r'^Let me (?:analyze|think|consider|look|check|examine|inspect|understand|review).*$',
+        r'^I should (?:first|start|begin|check|look|analyze).*$',
+        r'^Looking at (?:the|this|what).*$',
+        r'^Given the context.*$',
+        r'^The user might be.*$',
+        r'^I need to (?:first|check|look|see|understand|analyze).*$',
+        r'^Wait\s*[-—,].*$',
+        r'^But wait\s*[-—,].*$',
+    ]
+    lines = cleaned.split('\n')
+    result_lines = []
+    skip_rest = False
+    for line in lines:
+        if skip_rest:
+            # Skip consecutive chain-of-thought lines
+            stripped = line.strip()
+            if not stripped or any(re.match(pat, stripped, re.IGNORECASE | re.MULTILINE) for pat in thinking_starts):
+                continue
+            skip_rest = False
+        matched = False
+        for pat in thinking_starts:
+            if re.match(pat, line.strip(), re.IGNORECASE | re.MULTILINE):
+                matched = True
+                skip_rest = True
+                break
+        if not matched:
+            result_lines.append(line)
+    cleaned = '\n'.join(result_lines)
+    # Collapse multiple blank lines
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()

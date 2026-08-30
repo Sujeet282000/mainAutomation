@@ -24,7 +24,8 @@ from orchestra_ai.settings import get_settings
 async def reindex(gateway: ModelGateway, catalog: CatalogRepository) -> dict:
     """Reindex all piece operations that need fresh embeddings."""
     settings = get_settings()
-    model = "text-embedding-3-small"
+    model = settings.embedding_model
+    provider_name = settings.embedding_provider
 
     # Find operations needing reindex
     cards = await catalog.cards_needing_reindex(model)
@@ -38,8 +39,10 @@ async def reindex(gateway: ModelGateway, catalog: CatalogRepository) -> dict:
             # Generate embedding text
             text = operation_embedding_text(card)
 
-            # Generate embedding via OpenAI adapter
-            provider = gateway._providers["openai"]
+            # Generate embedding via configured provider
+            provider = gateway._providers.get(provider_name) or gateway._providers.get("openai")
+            if not provider:
+                raise RuntimeError(f"No embedding provider available for {provider_name}")
             embeddings = await provider.embed(
                 model=model,
                 texts=[text],
@@ -50,6 +53,7 @@ async def reindex(gateway: ModelGateway, catalog: CatalogRepository) -> dict:
                     operation_id=card["operation_id"],
                     card=card,
                     vector=embeddings[0],
+                    model=model,
                 )
                 reindexed += 1
                 print(f"  ✓ {card['operation_id']}")
@@ -73,8 +77,9 @@ async def main():
         ROUTES,
         UsageRepository,
     )
-    from orchestra_ai.gateway.providers import AnthropicAdapter, OpenAIAdapter
+    from orchestra_ai.gateway.providers import AnthropicAdapter, OpenAIAdapter, GeminiAdapter, LocalOpenAICompatibleAdapter
     from orchestra_ai.db.catalog import CatalogRepository
+    from orchestra_ai.settings import live_secret
 
     timeout = httpx.Timeout(
         connect=settings.connect_timeout_seconds,
@@ -96,7 +101,14 @@ async def main():
             settings.anthropic_api_key.get_secret_value(),
             settings.anthropic_base_url,
         ),
+        "local": LocalOpenAICompatibleAdapter(
+            http_client, settings.local_api_key, settings.local_base_url,
+        ),
     }
+    if live_secret(settings.gemini_api_key):
+        providers["google"] = GeminiAdapter(
+            http_client, settings.gemini_api_key.get_secret_value(), settings.gemini_base_url,
+        )
 
     gateway = ModelGateway(
         providers=providers,

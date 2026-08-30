@@ -36,9 +36,9 @@ def live_secret(value: SecretStr | None) -> str | None:
 class RouteSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="forbid")
 
-    provider: Literal["openai", "anthropic"]
+    provider: Literal["openai", "anthropic", "google", "local"]
     model: str
-    fallback_provider: Literal["openai", "anthropic"] | None = None
+    fallback_provider: Literal["openai", "anthropic", "google", "local"] | None = None
     fallback_model: str | None = None
     temperature: float = Field(ge=0, le=2)
     max_tokens: int = Field(ge=1, le=32_768)
@@ -73,8 +73,14 @@ class Settings(BaseSettings):
     # Provider keys
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
-    openai_base_url: str = "https://api.openai.com/v1"
-    anthropic_base_url: str = "https://api.anthropic.com"
+    gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    anthropic_base_url: str = Field(default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL")
+    gemini_base_url: str = Field(default="https://generativelanguage.googleapis.com", alias="GEMINI_BASE_URL")
+    local_base_url: str = Field(default="http://localhost:11434/v1", alias="LOCAL_LLM_BASE_URL")
+    local_api_key: str = Field(default="ollama", alias="LOCAL_LLM_API_KEY")
+    embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
+    embedding_provider: str = Field(default="openai", alias="EMBEDDING_PROVIDER")
     byo_key_kms_key_id: str = Field(default="dev-kms-key", alias="BYO_KEY_KMS_KEY_ID")
 
     # Supabase

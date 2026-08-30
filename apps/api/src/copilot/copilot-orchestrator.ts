@@ -268,7 +268,7 @@ export function classifyCopilotChapter(
   ) {
     return snapshot.generic ? "rebuild" : "add_step";
   }
-  if (/\b(use|change|switch|replace|set)\b/i.test(text) && /\b(trigger|action|step|instead)\b/i.test(text)) {
+  if (/\b(use|change|switch|replace|set|update|modify|alter)\b/i.test(text) && /\b(trigger|action|step|instead)\b/i.test(text)) {
     return "change_step";
   }
   if (/\b(fix|incomplete|authenticate|connect accounts)\b/i.test(text)) return "autocomplete";

@@ -176,3 +176,102 @@ test("explain last test does not dump a Slack token as OpenAI key JSON", () => {
   assert.match(reply, /Slack token/i);
   assert.doesNotMatch(reply, /Incorrect API key provided/);
 });
+
+// ── Lead automation test scenario: Form → AI → Condition → Sheets → Notification ──
+
+test("Copilot builds a lead automation from a form-to-sheets-and-slack prompt", async () => {
+  // The copilot's heuristic engine maps apps by keyword matching.
+  // A prompt mentioning "form", "sheets", "slack" should build a graph
+  // containing at least those apps (or their heuristic equivalents).
+  const result = await copilotChat({
+    prompt: "When a form is submitted, save to Google Sheets and notify Slack",
+    mode: "auto_build",
+  });
+
+  assert.ok(result.reply, "Copilot should reply");
+  assert.ok(result.source, "Copilot should indicate source");
+  
+  const graph = result.graph;
+  assert.ok(graph, "Copilot should return a graph");
+  assert.ok(graph!.nodes.length >= 2, `Graph should have at least 2 nodes, got ${graph!.nodes.length}`);
+  
+  // Should have at least one trigger node
+  const trigger = graph!.nodes.find((n) => n.type === "trigger");
+  assert.ok(trigger, "Should have a trigger node");
+  
+  // Verify edges connect the steps
+  assert.ok(graph!.edges.length >= 1, `Should have at least 1 edge, got ${graph!.edges.length}`);
+  
+  // Should have suggestions or next-step guidance
+  assert.ok(result.suggestions?.length || result.youDoFirst?.length, "Should have suggestions or next steps");
+});
+
+test("Copilot builds lead automation from simple prompt: new lead to sheets and Slack", async () => {
+  const result = await copilotChat({
+    prompt: "When a new lead comes in, save it to Google Sheets and notify Slack",
+    mode: "auto_build",
+  });
+
+  assert.ok(result.reply, "Copilot should reply");
+  const graph = result.graph;
+  assert.ok(graph, "Should return a graph");
+  
+  // Should have at least 2 nodes: trigger + action
+  assert.ok(graph!.nodes.length >= 2, `Should have at least 2 nodes, got ${graph!.nodes.length}`);
+  
+  // Should have a trigger
+  const trigger = graph!.nodes.find((n) => n.type === "trigger");
+  assert.ok(trigger, "Should have a trigger node");
+  
+  // Should be marked as rebuilt or inspect
+  assert.ok(result.chapter, "Should have a chapter");
+});
+
+test("Copilot handles multi-turn lead automation refinement", async () => {
+  // Build initial workflow
+  const initial = await copilotChat({
+    prompt: "When a form is submitted, add the lead to Google Sheets",
+    mode: "auto_build",
+  });
+  assert.ok(initial.graph, "Initial build should produce a graph");
+  assert.ok(initial.graph!.nodes.length >= 2, "Should have at least trigger + sheets");
+  
+  // Refine: add Slack notification
+  const refined = await copilotChat({
+    prompt: "Add Slack notification after the sheets step",
+    graph: initial.graph!,
+    mode: "auto_build",
+  });
+  assert.ok(refined.reply, "Refinement should reply");
+  // The reply should contain actionable guidance or show the updated graph
+  assert.ok(refined.reply.length > 10, "Refinement reply should be substantive");
+});
+
+test("Copilot conversational fallback routes general questions", async () => {
+  // When there's no AI service, general questions fall through to the
+  // orchestrator which returns a workflow description. When there IS an
+  // AI service, the LLM answers directly. Either outcome is valid.
+  const result = await copilotChat({
+    prompt: "What is a webhook?",
+    mode: "auto_build",
+  });
+  assert.ok(result.reply, "Should reply to a general question");
+  assert.ok(result.reply.length > 10, "Reply should be substantive");
+  // Source is either copilot-llm (AI service present) or copilot (heuristic fallback)
+  assert.ok(["copilot-llm", "copilot"].includes(result.source), `Source should be copilot-llm or copilot, got ${result.source}`);
+});
+
+test("Copilot conversational fallback handles questions with history context", async () => {
+  const history = [
+    { role: "user" as const, content: "Create a lead automation from forms to sheets" },
+    { role: "assistant" as const, content: "I created a workflow with a form trigger connected to Google Sheets." },
+  ];
+  const result = await copilotChat({
+    prompt: "Can I add email notifications too?",
+    history,
+    mode: "auto_build",
+  });
+  assert.ok(result.reply, "Should reply with history context");
+  // Should be either a workflow modification or an LLM answer
+  assert.ok(result.source, "Should indicate source");
+});

@@ -128,6 +128,38 @@ export async function generateCopilotDraft(
   return out;
 }
 
+/**
+ * SSE-streaming chat that emits operation_card events in real-time.
+ * Falls back to the non-streaming API if the session doesn't exist yet.
+ */
+export async function streamCopilotChat(
+  opts: {
+    sessionId: string;
+    prompt: string;
+    graph?: unknown;
+    flowId?: string;
+    mode?: string;
+    selectedStepId?: string;
+    lastTest?: { ok?: boolean; body?: unknown; ms?: number } | null;
+  },
+  onEvent?: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  await streamSse(
+    `/copilot/sessions/${opts.sessionId}/stream-chat`,
+    {
+      prompt: opts.prompt,
+      graph: opts.graph,
+      flowId: opts.flowId,
+      mode: opts.mode,
+      selectedStepId: opts.selectedStepId,
+      lastTest: opts.lastTest,
+    },
+    (ev) => onEvent?.(ev),
+    signal,
+  );
+}
+
 export async function persistCopilotSession(sessionId: string, flowId: string) {
   return api<{ ok: boolean; flowId: string }>(`/copilot/sessions/${sessionId}/persist`, {
     method: "POST",
@@ -300,6 +332,10 @@ export type CopilotContext = {
   workflow: { id: string; name: string; status: string; graph: Record<string, unknown>; nodeCount: number; nodesSummary: Array<{ id: string; appSlug: string; operation: string; label: string }> } | null;
   connections: Array<{ id: string; name: string; app_slug: string; status: string }>;
   recentRuns: Array<{ id: string; status: string; flow_name: string; created_at: string }>;
+  tables: Array<{ id: string; name: string; slug: string; columns: Array<{ name: string; type: string }> }>;
+  forms: Array<{ id: string; name: string; schema: unknown }>; 
+  agents: Array<{ id: string; name: string; status: string }>;
+  executionHistory: Array<{ id: string; status: string; flow_name: string; created_at: string; error?: string }>;
   catalog: { totalApps: number; totalOperations: number; liveAdapters: string[]; topApps: Array<{ slug: string; name: string; ops: number }> };
   selectedNodeId?: string;
   page?: string;
@@ -314,5 +350,29 @@ export async function getCopilotContext(opts: {
   return api<CopilotContext>("/copilot/context", {
     method: "POST",
     body: JSON.stringify(opts),
+  });
+}
+
+// ── System Planner API ─────────────────────────────────────────────────────
+
+export type SystemPlanResult = {
+  goal: string;
+  summary: string;
+  products_used: string[];
+  entry_surface: string;
+  primary_product: string;
+  confidence: number;
+  capabilities: Array<{ type: string; description: string; product: string; app_hint?: string }>;
+  resource_graph: Array<{ index: number; product: string; capability: string; description: string; app_hint?: string; depends_on: number[] }>;
+  needs_connections: string[];
+  recommended_actions: string[];
+  is_single_product: boolean;
+};
+
+/** Get a system-level plan for a multi-product request */
+export async function systemPlanCopilot(prompt: string) {
+  return api<SystemPlanResult>("/copilot/system-plan", {
+    method: "POST",
+    body: JSON.stringify({ prompt }),
   });
 }

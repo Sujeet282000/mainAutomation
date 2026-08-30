@@ -67,6 +67,31 @@ class CatalogContext(BaseModel):
     top_apps: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class TableContext(BaseModel):
+    """Workspace data tables (CRM, databases, etc.)."""
+    tables: list[dict[str, Any]] = Field(default_factory=list)
+    total_tables: int = 0
+
+
+class FormContext(BaseModel):
+    """Workspace forms for human input."""
+    forms: list[dict[str, Any]] = Field(default_factory=list)
+    total_forms: int = 0
+
+
+class AgentContext(BaseModel):
+    """Registered agents in the workspace."""
+    agents: list[dict[str, Any]] = Field(default_factory=list)
+    total_agents: int = 0
+
+
+class ExecutionContext(BaseModel):
+    """Recent execution history for pattern detection."""
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    total_runs: int = 0
+    recent_failures: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ConversationContext(BaseModel):
     """Conversation history."""
     messages: list[dict[str, str]] = Field(default_factory=list)
@@ -79,6 +104,10 @@ class CopilotContext(BaseModel):
     workflow: WorkflowContext = Field(default_factory=WorkflowContext)
     connections: ConnectionContext = Field(default_factory=ConnectionContext)
     runs: RunContext = Field(default_factory=RunContext)
+    tables: TableContext = Field(default_factory=TableContext)
+    forms: FormContext = Field(default_factory=FormContext)
+    agents_ctx: AgentContext = Field(default_factory=AgentContext)
+    execution: ExecutionContext = Field(default_factory=ExecutionContext)
     catalog: CatalogContext = Field(default_factory=CatalogContext)
     conversation: ConversationContext = Field(default_factory=ConversationContext)
     current_page: str = ""
@@ -105,6 +134,32 @@ class CopilotContext(BaseModel):
         # Connections
         if self.connections.apps_with_connections:
             parts.append(f"\nConnected apps: {', '.join(self.connections.apps_with_connections)}")
+
+        # Tables
+        if self.tables.tables:
+            parts.append(f"\nData tables ({self.tables.total_tables}):")
+            for t in self.tables.tables[:10]:
+                cols = t.get("columns", [])
+                col_names = [c.get("name", "?") for c in cols[:5]] if isinstance(cols, list) else []
+                parts.append(f"  - {t.get('name', '?')} ({', '.join(col_names)}{'...' if len(cols) > 5 else ''})")
+
+        # Forms
+        if self.forms.forms:
+            parts.append(f"\nForms ({self.forms.total_forms}):")
+            for f in self.forms.forms[:5]:
+                parts.append(f"  - {f.get('name', '?')}")
+
+        # Agents
+        if self.agents_ctx.agents:
+            parts.append(f"\nAgents ({self.agents_ctx.total_agents}):")
+            for a in self.agents_ctx.agents[:5]:
+                parts.append(f"  - {a.get('name', '?')} ({a.get('status', 'unknown')})")
+
+        # Execution history
+        if self.execution.recent_failures:
+            parts.append("\nRecent failures:")
+            for f in self.execution.recent_failures[:3]:
+                parts.append(f"  - {f.get('flow_name', '?')}: {f.get('error', '?')[:120]}")
 
         # Recent runs
         if self.runs.last_error:
@@ -247,6 +302,39 @@ class ContextBuilder:
                     {"slug": a.get("slug"), "name": a.get("name"), "ops": len(a.get("operations", []))}
                     for a in apps[:20]
                 ],
+            )
+
+        # Tables
+        tables_data = workspace_data.get("tables", []) if workspace_data else []
+        if tables_data:
+            ctx.tables = TableContext(
+                tables=[{"id": t.get("id"), "name": t.get("name"), "slug": t.get("slug"), "columns": t.get("columns", [])} for t in tables_data],
+                total_tables=len(tables_data),
+            )
+
+        # Forms
+        forms_data = workspace_data.get("forms", []) if workspace_data else []
+        if forms_data:
+            ctx.forms = FormContext(
+                forms=[{"id": f.get("id"), "name": f.get("name"), "schema": f.get("schema")} for f in forms_data],
+                total_forms=len(forms_data),
+            )
+
+        # Agents
+        agents_data = workspace_data.get("agents", []) if workspace_data else []
+        if agents_data:
+            ctx.agents_ctx = AgentContext(
+                agents=[{"id": a.get("id"), "name": a.get("name"), "status": a.get("status")} for a in agents_data],
+                total_agents=len(agents_data),
+            )
+
+        # Execution history
+        exec_data = workspace_data.get("executionHistory", []) if workspace_data else []
+        if exec_data:
+            ctx.execution = ExecutionContext(
+                history=exec_data,
+                total_runs=len(exec_data),
+                recent_failures=[r for r in exec_data if r.get("status") == "failed"][:5],
             )
 
         # Conversation
