@@ -33,7 +33,11 @@ export type AgentResponseBlock =
   | { type: "step_card"; stepIndex: number; label: string; app?: string; status: "configured" | "needs_config" | "needs_connection" | "needs_action" | "tested"; issues?: string[]; actions?: CopilotUIAction[] }
   | { type: "field_mapping"; sourceLabel: string; sourceFields: string[]; targetLabel: string; targetFields: string[]; mappings: Array<{ source: string; target: string }> }
   | { type: "test_result"; stepLabel: string; success: boolean; fields?: Record<string, unknown>; actions?: CopilotUIAction[] }
-  | { type: "plan"; goal: string; steps: Array<{ label: string; product: string; description: string }>; actions?: CopilotUIAction[] };
+  | { type: "plan"; goal: string; steps: Array<{ label: string; product: string; description: string }>; actions?: CopilotUIAction[] }
+  | { type: "system_plan"; goal: string; summary: string; products: Array<{ product: string; purpose: string; assetId?: string; href?: string }>; entrySurface: string; actions?: CopilotUIAction[] }
+  | { type: "product_card"; product: string; label: string; description?: string; href?: string; actions?: CopilotUIAction[] }
+  | { type: "connection_card"; appSlug: string; appName: string; connected: boolean; message?: string; actions?: CopilotUIAction[] }
+  | { type: "operation"; operationId: string; label: string; status: "pending" | "running" | "completed" | "failed" | "waiting_for_user"; detail?: string; actions?: CopilotUIAction[] };
 
 export type AgentOperation =
   | { type: "inspect_workflow" }
