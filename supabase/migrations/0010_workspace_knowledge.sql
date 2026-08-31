@@ -14,18 +14,24 @@ ALTER TABLE public.knowledge_sources
   ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
--- Preserve existing data when upgrading from the asset-registry schema.
 UPDATE public.knowledge_sources
 SET source_type = CASE
   WHEN type = 'table' THEN 'table'
   WHEN type = 'url' THEN 'url'
   WHEN type IN ('file', 'document') THEN 'document'
+  WHEN type = 'text' THEN 'manual'
   ELSE 'manual'
 END
 WHERE source_type IS NULL;
 
 ALTER TABLE public.knowledge_sources
   ALTER COLUMN source_type SET NOT NULL;
+
+ALTER TABLE public.knowledge_sources
+  DROP CONSTRAINT IF EXISTS knowledge_sources_type_check;
+ALTER TABLE public.knowledge_sources
+  ADD CONSTRAINT knowledge_sources_type_check
+  CHECK (type IN ('file', 'url', 'table', 'document', 'text', 'form', 'workflow', 'run', 'agent', 'chatbot', 'manual'));
 
 ALTER TABLE public.knowledge_sources
   DROP CONSTRAINT IF EXISTS knowledge_sources_status_check;
@@ -40,8 +46,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_sources_org_type_source_idx
   ON public.knowledge_sources(org_id, source_type, source_id)
   WHERE source_id IS NOT NULL;
 
--- Chunked semantic knowledge. Tenant ownership is duplicated deliberately so
--- every retrieval query can enforce org isolation at the chunk level.
 CREATE TABLE IF NOT EXISTS public.knowledge_chunks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   source_id UUID NOT NULL REFERENCES public.knowledge_sources(id) ON DELETE CASCADE,
@@ -57,16 +61,12 @@ CREATE TABLE IF NOT EXISTS public.knowledge_chunks (
 
 CREATE INDEX IF NOT EXISTS knowledge_chunks_source_idx
   ON public.knowledge_chunks(source_id, chunk_index);
-
 CREATE INDEX IF NOT EXISTS knowledge_chunks_org_idx
   ON public.knowledge_chunks(org_id);
-
 CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx
   ON public.knowledge_chunks USING hnsw (embedding vector_cosine_ops)
   WHERE embedding IS NOT NULL;
 
--- Persistent, auditable Copilot memory. This is separate from retrieval
--- sources and must never contain hidden model chain-of-thought.
 CREATE TABLE IF NOT EXISTS public.copilot_memory (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
@@ -85,7 +85,6 @@ CREATE TABLE IF NOT EXISTS public.copilot_memory (
 
 CREATE INDEX IF NOT EXISTS copilot_memory_scope_idx
   ON public.copilot_memory(org_id, scope, scope_id);
-
 CREATE INDEX IF NOT EXISTS copilot_memory_embedding_idx
   ON public.copilot_memory USING hnsw (embedding vector_cosine_ops)
   WHERE embedding IS NOT NULL;
