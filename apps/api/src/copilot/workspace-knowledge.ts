@@ -51,8 +51,8 @@ export async function upsertKnowledgeSource(input: {
 
   const row = await queryOne<{ id: string }>(
     `INSERT INTO knowledge_sources
-      (org_id, source_type, source_id, name, metadata, content_hash)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+      (org_id, type, source_type, source_id, name, metadata, content_hash, status)
+     VALUES ($1, $2, $2, $3, $4, $5::jsonb, $6, 'active')
      RETURNING id`,
     [
       input.orgId,
