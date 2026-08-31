@@ -279,7 +279,34 @@ export async function streamCopilotChat(opts: {
     }
   }
 
-  // ── Fallback: Node.js pattern-matching copilot ──
+  // ── Agent Executor (tool-based information gathering) ──
+  // When AI service isn't available, try the agent executor to gather
+  // context via tools before falling back to the pattern-matching copilot.
+  try {
+    const { generateAgentPlan, executeAgentPlan } = await import("./copilot-agent-executor");
+    const agentCtx = { workspaceId: opts.orgId, userId: opts.req.user?.userId ?? "", flowId: opts.flowId };
+    const plan = await generateAgentPlan(opts.prompt, agentCtx, graph);
+    if (plan && plan.calls.length > 0 && plan.confidence > 0.6) {
+      await send({ type: "agent_state", state: "executing", title: "Running tool queries" });
+      await send({ type: "agent_activity", kind: "running", label: `Executing ${plan.calls.length} tool query(s)` });
+      const agentResult = await executeAgentPlan(plan, agentCtx);
+      await send({ type: "agent_activity", kind: "done", label: "Tool queries completed" });
+      // If the agent got a good response and it's NOT a workflow action, return it directly
+      if (agentResult.success && agentResult.reply.length > 20) {
+        await send({ type: "agent_state", state: "completed", title: "Done" });
+        await send({ type: "chat_result", reply: agentResult.reply, sessionId: opts.sessionId, source: "agent-executor", suggestions: agentResult.suggestions });
+        await send({ type: "done", status: "chat_complete", source: "agent-executor" });
+        const now = new Date().toISOString();
+        await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
+        await appendChatTurn(opts.sessionId, opts.orgId, { role: "assistant", content: agentResult.reply, ts: now });
+        return;
+      }
+    }
+  } catch {
+    /* Agent executor unavailable — fall through to copilotChat */
+  }
+
+  // ── Fallback: Node.js pattern-matching copilot (with universal handler) ──
   const { copilotChat } = await import("./copilot");
   try {
     await send({ type: "agent_state", state: "inspecting", title: "Inspecting workflow" });
@@ -292,7 +319,7 @@ export async function streamCopilotChat(opts: {
     else if (/\b(test|run|check)\b/.test(promptLower)) reasoningText = "Preparing to test the workflow";
     else if (/\b(fix|repair|update|change|modify|replace)\b/.test(promptLower)) reasoningText = "Analyzing the current workflow to apply your changes";
     else if (/\b(hi|hello|hey|thanks)\b/.test(promptLower)) reasoningText = "Greeting acknowledged";
-    else reasoningText = "Understanding your request and inspecting the current workflow";
+    else reasoningText = "Classifying and routing your request through the universal handler";
     await send({ type: "reasoning", text: reasoningText, stage: "intent" });
     const result = await copilotChat({
       prompt: opts.prompt,

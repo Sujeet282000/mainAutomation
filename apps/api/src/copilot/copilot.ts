@@ -17,6 +17,15 @@ import {
 } from "./copilot-orchestrator";
 import { adviseWorkflow } from "../workflow-advisor";
 import { ragGraphFromPrompt } from "./copilot-rag";
+import {
+  classifyQuery,
+  respondToGeneralKnowledge,
+  respondToCodeGeneration,
+  respondToContentCreation,
+  respondToPlatformHelp,
+  respondToCompound,
+  type QueryCategory,
+} from "./universal-query-handler";
 
 /**
  * Strip leaked chain-of-thought from LLM responses.
@@ -1266,13 +1275,13 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
     const nodeCount = opts.graph?.nodes?.length ?? 0;
     if (snapshot.empty) {
       return finish({
-        reply: "Hey! I'm your AI automation assistant. I can help you:\n\n• Build workflows from a description\n• Modify existing automations\n• Explain what each step does\n• Find and fix problems\n• Test your workflows\n\nWhat would you like to automate?",
+        reply: "Hey! I'm your AI Copilot — I can build workflows AND answer any question.\n\n🔧 **Workflows** — "Create a Gmail to Slack automation"\n❓ **Questions** — "What is a webhook?" / "How does OAuth work?"\n💻 **Code** — "Write a regex to extract email domains"\n✉️ **Content** — "Draft a welcome email template"\n\nWhat would you like help with?",
         source: "copilot",
         chapter: "inspect",
       });
     }
     return finish({
-      reply: `Hey! I see your ${nodeCount}-step workflow (${labels}). ${snapshot.youDoFirst?.[0] ?? "What would you like me to help with?"}`,
+      reply: `Hey! I see your ${nodeCount}-step workflow (${labels}). ${snapshot.youDoFirst?.[0] ?? "What would you like me to help with? I can work on your workflow or answer any other question."}`,
       source: "copilot",
       chapter: "inspect",
     });
@@ -1289,7 +1298,7 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
 
   if (/\b(help|what can you do|capabilities|features)\b/i.test(opts.prompt)) {
     return finish({
-      reply: `I can help you with:\n\n🔧 **Build workflows** — Describe what you want, I'll create it\n🔍 **Explain workflows** — Ask me about any step or the whole flow\n🐛 **Find problems** — I'll check for issues and suggest fixes\n⚡ **Add steps** — "Add Slack notification" or "Add AI processing"\n🧪 **Test workflows** — I'll validate your automation\n🔄 **Modify workflows** — Change triggers, actions, or conditions\n📊 **Check status** — Ask about recent runs, connections, or errors\n\nJust describe what you want naturally — I'll figure out the rest.`,
+      reply: `I'm your AI Copilot — here to help with **anything**:\n\n🔧 **Build workflows** — Describe what you want, I'll create it\n🔍 **Explain workflows** — Ask me about any step or the whole flow\n🐛 **Find problems** — I'll check for issues and suggest fixes\n⚡ **Add steps** — "Add Slack notification" or "Add AI processing"\n🧪 **Test workflows** — I'll validate your automation\n🔄 **Modify workflows** — Change triggers, actions, or conditions\n📊 **Check status** — Ask about recent runs, connections, or errors\n\n💡 **General knowledge** — Ask me anything about automation, integrations, or APIs\n💻 **Code help** — Get code snippets, formulas, or scripts for your automations\n✉️ **Content creation** — Draft emails, messages, or notification templates\n🛠️ **Platform help** — How to connect apps, configure steps, troubleshoot\n📋 **Data analysis** — Analyze patterns, performance, or metrics\n🏗️ **System design** — Plan architecture for multi-app solutions\n\nJust ask naturally — I handle workflows AND general questions.`,
       source: "copilot",
       chapter: "explain",
     });
@@ -1297,7 +1306,7 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
 
   if (/\b(who are you|what are you|your name)\b/i.test(opts.prompt)) {
     return finish({
-      reply: `I'm your AI Copilot — built right into your workflow builder. I understand your automations, connections, and execution history. I can build, explain, fix, and test workflows through natural conversation.\n\nTry something like:\n• "Create a lead automation"\n• "Why did my workflow fail?"\n• "Add a Slack notification after this step"\n• "Test this workflow"`,
+      reply: `I'm your AI Copilot — a universal assistant built right into your workflow builder. I can:\n\n• **Build & modify** workflows from natural language\n• **Explain & debug** any automation step by step\n• **Answer questions** about integrations, APIs, webhooks, OAuth, and automation best practices\n• **Write code** — JavaScript, Python, SQL, regex, formulas\n• **Create content** — email templates, notification messages, descriptions\n• **Analyze data** — patterns, performance metrics, error diagnosis\n• **Design systems** — architecture for multi-app solutions\n\nI'm not just a workflow builder — I'm your full-stack automation assistant.\n\nTry:\n• "Create a lead automation"\n• "What's the best way to handle webhook retries?"\n• "Write a formula to score leads by email domain"\n• "How does OAuth work with Slack?"\n• "Draft a follow-up email template"`,
       source: "copilot",
       chapter: "explain",
     });
@@ -1397,9 +1406,58 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
     });
   }
 
-  // ── LLM-powered conversational fallback ──────────────────────────────
-  // When no workflow-modification pattern matched above, detect general
-  // questions and use the LLM to answer them with full workflow context.
+  // ── Universal Query Handler ──────────────────────────────────────────
+  // Route ANY unmatched query through the universal handler, which can
+  // classify and respond to general knowledge, code generation, content
+  // creation, platform help, compound queries, and conversational topics.
+  try {
+    const classification = await classifyQuery(opts.prompt, opts.graph);
+    if (classification.confidence >= 0.6) {
+      let universalResponse;
+
+      switch (classification.category) {
+        case "compound":
+          if (classification.compoundParts?.length) {
+            universalResponse = await respondToCompound(classification.compoundParts, opts.graph, opts.history);
+          } else {
+            universalResponse = await respondToGeneralKnowledge(opts.prompt, opts.graph, opts.history);
+          }
+          break;
+        case "code_generation":
+          universalResponse = await respondToCodeGeneration(opts.prompt);
+          break;
+        case "content_creation":
+          universalResponse = await respondToContentCreation(opts.prompt, opts.graph);
+          break;
+        case "platform_help":
+          universalResponse = await respondToPlatformHelp(opts.prompt);
+          break;
+        case "general_knowledge":
+        case "data_analysis":
+        case "system_design":
+          universalResponse = await respondToGeneralKnowledge(opts.prompt, opts.graph, opts.history);
+          break;
+        case "conversational":
+          universalResponse = await respondToGeneralKnowledge(opts.prompt, opts.graph, opts.history);
+          break;
+        default:
+          break;
+      }
+
+      if (universalResponse) {
+        return finish({
+          reply: stripThinking(universalResponse.reply),
+          source: universalResponse.source,
+          chapter: "explain",
+        });
+      }
+    }
+  } catch {
+    /* Universal handler unavailable — fall through */
+  }
+
+  // ── Legacy LLM conversational fallback ─────────────────────────────
+  // When the universal handler also couldn't classify, try the old LLM path.
   const isConversational = isConversationalQuestion(opts.prompt, snapshot);
   if (isConversational) {
     try {
