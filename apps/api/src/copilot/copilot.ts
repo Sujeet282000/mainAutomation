@@ -1275,7 +1275,7 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
     const nodeCount = opts.graph?.nodes?.length ?? 0;
     if (snapshot.empty) {
       return finish({
-        reply: "Hey! I'm your AI Copilot — I can build workflows AND answer any question.\n\n🔧 **Workflows** — "Create a Gmail to Slack automation"\n❓ **Questions** — "What is a webhook?" / "How does OAuth work?"\n💻 **Code** — "Write a regex to extract email domains"\n✉️ **Content** — "Draft a welcome email template"\n\nWhat would you like help with?",
+        reply: `Hey! I'm your AI Copilot — I can build workflows AND answer any question.\n\n🔧 **Workflows** — "Create a Gmail to Slack automation"\n❓ **Questions** — "What is a webhook?" / "How does OAuth work?"\n💻 **Code** — "Write a regex to extract email domains"\n✉️ **Content** — "Draft a welcome email template"\n\nWhat would you like help with?`,
         source: "copilot",
         chapter: "inspect",
       });
@@ -1407,12 +1407,14 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
   }
 
   // ── Universal Query Handler ──────────────────────────────────────────
-  // Route ANY unmatched query through the universal handler, which can
-  // classify and respond to general knowledge, code generation, content
-  // creation, platform help, compound queries, and conversational topics.
+  // Route unmatched queries through the universal handler for general
+  // knowledge, code generation, content creation, platform help, etc.
+  // Skip when the prompt clearly references the current workflow state
+  // (the existing copilot handlers below provide better answers for those).
+  const isWorkflowStateQuery = /(?:fields|steps|nodes|this workflow|the workflow|this canvas|the canvas|empty|missing|blank|current)/i.test(opts.prompt) && Boolean(opts.graph && opts.graph.nodes.length > 0);
   try {
     const classification = await classifyQuery(opts.prompt, opts.graph);
-    if (classification.confidence >= 0.6) {
+    if (classification.confidence >= 0.6 && !isWorkflowStateQuery) {
       let universalResponse;
 
       switch (classification.category) {
