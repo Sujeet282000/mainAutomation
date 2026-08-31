@@ -22,10 +22,7 @@ export const initialCopilotStreamState: CopilotStreamState = {
   operationIndex: {},
 };
 
-function upsertActivity(
-  state: CopilotStreamState,
-  activity: AgentActivityItem,
-): CopilotStreamState {
+function upsertActivity(state: CopilotStreamState, activity: AgentActivityItem): CopilotStreamState {
   const index = state.activities.findIndex((item) => item.id === activity.id);
   const activities = [...state.activities];
   if (index >= 0) activities[index] = { ...activities[index], ...activity };
@@ -41,10 +38,14 @@ function actionList(value: unknown): CopilotUIAction[] | undefined {
   return Array.isArray(value) ? (value as CopilotUIAction[]) : undefined;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
 /**
  * Convert one streamed backend event into durable, renderable UI state.
- * This reducer intentionally treats reasoning as user-safe progress, never as
- * model chain-of-thought.
+ * Reasoning is intentionally reduced to user-safe progress; private model
+ * chain-of-thought is never treated as a UI payload.
  */
 export function reduceCopilotEvent(
   state: CopilotStreamState,
@@ -60,12 +61,7 @@ export function reduceCopilotEvent(
   if (type === "agent_state") {
     const status = ev.state as AgentState;
     const title = typeof ev.title === "string" ? ev.title : state.title;
-    return {
-      ...state,
-      status,
-      title,
-      blocks: [...state.blocks, { type: "status", state: status, title }],
-    };
+    return { ...state, status, title, blocks: [...state.blocks, { type: "status", state: status, title }] };
   }
 
   if (type === "agent_activity") {
@@ -80,12 +76,10 @@ export function reduceCopilotEvent(
   }
 
   if (type === "reasoning") {
-    // Backend may still emit this legacy event. Convert it into a safe activity
-    // instead of storing/displaying raw internal reasoning.
     const text = typeof ev.text === "string" ? ev.text.trim() : "";
     if (!text) return state;
     return upsertActivity(state, {
-      id: `reasoning-${state.activities.length + 1}`,
+      id: `progress-${state.activities.length + 1}`,
       kind: "info",
       label: text,
       timestamp: Date.now(),
@@ -100,14 +94,15 @@ export function reduceCopilotEvent(
     });
   }
 
-  if (type === "operation_started") {
-    const operationId = String(ev.operationId);
+  if (type === "operation_started" || type === "operation_completed") {
+    const operationId = String(ev.operationId ?? `operation-${state.blocks.length + 1}`);
     const block: AgentResponseBlock = {
       type: "operation",
       operationId,
       label: String(ev.label ?? ev.kind ?? "Working"),
-      status: "running",
+      status: type === "operation_started" ? "running" : (ev.success === false ? "failed" : "completed"),
       detail: typeof ev.detail === "string" ? ev.detail : undefined,
+      actions: actionList(ev.actions),
     };
     const index = state.operationIndex[operationId];
     if (index !== undefined) {
@@ -122,26 +117,32 @@ export function reduceCopilotEvent(
     };
   }
 
-  if (type === "operation_completed") {
-    const operationId = String(ev.operationId);
-    const index = state.operationIndex[operationId];
+  if (type === "operation_card") {
+    const operation = asRecord(ev.operation);
+    if (!operation) return state;
+    const operationId = String(operation.operationId ?? operation.id ?? `operation-${state.blocks.length + 1}`);
+    const status = String(operation.status ?? "pending");
     const block: AgentResponseBlock = {
       type: "operation",
       operationId,
-      label: String(ev.label ?? ev.kind ?? "Operation"),
-      status: ev.success === false ? "failed" : "completed",
-      detail: typeof ev.detail === "string" ? ev.detail : undefined,
+      label: String(operation.label ?? operation.title ?? operation.kind ?? "Operation"),
+      status: ["pending", "running", "completed", "failed", "waiting_for_user"].includes(status)
+        ? status as AgentResponseBlock & never
+        : "pending",
+      detail: typeof operation.detail === "string" ? operation.detail : undefined,
+      actions: actionList(operation.actions),
     };
-    if (index === undefined) {
-      return {
-        ...state,
-        operationIndex: { ...state.operationIndex, [operationId]: state.blocks.length },
-        blocks: [...state.blocks, block],
-      };
+    const index = state.operationIndex[operationId];
+    if (index !== undefined) {
+      const blocks = [...state.blocks];
+      blocks[index] = block;
+      return { ...state, blocks };
     }
-    const blocks = [...state.blocks];
-    blocks[index] = block;
-    return { ...state, blocks };
+    return {
+      ...state,
+      operationIndex: { ...state.operationIndex, [operationId]: state.blocks.length },
+      blocks: [...state.blocks, block],
+    };
   }
 
   if (type === "connection_required") {
@@ -167,7 +168,10 @@ export function reduceCopilotEvent(
       sourceFields: Array.isArray(ev.sourceFields) ? ev.sourceFields.map(String) : [],
       targetLabel: String(ev.targetLabel ?? "Target"),
       targetFields: Array.isArray(ev.targetFields) ? ev.targetFields.map(String) : [],
-      mappings: Array.isArray(ev.mappings) ? (ev.mappings as Array<{ source: string; target: string }>) : [],
+      mappings: Array.isArray(ev.mappings) ? ev.mappings.map((item) => {
+        const mapping = asRecord(item);
+        return { source: String(mapping?.source ?? ""), target: String(mapping?.target ?? "") };
+      }) : [],
     });
   }
 
@@ -176,8 +180,16 @@ export function reduceCopilotEvent(
       type: "test_result",
       stepLabel: String(ev.label ?? "Workflow step"),
       success: ev.success === true,
-      fields: (ev.fields ?? undefined) as Record<string, unknown> | undefined,
+      fields: asRecord(ev.fields) ?? undefined,
       actions: actionList(ev.actions),
+    });
+  }
+
+  if (type === "step_completed") {
+    return appendBlock(state, {
+      type: "success",
+      title: String(ev.label ?? "Step completed"),
+      message: typeof ev.detail === "string" ? ev.detail : undefined,
     });
   }
 
@@ -191,26 +203,21 @@ export function reduceCopilotEvent(
   }
 
   if (type === "agent_error") {
-    return appendBlock(state, {
+    return { ...state, status: "error", title: "Something went wrong", blocks: [...state.blocks, {
       type: "error",
       title: "Something went wrong",
       message: typeof ev.message === "string" ? ev.message : undefined,
       actions: actionList(ev.actions),
-    });
+    }] };
   }
 
   if (type === "agent_completed") {
-    return {
-      ...state,
-      status: "completed",
-      title: "Done",
-      blocks: [...state.blocks, {
-        type: "success",
-        title: "Completed",
-        message: typeof ev.summary === "string" ? ev.summary : undefined,
-        actions: actionList(ev.actions),
-      }],
-    };
+    return { ...state, status: "completed", title: "Done", blocks: [...state.blocks, {
+      type: "success",
+      title: "Completed",
+      message: typeof ev.summary === "string" ? ev.summary : undefined,
+      actions: actionList(ev.actions),
+    }] };
   }
 
   if (type === "plan" && ev.plan && typeof ev.plan === "object") {
@@ -220,12 +227,8 @@ export function reduceCopilotEvent(
       type: "plan",
       goal: String(plan.goal ?? ""),
       steps: steps.map((step) => {
-        const item = step as Record<string, unknown>;
-        return {
-          label: String(item.label ?? "Step"),
-          product: String(item.product ?? "workflow"),
-          description: String(item.description ?? ""),
-        };
+        const item = asRecord(step) ?? {};
+        return { label: String(item.label ?? "Step"), product: String(item.product ?? "workflow"), description: String(item.description ?? "") };
       }),
       actions: actionList(plan.actions),
     });
