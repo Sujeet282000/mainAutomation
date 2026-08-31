@@ -55,6 +55,10 @@ export type AgentOperation =
 export type AgentSSEEvent =
   | { type: "agent_started" }
   | { type: "agent_state"; state: AgentState; title: string }
+  | { type: "stage"; stage: string; status: "start" | "done"; label?: string }
+  | { type: "reasoning"; stage?: string; text: string }
+  | { type: "todo"; kind: string; message: string; field?: string; assumption?: string }
+  | { type: "done"; status: string; session_id?: string }
   | { type: "agent_activity"; kind: AgentActivityKind; label: string; detail?: string; id?: string }
   | { type: "analysis_summary"; title: string; items: string[] }
   | { type: "operation_started"; operationId: string; kind: string; label: string; detail?: string }
