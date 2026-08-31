@@ -60,10 +60,11 @@ export type AgentSSEEvent =
   | { type: "agent_started" }
   | { type: "agent_state"; state: AgentState; title: string }
   | { type: "agent_activity"; kind: AgentActivityKind; label: string; detail?: string; id?: string }
+  | { type: "reasoning"; text: string }
   | { type: "analysis_summary"; title: string; items: string[] }
   | { type: "operation_started"; operationId: string; kind: string; label: string; detail?: string }
   | { type: "operation_completed"; operationId: string; kind: string; label: string; success: boolean; detail?: string }
-  | { type: "connection_required"; stepId?: string; appSlug: string; appName?: string; message?: string }
+  | { type: "connection_required"; stepId?: string; appSlug: string; appName?: string; message?: string; actions?: CopilotUIAction[] }
   | { type: "step_completed"; stepId: string; label: string; success: boolean; detail?: string }
   | { type: "blocking_issue"; stepId?: string; title: string; detail?: string; actions?: CopilotUIAction[] }
   | { type: "field_mapping"; stepId?: string; sourceLabel: string; targetLabel: string; mappings: Array<{ source: string; target: string }> }
