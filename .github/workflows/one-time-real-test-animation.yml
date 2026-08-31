@@ -1,0 +1,193 @@
+name: One-time real test animation fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-animation:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Replace simulated workflow test animation
+        env:
+          FILE: apps/web/features/workflow-builder/workflow-builder.tsx
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("apps/web/features/workflow-builder/workflow-builder.tsx")
+          text = path.read_text()
+
+          start = text.find("  async function testWorkflow() {")
+          end = text.find("\n  async function publish() {", start)
+          if start < 0 or end < 0:
+              raise SystemExit("Could not locate testWorkflow block")
+
+          replacement = r'''  async function testWorkflow() {
+    setBusy("test");
+    const ordered = layoutFlow(nodes, edges);
+    if (!ordered.length) {
+      setRunStates({});
+      setTestResult({ ok: false, body: { error: "Add at least one workflow step before testing." } });
+      setMsg("Add at least one workflow step before testing.");
+      setBusy(null);
+      return;
+    }
+
+    // Do not simulate step execution locally. The visual state is driven by the
+    // actual execution SSE stream below. `queued` only means the run request
+    // has been accepted locally and no step has executed yet.
+    setRunStates(Object.fromEntries(ordered.map((n) => [n.id, "queued" as RunState])));
+
+    let streamController: AbortController | null = null;
+    let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+    try {
+      await saveDraft();
+      const trigger = nodes.find((n) => n.data.kind === "trigger");
+      const app = apps.find((x) => x.slug === trigger?.data.appSlug);
+      const op = app?.operations.find((o) => opKey(o) === trigger?.data.operation);
+      const payload = op ? opSample(op) : { ping: true, test: true };
+
+      // Start the real execution immediately. No artificial 400ms-per-step loop.
+      const d = await api<{ execution: { id: string } }>(`/automations/${automationId}/run`, {
+        method: "POST",
+        body: JSON.stringify({ payload })
+      });
+      const execId = d.execution.id;
+      const lastRef: { current: { execution: { status: string }; steps: Array<{ step_id: string; status: string }> } | null } = { current: null };
+
+      await new Promise<void>((resolve) => {
+        streamController = new AbortController();
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (safetyTimer) clearTimeout(safetyTimer);
+          streamController?.abort();
+          resolve();
+        };
+
+        streamGetSse(`/executions/${execId}/stream`, (event, data) => {
+          if (event !== "snapshot" && event !== "done" && event !== "step") return;
+
+          if (event === "step") {
+            const stepData = data as { stepId: string; status: string };
+            const state: RunState =
+              stepData.status === "succeeded" || stepData.status === "success" || stepData.status === "completed"
+                ? "ok"
+                : stepData.status === "failed" || stepData.status === "cancelled"
+                  ? "fail"
+                  : stepData.status === "waiting" || stepData.status === "pending_approval"
+                    ? "waiting"
+                    : stepData.status === "queued"
+                      ? "queued"
+                      : "running";
+            setRunStates((prev) => ({ ...prev, [stepData.stepId]: state }));
+            setSelected(stepData.stepId);
+            setInspectorTab("test");
+            return;
+          }
+
+          const snap = data as { execution: { status: string }; steps: Array<{ step_id: string; status: string }> };
+          lastRef.current = snap;
+          const byId: Record<string, RunState> = {};
+          for (const s of snap.steps) {
+            byId[s.step_id] =
+              s.status === "succeeded" || s.status === "success" || s.status === "completed"
+                ? "ok"
+                : s.status === "failed" || s.status === "cancelled"
+                  ? "fail"
+                  : s.status === "waiting" || s.status === "pending_approval"
+                    ? "waiting"
+                    : s.status === "queued"
+                      ? "queued"
+                      : "running";
+          }
+
+          const painted: Record<string, RunState> = Object.fromEntries(ordered.map((n) => [n.id, "idle" as RunState]));
+          for (const n of ordered) {
+            if (byId[n.id]) painted[n.id] = byId[n.id];
+          }
+
+          if (snap.execution.status === "waiting") {
+            const lastExecuted = [...snap.steps].reverse().find((step) => byId[step.step_id] === "ok" || byId[step.step_id] === "waiting");
+            if (lastExecuted) {
+              for (const edge of edges) {
+                if (edge.source === lastExecuted.step_id && !byId[edge.target]) painted[edge.target] = "waiting";
+              }
+            }
+          }
+
+          setRunStates(painted);
+
+          const failedStep = ordered.find((n) => painted[n.id] === "fail");
+          const runningStep = ordered.find((n) => painted[n.id] === "running");
+          const waitingStep = ordered.find((n) => painted[n.id] === "waiting");
+          const activeStep = failedStep || runningStep || waitingStep;
+          if (activeStep) {
+            setSelected(activeStep.id);
+            setInspectorTab("test");
+          }
+
+          if (event === "done") finish();
+        }, streamController.signal).catch(() => finish());
+
+        // Safety timeout: never leave the editor in a running state forever.
+        safetyTimer = setTimeout(() => finish(), 30000);
+      });
+
+      const finalSnapshot = lastRef.current;
+      const ok = finalSnapshot?.execution.status === "succeeded";
+      setTestResult({ ok: Boolean(ok), body: finalSnapshot });
+
+      // Use the final SSE snapshot, not the stale React runStates closure.
+      const failedId = finalSnapshot?.steps.find((step) => step.status === "failed" || step.status === "cancelled")?.step_id;
+      const finalNode = ordered.find((n) => n.id === failedId) || ordered[ordered.length - 1];
+      if (finalNode) {
+        setSelected(finalNode.id);
+        setInspectorTab("test");
+      }
+
+      const runStatus = finalSnapshot?.execution.status ?? "timed out";
+      setMsg(ok ? "Test workflow completed." : runStatus === "waiting" ? "Test workflow is waiting to resume." : `Test workflow ${runStatus}.`);
+    } catch (err) {
+      setRunStates((prev) => {
+        const next = { ...prev };
+        for (const node of ordered) {
+          if (next[node.id] === "running" || next[node.id] === "queued") next[node.id] = "idle";
+        }
+        return next;
+      });
+      setTestResult({ ok: false, body: { error: err instanceof Error ? err.message : "Run failed" } });
+      setMsg(err instanceof Error ? err.message : "Run failed");
+    } finally {
+      if (safetyTimer) clearTimeout(safetyTimer);
+      streamController?.abort();
+      setBusy(null);
+    }
+  }
+'''
+
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text)
+          PY
+
+      - name: Commit fix and remove one-time workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/features/workflow-builder/workflow-builder.tsx
+          git commit -m "fix: drive workflow test animation from real execution" || true
+          git rm .github/workflows/one-time-real-test-animation.yml || true
+          git commit -m "chore: remove one-time animation patch workflow" || true
+          git push
