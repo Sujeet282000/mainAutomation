@@ -16,7 +16,7 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Book, Check, ChevronRight, Clock, Copy, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Workflow, Wrench, X, Zap } from "lucide-react";
+import { AlertTriangle, Book, Check, ChevronLeft, ChevronRight, Clock, Copy, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Workflow, Wrench, X, Zap } from "lucide-react";
 import { api, streamSse, streamGetSse } from "@/lib/api";
 import {
   appAuth,
@@ -594,6 +594,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         ...n,
         type: "step",
         hidden: false,
+        style: { ...n.style, animation: `av-node-enter 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) ${i * 60}ms both` },
         data: {
           ...n.data,
           index: i + 1,
@@ -629,7 +630,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           onAdd: (edgeId: string) => openPicker("action", undefined, edgeId),
           label: e.sourceHandle ? String(e.sourceHandle).replace("path-", "Path ").toUpperCase() : undefined,
           active: runStates[e.source] === "ok" || runStates[e.source] === "running",
-          pulse: runStates[e.source] === "running"
+          pulse: runStates[e.source] === "running",
+          success: runStates[e.source] === "ok" && runStates[e.target] !== "fail"
         },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#64748b" }
       })),
@@ -1390,6 +1392,36 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[15px] font-medium">{selected.data.operation ? `${nodes.findIndex((n) => n.id === selected.id) + 1}. ${selected.data.label}` : `${selected.data.kind === "trigger" ? "1. Select the event that starts your Zap" : `${nodes.findIndex((n) => n.id === selected.id) + 1}. Select the event`}`}</div>
                 </div>
+                {/* Prev step */}
+                {nodes.length > 1 && (
+                  <button
+                    type="button"
+                    className="rounded-lg p-1.5 text-ink-muted hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed"
+                    title="Previous step"
+                    disabled={nodes.findIndex((n) => n.id === selected.id) <= 0}
+                    onClick={() => {
+                      const idx = nodes.findIndex((n) => n.id === selected.id);
+                      if (idx > 0) setSelected(nodes[idx - 1].id);
+                    }}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                )}
+                {/* Next step */}
+                {nodes.length > 1 && (
+                  <button
+                    type="button"
+                    className="rounded-lg p-1.5 text-ink-muted hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed"
+                    title="Next step"
+                    disabled={nodes.findIndex((n) => n.id === selected.id) >= nodes.length - 1}
+                    onClick={() => {
+                      const idx = nodes.findIndex((n) => n.id === selected.id);
+                      if (idx < nodes.length - 1) setSelected(nodes[idx + 1].id);
+                    }}
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="rounded-lg p-1.5 text-ink-muted hover:bg-muted"
@@ -1405,6 +1437,15 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                   }}
                 >
                   {inspectorModal ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                </button>
+                {/* Close step panel */}
+                <button
+                  type="button"
+                  className="rounded-lg p-1.5 text-ink-muted hover:bg-muted hover:text-danger"
+                  title="Close step"
+                  onClick={() => setSelected(null)}
+                >
+                  <X className="h-4 w-4" />
                 </button>
                 <button
                   type="button"

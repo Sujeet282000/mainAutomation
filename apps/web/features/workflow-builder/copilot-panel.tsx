@@ -29,9 +29,19 @@ type Msg = {
   agentTitle?: string;
   thinking?: string;
   streaming?: boolean;
+  /** Rich structured response blocks */
+  stepCards?: StepCard[];
+  connectionCards?: ConnectionCard[];
+  fieldMappings?: FieldMappingCard[];
+  testResults?: TestResultCard[];
+  warnings?: string[];
 };
+type StepCard = { index: number; label: string; app?: string; status: "configured" | "needs_config" | "needs_connection" | "needs_action" | "tested"; issues?: string[]; actions?: Array<{ label: string; prompt: string }> };
+type ConnectionCard = { appSlug: string; appName: string; status: "connected" | "not_configured"; message?: string; actions?: Array<{ label: string; prompt: string }> };
+type FieldMappingCard = { sourceLabel: string; sourceFields: string[]; targetLabel: string; targetFields: string[]; mappings: Array<{ source: string; target: string }> };
+type TestResultCard = { stepLabel: string; success: boolean; fields?: Record<string, unknown>; actions?: Array<{ label: string; prompt: string }> };
 type SystemPlanResult = { goal: string; summary: string; products_used: string[]; entry_surface: string; primary_product: string; confidence: number; capabilities: Array<{ type: string; description: string; product: string; app_hint?: string }>; resource_graph: Array<{ index: number; product: string; capability: string; description: string; app_hint?: string; depends_on: number[] }>; needs_connections: string[]; recommended_actions: string[]; is_single_product: boolean };
-type ChatResult = { reply: string; graph?: unknown; sessionId?: string; applied?: boolean; preview?: WorkflowPreviewData; youDoFirst?: string[]; iCan?: string[]; suggestions?: SuggestionBadge[]; operations?: OperationCard[]; clarification?: Clarification; systemPlan?: SystemPlanResult; thinking?: string };
+type ChatResult = { reply: string; graph?: unknown; sessionId?: string; applied?: boolean; preview?: WorkflowPreviewData; youDoFirst?: string[]; iCan?: string[]; suggestions?: SuggestionBadge[]; operations?: OperationCard[]; clarification?: Clarification; systemPlan?: SystemPlanResult; thinking?: string; stepCards?: StepCard[]; connectionCards?: ConnectionCard[]; warnings?: string[] };
 type Activity = { label: string; detail?: string; state: "done" | "active" };
 export type CopilotTodo = { kind: string; message: string };
 
@@ -102,6 +112,25 @@ const THINKING_PATTERNS = [
   /(?:Let me explain what(?:'s| is) needed|ask for the action step direction|explain what(?:'s| is) needed and ask)/g,
 ];
 
+/** Convert raw backend reasoning text into a concise user-facing activity label */
+function reasoningToActivity(text: string): string {
+  const lower = text.toLowerCase();
+  if (/\b(intent|understand|classify|parse)\b/.test(lower)) return "Understanding your request";
+  if (/\b(retrieve|find|search|lookup|catalog)\b/.test(lower)) return "Finding matching apps";
+  if (/\b(select|pick|choose|match)\b/.test(lower)) return "Selecting operations";
+  if (/\b(connect|auth|account|credential)\b/.test(lower)) return "Checking connections";
+  if (/\b(schema|field|column|output|input)\b/.test(lower)) return "Reading data fields";
+  if (/\b(map|mapping|lineage|link)\b/.test(lower)) return "Mapping fields between steps";
+  if (/\b(assemble|build|graph|compile|construct)\b/.test(lower)) return "Building workflow";
+  if (/\b(validate|check|verify|repair)\b/.test(lower)) return "Validating workflow";
+  if (/\b(persist|save|draft|store)\b/.test(lower)) return "Saving draft";
+  if (/\b(test|run|execute|trigger)\b/.test(lower)) return "Testing workflow";
+  if (/\b(error|fail|broken|issue)\b/.test(lower)) return "Found an issue";
+  // Fallback: take first sentence, truncated
+  const first = text.split(/\n/)[0] || text;
+  return first.length > 60 ? first.slice(0, 57) + "..." : first;
+}
+
 function stripChainOfThought(text: string): string {
   if (!text) return text;
   let cleaned = text;
@@ -127,25 +156,24 @@ function ActivityIcon({ kind, size = "sm" }: { kind: AgentActivityKind; size?: "
 /** Live build pipeline — shows user-safe progress with animated transitions */
 function BuildPipeline({ activities, agentState, agentTitle }: { activities: AgentActivityItem[]; agentState: AgentState; agentTitle: string }) {
   const isWorking = agentState !== "idle" && agentState !== "completed" && agentState !== "error";
-
-  // Map activities to pipeline stages
-  const stageMap = useMemo(() => {
-    const doneLabels = new Set(activities.filter((a) => a.kind === "done").map((a) => a.label.toLowerCase()));
-    const runningLabel = activities.find((a) => a.kind === "running")?.label?.toLowerCase();
-    return PIPELINE_STAGES.map((stage) => ({
-      ...stage,
-      status: doneLabels.has(stage.label.toLowerCase())
-        ? ("done" as const)
-        : runningLabel === stage.label.toLowerCase()
-          ? ("running" as const)
-          : ("pending" as const),
-    }));
-  }, [activities]);
+  const doneCount = activities.filter((a) => a.kind === "done").length;
+  const totalEstimate = PIPELINE_STAGES.length;
+  const progress = Math.min(1, doneCount / totalEstimate);
 
   if (!isWorking && activities.length === 0) return null;
 
   return (
     <div className="rounded-xl border border-teal/20 bg-gradient-to-b from-teal-soft/10 to-transparent p-3 mx-1">
+      {/* Progress bar */}
+      {isWorking && (
+        <div className="mb-3 h-1 w-full overflow-hidden rounded-full bg-teal/10">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-teal to-teal/60 transition-all duration-500 ease-out"
+            style={{ width: `${Math.max(5, progress * 100)}%` }}
+          />
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-2.5">
         <span className="relative flex h-6 w-6 items-center justify-center">
@@ -154,6 +182,8 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
             <Loader2 className="relative h-3.5 w-3.5 animate-spin text-teal" />
           ) : agentState === "completed" ? (
             <span className="relative flex h-5 w-5 items-center justify-center rounded-full bg-ok text-white"><Check className="h-3 w-3" /></span>
+          ) : agentState === "error" ? (
+            <AlertTriangle className="relative h-3.5 w-3.5 text-danger" />
           ) : (
             <Sparkles className="relative h-3.5 w-3.5 text-teal" />
           )}
@@ -163,16 +193,18 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
         </div>
       </div>
 
-      {/* Pipeline steps */}
+      {/* Activity items with slide-in animation */}
       {activities.length > 0 && (
         <div className="mt-3 space-y-1">
-          {activities.slice(-8).map((item) => (
+          {activities.slice(-8).map((item, idx) => (
             <div
               key={item.id}
               className={cn(
                 "flex items-start gap-2 rounded-lg px-2 py-1 text-[12px] transition-all duration-300",
                 item.kind === "running" && "bg-teal-soft/20",
                 item.kind === "done" && "opacity-80",
+                // Slide-in animation for new items
+                idx === activities.slice(-8).length - 1 && "animate-[slideIn_0.3s_ease-out]",
               )}
             >
               <ActivityIcon kind={item.kind} />
@@ -198,10 +230,11 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
         </div>
       )}
 
-      {/* Stop button */}
-      {isWorking && agentState === "executing" && (
-        <div className="mt-2 flex justify-end">
-          <span className="text-[10px] text-ink-muted animate-pulse">Building...</span>
+      {/* Status footer */}
+      {isWorking && (
+        <div className="mt-2 flex items-center justify-between">
+          <span className="text-[10px] text-ink-muted animate-pulse">Working...</span>
+          {doneCount > 0 && <span className="text-[10px] text-ink-muted">{doneCount}/{totalEstimate} steps</span>}
         </div>
       )}
     </div>
@@ -295,6 +328,151 @@ function OperationCardView({ card, onSend }: { card: OperationCard; onSend?: (pr
   );
 }
 
+/** Step card — shows a workflow step with status and issues */
+function StepCardView({ card, onSend }: { card: StepCard; onSend?: (prompt: string) => void }) {
+  const statusColors = {
+    configured: "border-ok/30 bg-ok/5",
+    needs_config: "border-amber-300/30 bg-amber-500/5",
+    needs_connection: "border-amber-300/30 bg-amber-500/5",
+    needs_action: "border-line bg-muted/20",
+    tested: "border-ok/30 bg-ok/5",
+  };
+  const statusIcons = {
+    configured: <Check className="h-3 w-3 text-ok" />,
+    needs_config: <AlertTriangle className="h-3 w-3 text-amber-600" />,
+    needs_connection: <AlertTriangle className="h-3 w-3 text-amber-600" />,
+    needs_action: <AlertCircle className="h-3 w-3 text-ink-muted" />,
+    tested: <Check className="h-3 w-3 text-ok" />,
+  };
+  const statusLabels = {
+    configured: "Configured",
+    needs_config: "Needs configuration",
+    needs_connection: "Account required",
+    needs_action: "Needs an action",
+    tested: "Tested",
+  };
+  return (
+    <div className={cn("rounded-xl border p-3 text-xs", statusColors[card.status])}>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-bold text-ink">Step {card.index}</span>
+        <span className="font-medium text-ink">{card.label}</span>
+        {card.app && <span className="text-ink-muted">({card.app})</span>}
+        <span className="ml-auto flex items-center gap-1 text-[10px]">
+          {statusIcons[card.status]}
+          <span className="text-ink-muted">{statusLabels[card.status]}</span>
+        </span>
+      </div>
+      {card.issues && card.issues.length > 0 && (
+        <div className="mt-2 space-y-0.5">
+          {card.issues.map((issue, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-[11px] text-amber-700">
+              <AlertTriangle className="h-2.5 w-2.5 shrink-0" />{issue}
+            </div>
+          ))}
+        </div>
+      )}
+      {card.actions && card.actions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {card.actions.map((action, i) => (
+            <button key={i} type="button" className="rounded-full border border-teal/30 bg-teal-soft/20 px-2 py-0.5 text-[10px] font-medium text-teal transition hover:bg-teal-soft/40 active:scale-95" onClick={() => onSend?.(action.prompt)}>
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Connection card — shows authentication status with connect action */
+function ConnectionCardView({ card, onSend }: { card: ConnectionCard; onSend?: (prompt: string) => void }) {
+  return (
+    <div className={cn("rounded-xl border p-3 text-xs", card.status === "connected" ? "border-ok/30 bg-ok/5" : "border-amber-300/30 bg-amber-500/5")}>
+      <div className="flex items-center gap-2">
+        {card.status === "connected" ? (
+          <Check className="h-3.5 w-3.5 text-ok" />
+        ) : (
+          <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+        )}
+        <span className="font-medium text-ink">{card.appName}</span>
+        <span className="text-ink-muted">{card.status === "connected" ? "Connected" : "Not connected"}</span>
+      </div>
+      {card.message && <p className="mt-1 text-[11px] text-ink-muted">{card.message}</p>}
+      {card.actions && card.actions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {card.actions.map((action, i) => (
+            <button key={i} type="button" className="rounded-full border border-teal/30 bg-teal-soft/20 px-2 py-0.5 text-[10px] font-medium text-teal transition hover:bg-teal-soft/40 active:scale-95" onClick={() => onSend?.(action.prompt)}>
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Field mapping card — shows suggested field mappings */
+function FieldMappingView({ card }: { card: FieldMappingCard }) {
+  return (
+    <div className="rounded-xl border border-line bg-muted/20 p-3 text-xs">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Field Mapping</span>
+      </div>
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-medium text-ink-muted">{card.sourceLabel}</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {card.sourceFields.map((f, i) => (
+              <li key={i} className="text-[11px] text-ink">{f}</li>
+            ))}
+          </ul>
+        </div>
+        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-teal" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-medium text-ink-muted">{card.targetLabel}</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {card.targetFields.map((f, i) => (
+              <li key={i} className="text-[11px] text-ink">{f}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Test result card — shows step test output */
+function TestResultView({ card, onSend }: { card: TestResultCard; onSend?: (prompt: string) => void }) {
+  return (
+    <div className={cn("rounded-xl border p-3 text-xs", card.success ? "border-ok/30 bg-ok/5" : "border-danger/30 bg-danger/5")}>
+      <div className="flex items-center gap-2">
+        {card.success ? <Check className="h-3.5 w-3.5 text-ok" /> : <AlertCircle className="h-3.5 w-3.5 text-danger" />}
+        <span className="font-medium text-ink">{card.stepLabel}</span>
+        <span className="text-ink-muted">{card.success ? "Passed" : "Failed"}</span>
+      </div>
+      {card.fields && Object.keys(card.fields).length > 0 && (
+        <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+          {Object.entries(card.fields).slice(0, 6).map(([key, value]) => (
+            <div key={key} className="flex items-center gap-1.5">
+              <span className="text-[10px] font-medium text-ink-muted truncate">{key}</span>
+              <span className="text-[11px] text-ink truncate">{String(value).slice(0, 40)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {card.actions && card.actions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {card.actions.map((action, i) => (
+            <button key={i} type="button" className="rounded-full border border-teal/30 bg-teal-soft/20 px-2 py-0.5 text-[10px] font-medium text-teal transition hover:bg-teal-soft/40 active:scale-95" onClick={() => onSend?.(action.prompt)}>
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SuggestionBadges({ badges, onSelect }: { badges: SuggestionBadge[]; onSelect: (prompt: string) => void }) {
   return (<div className="flex flex-wrap gap-1.5">{badges.map((badge) => (<button key={badge.label} type="button" className="inline-flex items-center gap-1 rounded-full border border-line bg-elevated px-2.5 py-1 text-[11px] font-medium text-ink transition-all hover:border-teal/50 hover:bg-teal-soft/20 hover:text-teal active:scale-95" onClick={() => onSelect(badge.prompt)}><BadgeIcon type={badge.icon} />{badge.label}</button>))}</div>);
 }
@@ -304,6 +482,71 @@ function ClarificationView({ clarification, onSelect }: { clarification: Clarifi
     <div className="rounded-xl border border-violet-400/30 bg-violet-500/5 p-3">
       <div className="flex items-start gap-2"><MessageSquare className="h-3.5 w-3.5 mt-0.5 shrink-0 text-violet-600" /><p className="text-xs font-medium text-ink">{clarification.question}</p></div>
       <div className="mt-2 space-y-1">{clarification.options.map((option) => (<button key={option.label} type="button" className="flex w-full items-center gap-2 rounded-lg border border-line bg-elevated p-2 text-left text-[11px] transition-all hover:border-violet-400/40 hover:bg-violet-500/5 active:scale-[0.98]" onClick={() => onSelect(option.prompt)}><ChevronRight className="h-3 w-3 shrink-0 text-violet-600" /><div><span className="font-medium text-ink">{option.label}</span>{option.description && <span className="ml-1.5 text-ink-muted">{option.description}</span>}</div></button>))}</div>
+    </div>
+  );
+}
+
+/** Typed action buttons — handles real UI actions, not just chat prompts */
+function ActionButtons({ actions, onSend }: { actions: Array<{ type: string; label: string; prompt?: string; href?: string; appSlug?: string; stepId?: string }>; onSend?: (prompt: string) => void }) {
+  const iconMap: Record<string, React.ReactNode> = {
+    connect_account: <Zap className="h-2.5 w-2.5" />,
+    choose_app: <ChevronRight className="h-2.5 w-2.5" />,
+    choose_action: <ChevronRight className="h-2.5 w-2.5" />,
+    test_step: <Play className="h-2.5 w-2.5" />,
+    test_workflow: <Play className="h-2.5 w-2.5" />,
+    add_step: <Plus className="h-2.5 w-2.5" />,
+    remove_step: <X className="h-2.5 w-2.5" />,
+    select_step: <CircleDot className="h-2.5 w-2.5" />,
+    retry: <RotateCcw className="h-2.5 w-2.5" />,
+    prompt: <Sparkles className="h-2.5 w-2.5" />,
+    navigate: <ArrowRight className="h-2.5 w-2.5" />,
+  };
+  const colorMap: Record<string, string> = {
+    connect_account: "border-amber-300/50 bg-amber-100/50 text-amber-700 hover:bg-amber-100",
+    choose_app: "border-teal/30 bg-teal-soft/20 text-teal hover:bg-teal-soft/40",
+    choose_action: "border-teal/30 bg-teal-soft/20 text-teal hover:bg-teal-soft/40",
+    test_step: "border-ok/30 bg-ok/10 text-ok hover:bg-ok/20",
+    test_workflow: "border-ok/30 bg-ok/10 text-ok hover:bg-ok/20",
+    add_step: "border-violet-300/30 bg-violet-500/5 text-violet-600 hover:bg-violet-500/10",
+    remove_step: "border-danger/30 bg-danger/5 text-danger hover:bg-danger/10",
+    retry: "border-amber-300/30 bg-amber-500/5 text-amber-600 hover:bg-amber-500/10",
+  };
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {actions.map((action, i) => {
+        const icon = iconMap[action.type] || iconMap.prompt;
+        const colors = colorMap[action.type] || "border-teal/30 bg-teal-soft/20 text-teal hover:bg-teal-soft/40";
+        return (
+          <button
+            key={i}
+            type="button"
+            className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all active:scale-95", colors)}
+            onClick={() => {
+              if (action.type === "navigate" && action.href) {
+                window.open(action.href, "_blank");
+              } else if (action.type === "connect_account" && action.appSlug) {
+                onSend?.(`Connect my ${action.appSlug} account`);
+              } else if (action.type === "test_step" && action.stepId) {
+                onSend?.(`Test step ${action.stepId}`);
+              } else if (action.type === "test_workflow") {
+                onSend?.("Test this workflow");
+              } else if (action.type === "add_step") {
+                onSend?.("Add the next step");
+              } else if (action.type === "remove_step" && action.stepId) {
+                onSend?.(`Remove step ${action.stepId}`);
+              } else if (action.type === "select_step" && action.stepId) {
+                onSend?.(`Select step ${action.stepId}`);
+              } else if (action.type === "retry") {
+                onSend?.("Retry");
+              } else if (action.prompt) {
+                onSend?.(action.prompt);
+              }
+            }}
+          >
+            {icon}{action.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -325,14 +568,14 @@ function AgentMessage({ text, onSend }: { text: string; onSend?: (prompt: string
   );
 }
 
-/** Thinking/reasoning block — collapsible, shown below the request */
+/** Thinking/reasoning block — only shown when explicitly expanded via details element */
 function ThinkingBlock({ text }: { text: string }) {
   if (!text) return null;
   return (
     <details className="rounded-lg border border-line bg-muted/10 text-[11px] transition-all open:border-violet-400/30 open:bg-violet-500/[0.02]">
       <summary className="cursor-pointer select-none px-3 py-1.5 font-medium text-ink-muted hover:text-ink flex items-center gap-1.5">
-        <Sparkles className="h-3 w-3 text-violet-500" />
-        Thinking...
+        <CircleDot className="h-3 w-3 text-ink-muted/50" />
+        Details
       </summary>
       <div className="border-t border-line px-3 py-2">
         <p className="leading-relaxed text-ink-muted whitespace-pre-wrap">{text}</p>
@@ -440,13 +683,27 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
           if (ev.type === "test_result") addActivity(ev.success ? "done" : "warn", `Tested ${ev.label}`, ev.success ? "Passed" : "Failed");
           if (ev.type === "operation_card" && ev.operation) { streamingOps = [ev.operation as OperationCard]; setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...last, operations: [...streamingOps] }]; return [...m, { role: "assistant", text: "", operations: [...streamingOps] }]; }); }
           if (ev.type === "stage") { addActivity("done", (ev.label ?? ev.stage ?? "Working") as string); }
-          if (ev.type === "reasoning" && ev.text) { thinkingText = String(ev.text); }
-          if (ev.type === "chat_result" && ev.thinking) { thinkingText = String(ev.thinking); }
+          if (ev.type === "reasoning" && ev.text) { const txt = String(ev.text); if (txt.length > 5) { const summary = reasoningToActivity(txt); addActivity("done", summary); } }
+          if (ev.type === "analysis_summary" && ev.title && Array.isArray(ev.items)) { const title = String(ev.title); const items = ev.items as string[]; addActivity("done", title); items.forEach((item) => addActivity("done", `  ${item}`)); }
+          if (ev.type === "connection_required") { const appName = String(ev.appName || ev.appSlug || "App"); const msg = ev.message ? String(ev.message) : "Connect your account to continue"; addActivity("warn", `${appName} needs authentication`, msg); }
+          if (ev.type === "field_mapping") { const src = String(ev.sourceLabel || "Source"); const tgt = String(ev.targetLabel || "Target"); addActivity("done", "Field mapping", `${src} \u2192 ${tgt}`); }
+          if (ev.type === "chat_result") {
+            const cr = ev as Record<string, unknown>;
+            if (Array.isArray(cr.stepCards)) {
+              setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant") return [...m.slice(0, -1), { ...last, stepCards: cr.stepCards as StepCard[] }]; return m; });
+            }
+            if (Array.isArray(cr.connectionCards)) {
+              setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant") return [...m.slice(0, -1), { ...last, connectionCards: cr.connectionCards as ConnectionCard[] }]; return m; });
+            }
+            if (Array.isArray(cr.warnings)) {
+              setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant") return [...m.slice(0, -1), { ...last, warnings: cr.warnings as string[] }]; return m; });
+            }
+          }
         }, abortCtrl.signal);
         const hasSuggestion = Boolean(result.graph || result.preview);
         setAgentState("completed"); setAgentTitle("Done");
         setLiveActivities((prev) => prev.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a));
-        setMsgs((m) => { const fa = liveActivities.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a); const last = m[m.length - 1]; const msg: Msg = { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations?.length ? result.operations : streamingOps, clarification: result.clarification, activities: fa, agentState: "completed", agentTitle: "Done", thinking: thinkingText || undefined }; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), msg]; return [...m, msg]; });
+        setMsgs((m) => { const fa = liveActivities.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a); const last = m[m.length - 1]; const msg: Msg = { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations?.length ? result.operations : streamingOps, clarification: result.clarification, activities: fa, agentState: "completed", agentTitle: "Done", stepCards: (result as Record<string, unknown>).stepCards as StepCard[] | undefined, connectionCards: (result as Record<string, unknown>).connectionCards as ConnectionCard[] | undefined, warnings: (result as Record<string, unknown>).warnings as string[] | undefined }; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...msg, stepCards: msg.stepCards || last.stepCards, connectionCards: msg.connectionCards || last.connectionCards, warnings: msg.warnings || last.warnings }]; return [...m, msg]; });
         if (result.graph && result.applied) {
           setCheckpoint(true);
           void onApply(result.graph, result.sessionId);
@@ -460,7 +717,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         const result = await onChat(prompt);
         const hasSuggestion = Boolean(result.graph || result.preview);
         setAgentState("completed"); setAgentTitle("Done");
-        setMsgs((m) => [...m, { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations, clarification: result.clarification, thinking: result.thinking }]);
+        setMsgs((m) => [...m, { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations, clarification: result.clarification, stepCards: result.stepCards, connectionCards: result.connectionCards, warnings: result.warnings }]);
         if (result.graph && result.applied) {
           setCheckpoint(true);
           void onApply(result.graph, result.sessionId);
@@ -565,6 +822,29 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
                   {/* Operations */}
                   {m.operations && m.operations.length > 0 && <div className="space-y-2">{m.operations.map((op, j) => <OperationCardView key={j} card={op} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}
 
+                  {/* Step cards */}
+                  {m.stepCards && m.stepCards.length > 0 && <div className="space-y-2">{m.stepCards.map((card, j) => <StepCardView key={j} card={card} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}
+
+                  {/* Connection cards */}
+                  {m.connectionCards && m.connectionCards.length > 0 && <div className="space-y-2">{m.connectionCards.map((card, j) => <ConnectionCardView key={j} card={card} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}
+
+                  {/* Field mappings */}
+                  {m.fieldMappings && m.fieldMappings.length > 0 && <div className="space-y-2">{m.fieldMappings.map((card, j) => <FieldMappingView key={j} card={card} />)}</div>}
+
+                  {/* Test results */}
+                  {m.testResults && m.testResults.length > 0 && <div className="space-y-2">{m.testResults.map((card, j) => <TestResultView key={j} card={card} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}
+
+                  {/* Warnings */}
+                  {m.warnings && m.warnings.length > 0 && (
+                    <div className="rounded-xl border border-amber-300/30 bg-amber-500/5 p-3 text-xs">
+                      {m.warnings.map((w, i) => (
+                        <div key={i} className="flex items-center gap-2 text-amber-700">
+                          <AlertTriangle className="h-3 w-3 shrink-0" /><span>{w}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   {/* Clarification */}
                   {m.clarification && <ClarificationView clarification={m.clarification} onSelect={(p) => { setInput(p); void send("chat", p); }} />}
 
@@ -574,6 +854,27 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
                   {/* System plan */}
                   {m.systemPlan && <SystemPlanView plan={m.systemPlan} />}
                   {m.workflowPreview?.steps.length ? <WorkflowPreview preview={m.workflowPreview} /> : null}
+
+                  {/* Typed action buttons — derived from step/connection cards */}
+                  {(() => {
+                    const quickActions: Array<{ type: string; label: string; prompt?: string; appSlug?: string; stepId?: string }> = [];
+                    if (m.connectionCards) {
+                      m.connectionCards.filter((c) => c.status === "not_configured").forEach((c) => {
+                        quickActions.push({ type: "connect_account", label: `Connect ${c.appName}`, appSlug: c.appSlug });
+                      });
+                    }
+                    if (m.stepCards) {
+                      m.stepCards.filter((s) => s.status === "needs_action" || s.status === "needs_config").forEach((s) => {
+                        quickActions.push({ type: "test_step", label: `Test Step ${s.index}`, stepId: String(s.index) });
+                      });
+                      const hasConfigurable = m.stepCards.some((s) => s.status === "needs_config" || s.status === "needs_action");
+                      if (hasConfigurable) {
+                        quickActions.push({ type: "add_step", label: "Add step" });
+                      }
+                    }
+                    if (quickActions.length === 0) return null;
+                    return <div className="mt-1"><ActionButtons actions={quickActions} onSend={(p) => { setInput(p); void send("chat", p); }} /></div>;
+                  })()}
 
                   {/* Applied badge + Copy button */}
                   <div className="flex items-center gap-2 mt-1">

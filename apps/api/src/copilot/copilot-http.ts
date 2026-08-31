@@ -321,6 +321,23 @@ export async function streamCopilotChat(opts: {
     else if (/\b(hi|hello|hey|thanks)\b/.test(promptLower)) reasoningText = "Greeting acknowledged";
     else reasoningText = "Classifying and routing your request through the universal handler";
     await send({ type: "reasoning", text: reasoningText, stage: "intent" });
+    // Emit analysis_summary with structured workflow inspection data
+    if (graph && graph.nodes.length > 0) {
+      const analysisItems: string[] = [];
+      analysisItems.push(`Found ${graph.nodes.length} step${graph.nodes.length > 1 ? 's' : ''}`);
+      for (const node of graph.nodes) {
+        if (!node.appSlug) {
+          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: No app selected`);
+        } else if (!node.operation) {
+          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: ${node.appSlug} — needs an action`);
+        } else if (!node.connectionId && node.appSlug !== 'webhook' && node.appSlug !== 'http' && node.appSlug !== 'manual' && node.appSlug !== 'schedule') {
+          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: ${node.label || node.appSlug} — needs authentication`);
+        } else {
+          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: ${node.label || node.appSlug} — configured`);
+        }
+      }
+      await send({ type: 'analysis_summary', title: 'Workflow inspection', items: analysisItems });
+    }
     const result = await copilotChat({
       prompt: opts.prompt,
       workspaceId: opts.orgId,

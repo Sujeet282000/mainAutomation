@@ -5,17 +5,19 @@ import { Handle, Position, type NodeProps } from "reactflow";
 import { AppIcon } from "@/components/app-icon";
 import { cn } from "@/lib/utils";
 import type { StepData } from "./store";
+import { useRef, useEffect, useState } from "react";
 
 export type RunState = "idle" | "queued" | "running" | "waiting" | "ok" | "fail";
 
 /* ── Status icon — filled circle style ──────────────────────────────────── */
 
 function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
-  /* Running — violet spinner with filled background */
+  /* Running — violet spinner with filled background + pulse ring */
   if (run === "running") {
     return (
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-violet-500 text-white shadow-sm">
-        <Loader2 className="h-3 w-3 animate-spin" />
+      <span className="relative flex h-6 w-6 items-center justify-center rounded-full bg-violet-500 text-white shadow-sm">
+        <span className="absolute inset-0 rounded-full bg-violet-400 animate-ping opacity-30" />
+        <Loader2 className="h-3 w-3 animate-spin relative z-10" />
       </span>
     );
   }
@@ -29,25 +31,26 @@ function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
     );
   }
 
-  /* Waiting — amber spinner with filled background */
+  /* Waiting — amber spinner with pulse ring */
   if (run === "waiting") {
     return (
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
-        <Loader2 className="h-3 w-3 animate-spin" />
+      <span className="relative flex h-6 w-6 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
+        <span className="absolute inset-0 rounded-full bg-amber-400 animate-ping opacity-25" />
+        <Loader2 className="h-3 w-3 animate-spin relative z-10" />
       </span>
     );
   }
 
-  /* Success — green filled circle with white checkmark (matching image) */
+  /* Success — green filled circle with white checkmark + pop animation */
   if (run === "ok") {
     return (
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm av-node-success">
         <Check className="h-3.5 w-3.5" strokeWidth={3} />
       </span>
     );
   }
 
-  /* Fail — red filled circle with white X (matching image) */
+  /* Fail — red filled circle with white X */
   if (run === "fail") {
     return (
       <span className="flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white shadow-sm">
@@ -56,7 +59,7 @@ function StatusIcon({ run, empty }: { run: RunState; empty: boolean }) {
     );
   }
 
-  /* Empty step — amber warning */
+  /* Empty step — amber warning with subtle shimmer */
   if (empty) {
     return (
       <span className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
@@ -100,7 +103,32 @@ export function StepNode({
     : null;
   const appName = data.appSlug ? data.appSlug.replace(/-/g, " ") : empty ? "Choose app" : "Step";
 
-  /* Determine border class based on state */
+  /* ── State transition detection for one-shot animations ── */
+  const prevRun = useRef<RunState>(run);
+  const [transitionClass, setTransitionClass] = useState("");
+
+  useEffect(() => {
+    if (prevRun.current !== run) {
+      if (run === "ok" && prevRun.current !== "ok") {
+        setTransitionClass("av-node-success");
+        const t = setTimeout(() => setTransitionClass(""), 600);
+        return () => clearTimeout(t);
+      }
+      if (run === "fail" && prevRun.current !== "fail") {
+        setTransitionClass("av-node-fail");
+        const t = setTimeout(() => setTransitionClass(""), 500);
+        return () => clearTimeout(t);
+      }
+      if (run === "running" && prevRun.current === "idle") {
+        setTransitionClass("av-node-enter");
+        const t = setTimeout(() => setTransitionClass(""), 500);
+        return () => clearTimeout(t);
+      }
+    }
+    prevRun.current = run;
+  }, [run]);
+
+  /* ── Border class based on state ── */
   const borderClass = (() => {
     if (run === "running") return "border-2 border-violet-400 dark:border-violet-500";
     if (run === "ok") return "border-2 border-emerald-400 dark:border-emerald-500";
@@ -111,14 +139,21 @@ export function StepNode({
     return "border border-line";
   })();
 
+  /* ── Animation class based on state ── */
+  const animClass = (() => {
+    if (transitionClass) return transitionClass;
+    if (run === "running") return "av-node-run";
+    if (run === "waiting") return "av-node-waiting";
+    return "";
+  })();
+
   return (
     <div
       className={cn(
-        "relative w-[320px] rounded-xl px-4 py-4 transition-colors duration-200 bg-elevated",
-        /* ── Border states ── */
+        "relative w-[320px] rounded-xl px-4 py-4 transition-all duration-200 bg-elevated",
         borderClass,
-        /* ── Running pulse ── */
-        run === "running" && "av-node-run"
+        animClass,
+        empty && run === "idle" && "av-empty-shimmer"
       )}
     >
       {/* Top handle */}
@@ -153,7 +188,7 @@ export function StepNode({
         <StatusIcon run={run} empty={empty} />
         <span
           className={cn(
-            "inline-flex min-w-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize",
+            "inline-flex min-w-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize transition-colors duration-300",
             run === "ok" && "text-emerald-600 dark:text-emerald-400",
             run === "fail" && "text-red-600 dark:text-red-400",
             run === "running" && "text-violet-600 dark:text-violet-400",
@@ -182,11 +217,12 @@ export function StepNode({
       <div className="min-w-0 pl-8.5">
         <div
           className={cn(
-            "truncate text-[14px] font-semibold leading-snug",
+            "truncate text-[14px] font-semibold leading-snug transition-colors duration-300",
             run === "ok" && "text-emerald-700 dark:text-emerald-300",
             run === "fail" && "text-red-700 dark:text-red-300",
             run === "running" && "text-violet-700 dark:text-violet-300",
-            (run === "idle" || run === "queued" || run === "waiting") && "text-ink"
+            run === "waiting" && "text-amber-700 dark:text-amber-300",
+            (run === "idle" || run === "queued") && "text-ink"
           )}
         >
           {empty
@@ -216,7 +252,7 @@ export function StepNode({
       {data.terminal && (
         <button
           type="button"
-          className="absolute -bottom-3.5 left-1/2 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-line bg-elevated text-ink-muted hover:border-violet-500 hover:text-violet-600 transition-colors shadow-sm"
+          className="absolute -bottom-3.5 left-1/2 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-line bg-elevated text-ink-muted hover:border-violet-500 hover:text-violet-600 hover:shadow-md transition-all duration-200 shadow-sm"
           aria-label="Add a step after this action"
           title="Add a step"
           onClick={(event) => {

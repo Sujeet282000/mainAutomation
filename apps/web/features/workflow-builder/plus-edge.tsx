@@ -20,6 +20,7 @@ export function PlusEdge({
   active?: boolean;
   pulse?: boolean;
   failed?: boolean;
+  success?: boolean;
 }>) {
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
@@ -32,37 +33,44 @@ export function PlusEdge({
   });
 
   const isFailed = data?.failed;
-  const isPulse = data?.pulse && !isFailed;
-  const isActive = data?.active && !isFailed;
+  const isSuccess = data?.success && !isFailed;
+  const isPulse = data?.pulse && !isFailed && !isSuccess;
+  const isActive = data?.active && !isFailed && !isSuccess;
 
   /* Edge color by state */
   const strokeColor = isFailed
     ? "#ef4444"
-    : isPulse
-      ? "#8b5cf6"
-      : isActive
-        ? "#10b981"
-        : "rgb(148 163 184)";
+    : isSuccess
+      ? "#10b981"
+      : isPulse
+        ? "#8b5cf6"
+        : isActive
+          ? "#10b981"
+          : "rgb(148 163 184)";
 
-  const strokeWidth = isFailed || isPulse || isActive ? 2.6 : 1.6;
+  const strokeWidth = isFailed || isPulse || isActive || isSuccess ? 2.6 : 1.6;
 
   const animation = isFailed
     ? "av-dash 0.5s linear infinite"
-    : isPulse
-      ? "av-dash 0.7s linear infinite"
-      : isActive
-        ? "av-edge-pulse 1.5s ease-in-out infinite"
-        : undefined;
+    : isSuccess
+      ? "av-edge-success 0.6s ease-out forwards"
+      : isPulse
+        ? "av-dash 0.7s linear infinite"
+        : isActive
+          ? "av-edge-pulse 1.5s ease-in-out infinite"
+          : undefined;
 
-  const dashArray = isFailed ? "6 6" : isPulse ? "8 8" : undefined;
+  const dashArray = isFailed ? "6 6" : isPulse ? "8 8" : isSuccess ? "24 24" : undefined;
 
   const filter = isFailed
     ? "drop-shadow(0 0 4px rgb(239 68 68 / 0.35))"
-    : isPulse
-      ? "drop-shadow(0 0 3px rgb(139 92 246 / 0.3))"
-      : isActive
-        ? "drop-shadow(0 0 3px rgb(16 185 129 / 0.3))"
-        : undefined;
+    : isSuccess
+      ? "drop-shadow(0 0 4px rgb(16 185 129 / 0.35))"
+      : isPulse
+        ? "drop-shadow(0 0 3px rgb(139, 92, 246 / 0.3))"
+        : isActive
+          ? "drop-shadow(0 0 3px rgb(16 185 129 / 0.3))"
+          : undefined;
 
   return (
     <>
@@ -80,6 +88,16 @@ export function PlusEdge({
           ...style
         }}
       />
+      {/* Traveling particle when active/pulse — shows data flowing */}
+      {(isPulse || isActive) && (
+        <circle r="3" fill={isPulse ? "#8b5cf6" : "#10b981"} opacity="0.8">
+          <animateMotion
+            dur="1.2s"
+            repeatCount="indefinite"
+            path={path}
+          />
+        </circle>
+      )}
       <EdgeLabelRenderer>
         <div
           style={{
@@ -94,7 +112,9 @@ export function PlusEdge({
               className={`mb-1 rounded-md px-2 py-0.5 text-[10px] font-bold tracking-wide ${
                 isFailed
                   ? "bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400"
-                  : "bg-elevated text-ink-muted"
+                  : isSuccess
+                    ? "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
+                    : "bg-elevated text-ink-muted"
               }`}
             >
               {data.label}

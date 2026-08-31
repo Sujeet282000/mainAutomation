@@ -143,10 +143,19 @@ export async function* runCopilotEngine(opts: {
   yield { type: "stage", stage: "intent", label: "Understanding your request" };
 
   // Classify intent into asset type (workflow, table, form, agent, chatbot, system, etc.)
-  const assetClassification = classifyIntent(prompt);
+  const assetClassification = classifyIntent(prompt);  // Emit structured analysis summary with user-safe items
+  const analysisItems: string[] = [];
+  analysisItems.push(`Intent: ${assetClassification.action} a ${assetClassification.assetType}`);
+  if (assetClassification.entities.apps.length) {
+    analysisItems.push(`Detected apps: ${assetClassification.entities.apps.join(", ")}`);
+  }
+  if (assetClassification.dependencies.length) {
+    analysisItems.push(`Dependencies: ${assetClassification.dependencies.map((d) => d.assetType).join(", ")}`);
+  }
   yield {
     type: "reasoning",
     text: `Asset type: ${assetClassification.assetType} (${Math.round(assetClassification.confidence * 100)}% confidence)\nAction: ${assetClassification.action}${assetClassification.entities.apps.length ? `\nDetected apps: ${assetClassification.entities.apps.join(", ")}` : ""}${assetClassification.dependencies.length ? `\nDependencies: ${assetClassification.dependencies.map((d) => `${d.assetType} (${d.reason})`).join(", ")}` : ""}`
+
   };
 
   // If multi-asset system detected, yield a plan-stage event for the UI
@@ -165,6 +174,15 @@ export async function* runCopilotEngine(opts: {
           type: "reasoning",
           text: `Products: ${systemPlan.products.join(", ")}\nSteps: ${systemPlan.steps.map((s) => s.description).join(" → ")}${systemPlan.connections.length ? `\nConnections needed: ${systemPlan.connections.join(", ")}` : ""}`
         };
+        // Emit structured analysis summary for the UI
+        const planItems: string[] = [];
+        for (const step of systemPlan.steps) {
+          planItems.push(`${step.description}`);
+        }
+        if (systemPlan.connections.length) {
+          planItems.push(`Connections needed: ${systemPlan.connections.join(", ")}`);
+        }
+        yield { type: "analysis_summary", title: "System plan", items: planItems } as any;
       }
     } catch { /* system planner unavailable */ }
   }
@@ -182,6 +200,16 @@ export async function* runCopilotEngine(opts: {
       type: "reasoning",
       text: `I understood this as: ${planner.summary}${planner.ambiguities.length ? `\nNeeds your input: ${planner.ambiguities.join("; ")}` : ""}`
     };
+    // Emit structured analysis for the UI
+    const plannerItems: string[] = [planner.summary];
+    plannerItems.push(`Trigger: ${intent.trigger.phrase}`);
+    for (const s of intent.steps) {
+      plannerItems.push(`Step ${s.order}: ${s.phrase}`);
+    }
+    if (planner.ambiguities.length) {
+      plannerItems.push(`Needs your input: ${planner.ambiguities.join(", ")}`);
+    }
+    yield { type: "analysis_summary", title: "Understanding your request", items: plannerItems } as any;
   } else {
     yield {
       type: "reasoning",
@@ -270,6 +298,21 @@ export async function* runCopilotEngine(opts: {
     text: `Assembled ${graph.nodes.length} catalog steps. AI-selected operations are grounded to the registered catalog.`
   };
 
+  // Emit step summary for the UI
+  const stepItems: string[] = [];
+  for (const node of graph.nodes) {
+    const app = APP_CATALOG.find((a) => a.slug === node.appSlug);
+    const idx = graph.nodes.indexOf(node) + 1;
+    if (node.appSlug && node.operation && app) {
+      stepItems.push(`Step ${idx}: ${node.label || app.name} — ready`);
+    } else if (node.appSlug) {
+      stepItems.push(`Step ${idx}: ${node.appSlug} — needs action`);
+    } else {
+      stepItems.push(`Step ${idx}: empty`);
+    }
+  }
+  yield { type: "analysis_summary", title: "Workflow assembled", items: stepItems } as any;
+
   yield { type: "stage", stage: "connect", label: "Matching your connected accounts" };
   graph = await bindExistingConnections(graph, opts.workspaceId, opts.userEmail);
   for (const node of graph.nodes) {
@@ -293,6 +336,22 @@ export async function* runCopilotEngine(opts: {
         };
       }
     }
+  }
+
+  // Emit connection status summary
+  const connItems: string[] = [];
+  for (const node of graph.nodes) {
+    const app = APP_CATALOG.find((a) => a.slug === node.appSlug);
+    if (!app || (app.authType ?? 'none') === 'none') continue;
+    const idx = graph.nodes.indexOf(node) + 1;
+    if (node.connectionId) {
+      connItems.push(`Step ${idx}: ${app.name} — connected`);
+    } else {
+      connItems.push(`Step ${idx}: ${app.name} — needs account`);
+    }
+  }
+  if (connItems.length) {
+    yield { type: 'analysis_summary', title: 'Connection check', items: connItems } as any;
   }
 
   yield { type: "stage", stage: "schema", label: "Reading data shapes" };

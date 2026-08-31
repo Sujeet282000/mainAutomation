@@ -30,7 +30,8 @@ import {
 /**
  * Strip leaked chain-of-thought from LLM responses.
  * Models sometimes ignore instructions and expose internal reasoning.
- * This helper cleans the most common patterns.
+ * This helper aggressively cleans ALL internal reasoning patterns
+ * so the user never sees agent deliberation.
  */
 function stripThinking(text: string): string {
   if (!text) return text;
@@ -39,22 +40,54 @@ function stripThinking(text: string): string {
   cleaned = cleaned.replace(/^\s*Thinking\.\.\.\s*/i, "");
   // Aggressive chain-of-thought removal — patterns that expose internal LLM reasoning
   const thinkingPatterns = [
+    // Direct LLM deliberation
     /^(?:The user is asking me to|The user wants me to|Let me (?:analyze|think|consider|look|check|examine|inspect|understand|review)|I should (?:first|start|begin|check|look|analyze)|Looking at (?:the|this|what)|Given the context|The user might be|I need to (?:first|check|look|see|understand|analyze)|Wait\s*[-—,]|But wait\s*[-—,]|Actually\s*[-—,]|Now\s*[-—,]|So\s*[-—,]).*$/gm,
+    // Numbered internal analysis
     /^\d+\.\s+(?:The user|Let me|I should|I need|Looking|Given|The workflow|Step \d)/gm,
+    // First-person internal process
     /^\s*(?:First,|Second,|Third,)?\s*(?:I(?:'ll| will| should| need to| can)|Let me|The user|Looking at|Given that|I notice|I see that|The current state)/gm,
+    // Contextual self-analysis
     /(?:I can see you have|This appears to be|The user said|Let me first test|But first,|But I need to know|I need to see what)/g,
     /(?:Let me explain what(?:'s| is) needed|ask for the action step direction|explain what(?:'s| is) needed and ask)/g,
+    // Internal state observations
+    /^(?:Based on my analysis|After reviewing|Upon inspection|My assessment|I've identified|The system shows|From the workflow data)/gm,
+    // Meta-reasoning about user intent
+    /^(?:The appropriate response|The correct approach|The best way to handle|Since the user|Because the workflow)/gm,
   ];
   for (const pat of thinkingPatterns) {
-    cleaned = cleaned.replace(pat, (match) => {
-      const lower = match.toLowerCase();
-      if (/^(first|second|third),?\s+(?:let me|i should|i need)/i.test(lower)) return "";
-      return match;
-    });
+    cleaned = cleaned.replace(pat, "");
   }
-  // Collapse multiple blank lines
+  // Remove entire lines that are internal reasoning (start with first-person deliberation)
+  cleaned = cleaned.replace(/^\s*(?:I(?:'m| am) going to|I'll (?:now|need to|start|begin|check|look)|Let me (?:first|now|then|also)|So (?:I'll|I will|let me))\b.*$/gm, "");
+  // Remove lines that are just formatting artifacts from stripped content
+  cleaned = cleaned.replace(/^\s*\d+\)\s*$/gm, "");
+  // Collapse multiple blank lines left by removals
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  return cleaned.trim();
+  cleaned = cleaned.trim();
+  // If stripping removed everything meaningful, return empty (the UI will hide empty messages)
+  if (cleaned.length < 10) return "";
+  return cleaned;
+}
+
+/**
+ * Convert internal reasoning text into concise user-facing activity summaries.
+ * The user sees WHAT the agent is doing, not HOW it's thinking about it.
+ */
+export function toUserActivity(reasoning: string): string {
+  if (!reasoning) return "";
+  const lower = reasoning.toLowerCase();
+  if (/\b(intent|understand|classify|parse)\b/.test(lower)) return "Understanding your request";
+  if (/\b(retrieve|find|search|lookup|catalog)\b/.test(lower)) return "Finding matching apps";
+  if (/\b(select|pick|choose|match)\b/.test(lower)) return "Selecting operations";
+  if (/\b(connect|auth|account|credential)\b/.test(lower)) return "Checking connections";
+  if (/\b(schema|field|column|output|input)\b/.test(lower)) return "Reading data fields";
+  if (/\b(map|mapping|lineage|link)\b/.test(lower)) return "Mapping fields";
+  if (/\b(assemble|build|graph|compile|construct)\b/.test(lower)) return "Building workflow";
+  if (/\b(validate|check|verify|repair)\b/.test(lower)) return "Validating workflow";
+  if (/\b(persist|save|draft|store)\b/.test(lower)) return "Saving draft";
+  if (/\b(test|run|execute|trigger)\b/.test(lower)) return "Testing workflow";
+  if (/\b(error|fail|broken|issue)\b/.test(lower)) return "Found an issue";
+  return reasoning.slice(0, 80); // Fallback: truncated but safe
 }
 
 const HINTS: Array<{ re: RegExp; slug: string }> = [
@@ -1119,12 +1152,12 @@ async function answerWithLlm(
     : `Current workflow (${snapshot.nodeCount} steps):\n${snapshot.steps.map((s) => `${s.index}. ${s.label} (${s.appSlug}) [${s.chapter}]`).join("\n")}`;
   const system = [
     "You are Orchestra Copilot, a concise workflow automation assistant.",
-    "CRITICAL: Never expose chain-of-thought, internal reasoning, or thinking-out-loud in your response.",
-    "NEVER start with 'Let me analyze', 'I should first', 'Looking at', 'The user might be', or numbered internal analysis.",
-    "Start directly with the conclusion or answer. Be confident and direct.",
-    "Answer the user's question helpfully and concisely.",
-    "If the question is about their current workflow, use the provided workflow context.",
-    "If it's a general knowledge question about automation, integrations, or the platform, answer it.",
+    "CRITICAL: Never expose chain-of-thought, internal reasoning, or thinking-out-loud.",
+    "NEVER use: 'Let me analyze', 'I should first', 'Looking at', 'The user might be', 'Wait,', 'Actually,', 'So,', 'But wait', or numbered internal analysis.",
+    "NEVER start with 'Based on my analysis' or 'After reviewing' — just give the answer.",
+    "Start DIRECTLY with the answer. Be confident and direct.",
+    "If you're explaining a workflow, describe WHAT it does, not HOW you figured it out.",
+    "If it's a knowledge question, answer it directly like a helpful expert would.",
     "Keep answers to 2-4 short paragraphs max. Use markdown for readability.",
     "End with a clear next step when appropriate.",
   ].join(" ");
@@ -1177,6 +1210,9 @@ export async function copilotChat(opts: {
   clarification?: CopilotClarification;
   operations?: CopilotOperation[];
   thinking?: string;
+  stepCards?: Array<{ index: number; label: string; app?: string; status: 'configured' | 'needs_config' | 'needs_connection' | 'needs_action' | 'tested'; issues?: string[]; actions?: Array<{ label: string; prompt: string }> }>;
+  connectionCards?: Array<{ appSlug: string; appName: string; status: 'connected' | 'not_configured'; message?: string; actions?: Array<{ label: string; prompt: string }> }>;
+  warnings?: string[];
 }> {
   const mode = parseCopilotMode(opts.mode);
   const steps = opts.graph?.nodes?.length ?? 0;
@@ -1250,7 +1286,46 @@ export async function copilotChat(opts: {
 ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow looks ready to test."}`
         : "The canvas is empty. Describe a trigger and actions to get started.";
     }
-    return { ...result, reply: stripThinking(result.reply), applied, youDoFirst: snap.youDoFirst ?? [], iCan: snap.iCan ?? [], outline: snap.outline, suggestions, clarification, operations, thinking };
+    // Generate structured step cards from the snapshot
+    const stepCards = snap.steps.map((s) => {
+      const status = s.issues.length > 0
+        ? (s.issues.some((i) => /connect/i.test(i)) ? 'needs_connection' as const
+          : s.issues.some((i) => /app|event|action/i.test(i)) ? 'needs_action' as const
+          : 'needs_config' as const)
+        : (s.chapter === 'test' ? 'tested' as const : 'configured' as const);
+      const actions: Array<{ label: string; prompt: string }> = [];
+      if (status === 'needs_connection') actions.push({ label: `Connect ${s.appSlug}`, prompt: `Connect my ${s.appSlug} account` });
+      if (status === 'needs_action') actions.push({ label: 'Choose action', prompt: `Choose an action for step ${s.index}` });
+      if (status === 'needs_config') actions.push({ label: 'Configure', prompt: `Configure step ${s.index}` });
+      if (status === 'configured' || status === 'tested') actions.push({ label: 'Test step', prompt: `Test step ${s.index}` });
+      return { index: s.index, label: s.label, app: s.appSlug || undefined, status, issues: s.issues.length ? s.issues : undefined, actions: actions.length ? actions : undefined };
+    });
+
+    // Generate connection cards from nodes needing auth
+    const connectionCards: Array<{ appSlug: string; appName: string; status: 'connected' | 'not_configured'; message?: string; actions?: Array<{ label: string; prompt: string }> }> = [];
+    const seenApps = new Set<string>();
+    const graph = result.graph ?? opts.graph;
+    if (graph?.nodes) {
+      for (const node of graph.nodes) {
+        const app = APP_CATALOG.find((a) => a.slug === node.appSlug);
+        if (!app || (app.authType ?? 'none') === 'none') continue;
+        if (seenApps.has(node.appSlug)) continue;
+        seenApps.add(node.appSlug);
+        const connected = Boolean(node.connectionId);
+        connectionCards.push({
+          appSlug: node.appSlug,
+          appName: app.name,
+          status: connected ? 'connected' : 'not_configured',
+          message: connected ? undefined : `Connect your ${app.name} account to use this step`,
+          actions: connected ? undefined : [{ label: `Connect ${app.name}`, prompt: `Connect my ${app.name} account` }],
+        });
+      }
+    }
+
+    // Collect warnings from issues
+    const warnings = snap.issues.length ? snap.issues : undefined;
+
+    return { ...result, reply: stripThinking(result.reply), applied, youDoFirst: snap.youDoFirst ?? [], iCan: snap.iCan ?? [], outline: snap.outline, suggestions, clarification, operations, thinking, stepCards, connectionCards, warnings };
   };
 
   if (/\bpublish\b/i.test(opts.prompt)) {

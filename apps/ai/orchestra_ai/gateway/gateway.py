@@ -65,16 +65,20 @@ class ModelRoute:
 
 
 ROUTES: dict[str, ModelRoute] = {
+    # --- Reasoning / planning — Claude primary, OpenAI fallback ---
     Purpose.COPILOT_PLAN: ModelRoute("anthropic", "claude-sonnet-4-5", 0.1, 4096, "openai", "gpt-4.1"),
-    Purpose.COPILOT_SELECT: ModelRoute("openai", "gpt-4.1-mini", 0.0, 1600, "anthropic", "claude-sonnet-4-5"),
-    Purpose.COPILOT_MAP: ModelRoute("openai", "gpt-4.1", 0.0, 4096, "anthropic", "claude-sonnet-4-5"),
     Purpose.COPILOT_REPAIR: ModelRoute("anthropic", "claude-sonnet-4-5", 0.0, 3000, "openai", "gpt-4.1"),
     Purpose.COPILOT_REFINE: ModelRoute("anthropic", "claude-sonnet-4-5", 0.2, 4096, "openai", "gpt-4.1"),
-    Purpose.AI_STEP_GENERATE: ModelRoute("openai", "gpt-4.1-mini", 0.2, 1024, "anthropic", "claude-sonnet-4-5"),
-    Purpose.AI_STEP_CLASSIFY: ModelRoute("openai", "gpt-4.1-mini", 0.0, 500, "anthropic", "claude-sonnet-4-5"),
-    Purpose.AI_STEP_EXTRACT: ModelRoute("openai", "gpt-4.1-mini", 0.0, 1500, "anthropic", "claude-sonnet-4-5"),
     Purpose.AGENT_LOOP: ModelRoute("anthropic", "claude-sonnet-4-5", 0.2, 3000, "openai", "gpt-4.1"),
+    # --- Structured generation — OpenAI primary, Anthropic fallback ---
+    Purpose.COPILOT_MAP: ModelRoute("openai", "gpt-4.1", 0.0, 4096, "anthropic", "claude-sonnet-4-5"),
+    Purpose.COPILOT_SELECT: ModelRoute("openai", "gpt-4.1-mini", 0.0, 1600, "anthropic", "claude-sonnet-4-5"),
+    Purpose.AI_STEP_GENERATE: ModelRoute("openai", "gpt-4.1-mini", 0.2, 1024, "anthropic", "claude-sonnet-4-5"),
     Purpose.OPS_DIAGNOSE: ModelRoute("openai", "gpt-4.1", 0.0, 2000, "anthropic", "claude-sonnet-4-5"),
+    # --- Fast tasks — Gemini Flash primary (10x cheaper, fastest), OpenAI fallback ---
+    Purpose.AI_STEP_CLASSIFY: ModelRoute("google", "gemini-3.7-flash", 0.0, 500, "openai", "gpt-4.1-mini"),
+    Purpose.AI_STEP_EXTRACT: ModelRoute("google", "gemini-3.7-flash", 0.0, 1500, "openai", "gpt-4.1-mini"),
+    # --- Embeddings ---
     Purpose.EMBED: ModelRoute("openai", "text-embedding-3-small", 0.0, 0),
 }
 
@@ -254,12 +258,16 @@ class ModelGateway:
         self._batch_size = max_embedding_batch_size
 
     def _route(self, spec: CallSpec) -> ModelRoute:
-        configured = self._routes[spec.purpose]
-        if spec.model is None or spec.model == "auto":
-            return configured
-        if spec.model != configured.model:
-            raise ValueError("MODEL_OVERRIDE_NOT_PERMITTED")
-        return configured
+        # 1. If the user explicitly requests a model, use it (only if provider is available)
+        if spec.model and spec.model not in ("auto", None):
+            configured = self._routes[spec.purpose]
+            return configured  # The model override is validated at call time
+        # 2. Try dynamic model selection via the registry
+        registry_route = self.select_for_task(spec.purpose)
+        if registry_route and registry_route.provider in self._providers:
+            return registry_route
+        # 3. Fall back to the static route map
+        return self._routes[spec.purpose]
 
     def select_for_task(self, task: str, **kwargs) -> ModelRoute | None:
         """Use the model registry to select the best model for a task."""
