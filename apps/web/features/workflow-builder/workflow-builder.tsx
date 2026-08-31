@@ -340,7 +340,18 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
 
   const commit = useCallback(
     (nextNodes: Node<StepData>[], nextEdges: Edge[], push = true) => {
-      setGraph(layoutFlow(nextNodes, nextEdges), nextEdges, push);
+      /* Remove orphaned, self-loop, and duplicate edges before persisting */
+      const nodeIds = new Set(nextNodes.map((n) => n.id));
+      const seen = new Set<string>();
+      const validEdges = nextEdges.filter((e) => {
+        if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) return false;
+        if (e.source === e.target) return false;
+        const key = `${e.source}->${e.target}:${e.sourceHandle ?? ""}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      setGraph(layoutFlow(nextNodes, validEdges), validEdges, push);
     },
     [setGraph]
   );
@@ -590,11 +601,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
 
   const displayNodes = useMemo(
     () =>
-      layoutFlow(nodes, edges).map((n, i) => ({
+      nodes.map((n, i) => ({
         ...n,
         type: "step",
         hidden: false,
-        style: { ...n.style, animation: `av-node-enter 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) ${i * 60}ms both` },
         data: {
           ...n.data,
           index: i + 1,
@@ -622,7 +632,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
 
   const displayEdges = useMemo(
     () =>
-      edges.map((e) => ({
+      edges
+        .filter((e) => nodes.some((n) => n.id === e.source) && nodes.some((n) => n.id === e.target))
+        .map((e) => ({
         ...e,
         type: "plus",
         animated: runStates[e.source] === "ok" || runStates[e.source] === "running",
@@ -635,7 +647,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#64748b" }
       })),
-    [edges, runStates]
+    [edges, nodes, runStates]
   );
 
   async function testStep(node = selected) {
@@ -1220,7 +1232,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               setBusy(null);
             }}
           />
-          <div className="absolute inset-0 min-h-[560px]">
+          <div className="absolute inset-0">
           <ReactFlow
             nodes={displayNodes}
             edges={displayEdges}
@@ -1358,6 +1370,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           )}
         </div>
         {inspectorModal ? <div className="fixed inset-0 z-40 bg-ink/50" onClick={() => setInspectorModal(false)} /> : null}
+        {(selected || inspectorModal) && (
         <aside
           className={cn(
             "flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-line bg-elevated",
@@ -1820,6 +1833,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             </>
           )}
         </aside>
+        )}
       </div>
 
       {appPicker && (

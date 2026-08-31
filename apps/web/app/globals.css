@@ -204,7 +204,7 @@
 
 /* Node hover — smooth transition */
 .react-flow__node > div {
-  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
 }
 .react-flow__node:hover > div {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);

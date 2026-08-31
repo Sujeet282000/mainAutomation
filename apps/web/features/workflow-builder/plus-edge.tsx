@@ -87,6 +87,7 @@ export function PlusEdge({
           ...style
         }}
       />
+<<<<<<< Updated upstream
 
       {(isPulse || isActive) && (
         <>
@@ -97,6 +98,17 @@ export function PlusEdge({
             <animateMotion dur={isPulse ? "0.9s" : "1.3s"} repeatCount="indefinite" path={path} />
           </circle>
         </>
+=======
+      {/* Traveling particle when active/pulse — shows data flowing */}
+      {(isPulse || isActive) && path && (
+        <circle r="3" fill={isPulse ? "#8b5cf6" : "#10b981"} opacity="0.8">
+          <animateMotion
+            dur="1.2s"
+            repeatCount="indefinite"
+            path={path}
+          />
+        </circle>
+>>>>>>> Stashed changes
       )}
 
       <EdgeLabelRenderer>

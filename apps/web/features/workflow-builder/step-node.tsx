@@ -103,6 +103,18 @@ export function StepNode({
     : null;
   const appName = data.appSlug ? data.appSlug.replace(/-/g, " ") : empty ? "Choose app" : "Step";
 
+<<<<<<< Updated upstream
+=======
+  /* ── One-shot entrance animation ── */
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => {
+    /* Trigger entrance animation after first paint */
+    const r = requestAnimationFrame(() => setHasMounted(true));
+    return () => cancelAnimationFrame(r);
+  }, []);
+
+  /* ── State transition detection for one-shot animations ── */
+>>>>>>> Stashed changes
   const prevRun = useRef<RunState>(run);
   const [transitionClass, setTransitionClass] = useState("");
 
@@ -120,12 +132,15 @@ export function StepNode({
         prevRun.current = run;
         return () => clearTimeout(t);
       }
+<<<<<<< Updated upstream
       if (run === "running" && prevRun.current === "idle") {
         setTransitionClass("av-node-enter");
         const t = setTimeout(() => setTransitionClass(""), 500);
         prevRun.current = run;
         return () => clearTimeout(t);
       }
+=======
+>>>>>>> Stashed changes
     }
     prevRun.current = run;
   }, [run]);
@@ -142,6 +157,7 @@ export function StepNode({
 
   const animClass = (() => {
     if (transitionClass) return transitionClass;
+    if (!hasMounted) return "av-node-enter";
     if (run === "running") return "av-node-run";
     if (run === "waiting") return "av-node-waiting";
     return "";
@@ -157,7 +173,11 @@ export function StepNode({
         animClass,
         empty && run === "idle" && "av-empty-shimmer"
       )}
+<<<<<<< Updated upstream
       aria-label={label ? `${appName}: ${label}` : appName}
+=======
+      style={!hasMounted ? { animationDelay: `${((data.index ?? 1) - 1) * 60}ms` } : undefined}
+>>>>>>> Stashed changes
     >
       {data.kind !== "trigger" && (
         <Handle

@@ -184,5 +184,20 @@ export function normalizeGraph(raw: unknown): ApiGraph {
     edges.push({ id: `e-${trigger.id}-action`, source: trigger.id, target: action.id, sourceHandle: null });
   }
 
+  // ── Edge validation: remove orphaned, self-loop, and duplicate edges ──
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const edgeKeys = new Set<string>();
+  edges = edges.filter((e) => {
+    // Remove edges whose endpoints no longer exist
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) return false;
+    // Remove self-loop edges
+    if (e.source === e.target) return false;
+    // Remove duplicate source→target→handle edges
+    const key = `${e.source}->${e.target}:${e.sourceHandle ?? ""}`;
+    if (edgeKeys.has(key)) return false;
+    edgeKeys.add(key);
+    return true;
+  });
+
   return { nodes, edges };
 }
