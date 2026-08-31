@@ -13,7 +13,6 @@ test("rejects unknown agent operations without mutating the graph", async () => 
   assert.equal(result.applied.length, 0);
   assert.equal(result.rejected.length, 1);
   assert.equal(result.rejected[0].operation.kind, "unknown_operation");
-  // normalizeWorkflowGraph adds default trigger+action placeholders from empty input
   assert.ok(result.graph.nodes.length >= 2);
 });
 
@@ -41,8 +40,6 @@ test("does not allow an unknown catalog operation to be created", async () => {
   assert.match(result.rejected[0].reason, /Unknown app/);
 });
 
-// ── Approval boundary tests ─────────────────────────────────────────────
-
 test("approval boundary: confirmation-required ops are queued when allowDestructive=false", async () => {
   const graph = normalizeWorkflowGraph({
     nodes: [
@@ -61,7 +58,6 @@ test("approval boundary: confirmation-required ops are queued when allowDestruct
   assert.equal(result.applied.length, 0);
   assert.equal(result.needsConfirmation.length, 1);
   assert.equal(result.needsConfirmation[0].kind, "remove_node");
-  // Graph must NOT be mutated
   assert.equal(result.graph.nodes.length, 2);
 });
 
@@ -82,8 +78,6 @@ test("approval boundary: confirmation-required ops are applied when allowDestruc
   });
   assert.equal(result.applied.length, 1);
   assert.equal(result.needsConfirmation.length, 0);
-  // The step1 node was removed; normalizeWorkflowGraph may re-add
-  // placeholder nodes/edges but the original action node must be gone.
   assert.ok(!result.graph.nodes.some((n) => n.id === "step1"), "step1 should have been removed");
   assert.ok(!result.graph.edges.some((e) => e.source === "step1" || e.target === "step1"), "edges referencing step1 should be removed");
 });
@@ -96,12 +90,9 @@ test("approval boundary: operations are validated against the current catalog", 
     ],
     edges: [{ id: "e1", source: "trigger", target: "step1" }],
   });
-  // Attempt to add a node with a hallucinated operation
   const result = await applyAgentOperations({
     graph,
-    operations: [
-      { kind: "add_node", arguments: { appSlug: "nonexistent-app", operation: "do_thing" } },
-    ],
+    operations: [{ kind: "add_node", arguments: { appSlug: "nonexistent-app", operation: "do_thing" } }],
     workspaceId: "workspace-test",
     organizationId: "org-test",
     allowDestructive: true,
@@ -109,4 +100,34 @@ test("approval boundary: operations are validated against the current catalog", 
   assert.equal(result.applied.length, 0);
   assert.equal(result.rejected.length, 1);
   assert.match(result.rejected[0].reason, /Unknown app/);
+});
+
+test("supports add, update, connect and field mapping as one incremental operation sequence", async () => {
+  const graph = normalizeWorkflowGraph({
+    nodes: [
+      { id: "trigger", type: "trigger", appSlug: "manual", operation: "button", label: "Manual", position: { x: 0, y: 0 }, config: {} },
+    ],
+    edges: [],
+  });
+  const result = await applyAgentOperations({
+    graph,
+    operations: [
+      { kind: "add_node", arguments: { nodeId: "step1", appSlug: "http", operation: "request", label: "Send HTTP", config: {} } },
+      { kind: "connect_nodes", arguments: { source: "trigger", target: "step1" } },
+      { kind: "configure_node", arguments: { nodeId: "step1", config: { url: "https://example.com" } } },
+      { kind: "map_field", arguments: { nodeId: "step1", field: "body", value: "{{trigger.email}}" } },
+      { kind: "update_node", arguments: { nodeId: "step1", label: "Send lead" } },
+      { kind: "validate_workflow", arguments: {} },
+    ],
+    workspaceId: "workspace-test",
+    organizationId: "org-test",
+    allowDestructive: true,
+  });
+  assert.equal(result.applied.length, 6);
+  assert.equal(result.rejected.length, 0);
+  const step = result.graph.nodes.find((node) => node.id === "step1");
+  assert.equal(step?.label, "Send lead");
+  assert.equal(step?.config?.url, "https://example.com");
+  assert.equal(step?.config?.body, "{{trigger.email}}");
+  assert.ok(result.graph.edges.some((edge) => edge.source === "trigger" && edge.target === "step1"));
 });

@@ -33,7 +33,11 @@ export type AgentResponseBlock =
   | { type: "step_card"; stepIndex: number; label: string; app?: string; status: "configured" | "needs_config" | "needs_connection" | "needs_action" | "tested"; issues?: string[]; actions?: CopilotUIAction[] }
   | { type: "field_mapping"; sourceLabel: string; sourceFields: string[]; targetLabel: string; targetFields: string[]; mappings: Array<{ source: string; target: string }> }
   | { type: "test_result"; stepLabel: string; success: boolean; fields?: Record<string, unknown>; actions?: CopilotUIAction[] }
-  | { type: "plan"; goal: string; steps: Array<{ label: string; product: string; description: string }>; actions?: CopilotUIAction[] };
+  | { type: "plan"; goal: string; steps: Array<{ label: string; product: string; description: string }>; actions?: CopilotUIAction[] }
+  | { type: "system_plan"; goal: string; summary: string; products: Array<{ product: string; purpose: string; assetId?: string; href?: string }>; entrySurface: string; actions?: CopilotUIAction[] }
+  | { type: "product_card"; product: string; label: string; description?: string; href?: string; actions?: CopilotUIAction[] }
+  | { type: "connection_card"; appSlug: string; appName: string; connected: boolean; message?: string; actions?: CopilotUIAction[] }
+  | { type: "operation"; operationId: string; label: string; status: "pending" | "running" | "completed" | "failed" | "waiting_for_user"; detail?: string; actions?: CopilotUIAction[] };
 
 export type AgentOperation =
   | { type: "inspect_workflow" }
@@ -56,10 +60,11 @@ export type AgentSSEEvent =
   | { type: "agent_started" }
   | { type: "agent_state"; state: AgentState; title: string }
   | { type: "agent_activity"; kind: AgentActivityKind; label: string; detail?: string; id?: string }
+  | { type: "reasoning"; text: string }
   | { type: "analysis_summary"; title: string; items: string[] }
   | { type: "operation_started"; operationId: string; kind: string; label: string; detail?: string }
   | { type: "operation_completed"; operationId: string; kind: string; label: string; success: boolean; detail?: string }
-  | { type: "connection_required"; stepId?: string; appSlug: string; appName?: string; message?: string }
+  | { type: "connection_required"; stepId?: string; appSlug: string; appName?: string; message?: string; actions?: CopilotUIAction[] }
   | { type: "step_completed"; stepId: string; label: string; success: boolean; detail?: string }
   | { type: "blocking_issue"; stepId?: string; title: string; detail?: string; actions?: CopilotUIAction[] }
   | { type: "field_mapping"; stepId?: string; sourceLabel: string; targetLabel: string; mappings: Array<{ source: string; target: string }> }
