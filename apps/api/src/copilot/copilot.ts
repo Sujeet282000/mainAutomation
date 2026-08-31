@@ -11,10 +11,12 @@ import {
   describeDraft,
   inspectDraft,
   isStarterDraft,
+  mentionedSlugs,
   orchestrateCopilot,
   type DraftSnapshot
 } from "./copilot-orchestrator";
 import { adviseWorkflow } from "../workflow-advisor";
+import { ragGraphFromPrompt } from "./copilot-rag";
 
 /**
  * Strip leaked chain-of-thought from LLM responses.
@@ -67,10 +69,10 @@ const HINTS: Array<{ re: RegExp; slug: string }> = [
   { re: /calendly/i, slug: "calendly" },
   { re: /webhook|http post|catch hook/i, slug: "webhook" },
   { re: /schedule|every day|cron|every hour/i, slug: "schedule" },
-  { re: /openai|chatgpt|summar/i, slug: "openai" },
+  { re: /\bopenai\b|chatgpt|\bsummariz(?:e|ing|y)\b|\bllm\b/i, slug: "openai" },
   { re: /claude|anthropic/i, slug: "anthropic" },
   { re: /gemini/i, slug: "gemini" },
-  { re: /form submit/i, slug: "forms" },
+  { re: /\bform\b|\bsubmission\b|\bsubmitted\b/i, slug: "forms" },
   { re: /table row|new record/i, slug: "tables" },
   { re: /shopify/i, slug: "shopify" },
   { re: /klaviyo/i, slug: "klaviyo" },
@@ -79,7 +81,10 @@ const HINTS: Array<{ re: RegExp; slug: string }> = [
   { re: /zendesk/i, slug: "zendesk" },
   { re: /docusign/i, slug: "docusign" },
   { re: /\brss\b/i, slug: "rss" },
-  { re: /outlook/i, slug: "outlook" }
+  { re: /outlook/i, slug: "outlook" },
+  { re: /\bsend(?:\s+(?:it|the|a|to))?\s+(?:to\s+)?slack\b|\bslack\b/i, slug: "slack" },
+  { re: /\bsave\s+(?:it|the|result|data|to)\s+(?:to\s+)?(?:google\s+)?sheets?\b|\bsheets?\b/i, slug: "google-sheets" },
+  { re: /\bsend\s+(?:it|the|a|email|message)\s+(?:to\s+)?(?:via\s+)?(?:google\s+)?gmail\b|\bgmail\b/i, slug: "gmail" },
 ];
 
 type OpHint = { re: RegExp; slug: string; key: string; asTrigger?: boolean };
@@ -415,83 +420,58 @@ export function graphFromPrompt(prompt: string): WorkflowGraph {
     };
   }
 
-  const usedApps = new Set<string>();
-  const first = pickApp(prompt, usedApps) ?? appBySlug("webhook")!;
-  usedApps.add(first.slug);
-  const second = pickApp(prompt, usedApps) ?? appBySlug("http")!;
-  usedApps.add(second.slug);
-  const third = pickApp(prompt, usedApps);
+  // Detect ALL apps mentioned in the prompt, in order of appearance
+  const detectedSlugs = mentionedSlugs(prompt);
+  const placeholderSlugs = new Set(["webhook", "http", "manual"]);
 
-  const tOp = triggerOp(first);
-  const aOp = actionOp(second);
-  const trigger = makeNode({
-    id: "trigger",
-    forceTrigger: true,
-    app: first,
-    op: tOp,
-    y: 40,
-    config: defaultConfig(first.slug, tOp.key, {})
-  });
-  const action = makeNode({
-    id: "action",
-    app: second,
-    op: aOp,
-    y: 200,
-    config: defaultConfig(second.slug, aOp.key, {})
-  });
+  // If we detected at least one real app, build a chain
+  if (detectedSlugs.length > 0) {
+    // First app with a trigger becomes the trigger; rest are actions
+    let triggerIdx = detectedSlugs.findIndex((slug: string) => {
+      const app = appBySlug(slug);
+      return app?.operations.some((o: AppOperation) => o.type === "trigger");
+    });
+    // If no app has a trigger, use the first detected app as trigger anyway
+    if (triggerIdx === -1) triggerIdx = 0;
 
-  if (wantsPaths) {
-    const pathsApp = appBySlug("paths")!;
-    const router = findOp(pathsApp, "router");
-    const pathNode = makeNode({
-      id: "paths",
-      app: pathsApp,
-      op: router,
-      y: 200,
-      config: {
-        paths: [
-          { id: "path-a", label: "Path A", left: "{{Trigger}}", operator: "not_empty", right: "", fallback: false },
-          { id: "path-b", label: "Path B", fallback: true }
-        ]
-      }
+    const triggerSlug = detectedSlugs[triggerIdx];
+    const actionSlugs = detectedSlugs.filter((_: string, i: number) => i !== triggerIdx);
+
+    const tApp = appBySlug(triggerSlug)!;
+    const tOp = triggerOp(tApp);
+    const nodes: GraphNode[] = [
+      makeNode({ id: "trigger", forceTrigger: true, app: tApp, op: tOp, y: 40, config: defaultConfig(tApp.slug, tOp.key, {}) })
+    ];
+    const edges: WorkflowGraph["edges"] = [];
+    let prev = "trigger";
+    actionSlugs.forEach((slug: string, i: number) => {
+      const app = appBySlug(slug);
+      if (!app) return;
+      const op = actionOp(app);
+      const id = `${slug.replace(/[^a-z0-9]/gi, "")}-${op.key}`;
+      nodes.push(makeNode({ id, app, op, y: 200 + i * 160, config: defaultConfig(slug, op.key, {}) }));
+      edges.push({ id: `e-${prev}-${id}`, source: prev, target: id });
+      prev = id;
     });
-    const left = { ...action, id: "path-a-step", position: { x: 80, y: 360 } };
-    const rightApp = third ?? appBySlug("slack")!;
-    const rOp = actionOp(rightApp);
-    const right = makeNode({
-      id: "path-b-step",
-      app: rightApp,
-      op: rOp,
-      y: 360,
-      x: 480,
-      config: defaultConfig(rightApp.slug, rOp.key, {})
-    });
-    return {
-      nodes: [trigger, pathNode, left, right],
-      edges: [
-        { id: "e-t-p", source: "trigger", target: "paths" },
-        { id: "e-p-a", source: "paths", target: "path-a-step", sourceHandle: "path-a" },
-        { id: "e-p-b", source: "paths", target: "path-b-step", sourceHandle: "path-b" }
-      ]
-    };
+    if (nodes.length === 1) {
+      // Only trigger detected, add a placeholder action
+      const http = appBySlug("http")!;
+      nodes.push(makeNode({ id: "action", app: http, op: actionOp(http), y: 200, config: {} }));
+      edges.push({ id: "e-t-a", source: "trigger", target: "action" });
+    }
+    return { nodes, edges };
   }
 
-  const nodes = [trigger, action];
-  const edges = [{ id: "e-t-a", source: "trigger", target: "action" }];
-  if (third) {
-    const op = actionOp(third);
-    nodes.push(
-      makeNode({
-        id: "action-2",
-        app: third,
-        op,
-        y: 360,
-        config: defaultConfig(third.slug, op.key, {})
-      })
-    );
-    edges.push({ id: "e-a-2", source: "action", target: "action-2" });
-  }
-  return { nodes, edges };
+  // Absolute fallback: manual trigger + HTTP action
+  const tApp = appBySlug("manual")!;
+  const httpApp = appBySlug("http")!;
+  return {
+    nodes: [
+      makeNode({ id: "trigger", forceTrigger: true, app: tApp, op: triggerOp(tApp), y: 40, config: {} }),
+      makeNode({ id: "action", app: httpApp, op: actionOp(httpApp), y: 200, config: {} })
+    ],
+    edges: [{ id: "e-t-a", source: "trigger", target: "action" }]
+  };
 }
 
 function describeGraph(graph: WorkflowGraph) {
@@ -712,6 +692,40 @@ export async function copilotGraph(
       chapter: "rebuild",
       changed: true
     });
+  }
+
+  // Try product-aware system planner for multi-product requests
+  try {
+    const { planSystem, planToGraph } = await import("./system-planner");
+    const { searchKnowledge } = await import("./knowledge-rag");
+    const knowledge = searchKnowledge(trimmed, { k: 3 });
+    const systemPlan = planSystem({ prompt: trimmed, graph: opts?.graph, knowledge });
+    if (systemPlan.steps.length >= 2 && systemPlan.confidence > 0.5) {
+      const planGraph = planToGraph(systemPlan, APP_CATALOG as any);
+      if (planGraph.nodes.length >= 2 && planGraph.edges.length > 0) {
+        return done(planGraph, "system-planner", describeGraph(planGraph), {
+          rebuilt: true,
+          chapter: "rebuild",
+          changed: true
+        });
+      }
+    }
+  } catch {
+    /* System planner unavailable — fall through to other methods */
+  }
+
+  // Try RAG-based graph construction (hybrid vector + lexical catalog search)
+  try {
+    const ragGraph = await ragGraphFromPrompt(trimmed, pieceRegistry);
+    if (ragGraph && ragGraph.nodes.length >= 2 && ragGraph.edges.length > 0) {
+      return done(ragGraph, "copilot-rag", describeGraph(ragGraph), {
+        rebuilt: true,
+        chapter: "rebuild",
+        changed: true
+      });
+    }
+  } catch {
+    /* RAG unavailable — fall through to regex */
   }
 
   const local = graphFromPrompt(trimmed);
@@ -1388,9 +1402,13 @@ ${snap.youDoFirst?.length ? "You need to: " + snap.youDoFirst[0] : "Workflow loo
   // questions and use the LLM to answer them with full workflow context.
   const isConversational = isConversationalQuestion(opts.prompt, snapshot);
   if (isConversational) {
-    const llmReply = await answerWithLlm(opts.prompt, opts.graph, snapshot, opts.history);
-    if (llmReply) {
-      return finish({ reply: stripThinking(llmReply), source: "copilot-llm", chapter: "explain" });
+    try {
+      const llmReply = await answerWithLlm(opts.prompt, opts.graph, snapshot, opts.history);
+      if (llmReply) {
+        return finish({ reply: stripThinking(llmReply), source: "copilot-llm", chapter: "explain" });
+      }
+    } catch {
+      /* LLM unavailable — fall through to pattern engine */
     }
   }
 

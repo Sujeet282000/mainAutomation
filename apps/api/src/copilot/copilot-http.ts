@@ -215,7 +215,71 @@ export async function streamCopilotChat(opts: {
   await send({ type: "stage", stage: "intent", label: "Understanding your request" });
   await send({ type: "agent_activity", kind: "done", label: "Understanding your request" });
 
-  // Run copilotChat with the full pipeline
+  // Probe the AI service — use the LLM agent when available, pattern matching as fallback
+  let ai: Awaited<ReturnType<typeof probeAiService>>;
+  try {
+    ai = await probeAiService();
+  } catch {
+    ai = { reachable: false, mode: "down", openaiConfigured: false, anthropicConfigured: false, geminiConfigured: false, localConfigured: false, hint: "AI service probe failed" };
+  }
+  if (ai.reachable && graph) {
+    try {
+      await send({ type: "agent_state", state: "planning", title: "AI agent processing" });
+      await send({ type: "agent_activity", kind: "running", label: "AI agent analyzing request" });
+      await send({ type: "reasoning", text: ai.hint || "Using AI agent to process your request", stage: "intent" });
+      const { persistBuilderDraft } = await import("../flow-runtime");
+      const { listCatalogApps } = await import("../catalog/catalog");
+      const refined = await signedAiJson<{
+        applied?: boolean; definition?: unknown; summary?: string;
+        operations?: AgentOperation[]; needs_input?: string[];
+        issues?: Array<Record<string, unknown>>; publishable?: boolean;
+      }>("/copilot/refine", {
+        definition: persistBuilderDraft(graph),
+        instruction: opts.prompt,
+        selected_step_id: opts.selectedStepId,
+        catalog: listCatalogApps(),
+      }, opts.orgId);
+      if (refined) {
+        const operations = refined.operations ?? [];
+        const result = await groundGraph(graph, operations, {
+          workspaceId: opts.orgId,
+          organizationId: opts.orgId,
+          allowDestructive: false,
+        });
+        const changed = JSON.stringify(result.graph) !== JSON.stringify(graph);
+        const definition = persistBuilderDraft(result.graph);
+        const needsApproval = result.rejected.length > 0 || result.needsConfirmation.length > 0;
+        if (changed && !needsApproval) {
+          await query(
+            `UPDATE copilot_sessions SET proposed_definition = $1, stage = 'persist', updated_at = now() WHERE id = $2`,
+            [JSON.stringify(definition), opts.sessionId],
+          );
+        }
+        await send({ type: "agent_activity", kind: "done", label: "AI agent processed request" });
+        if (result.graph?.nodes?.length) {
+          const steps = result.graph.nodes.map((n: { label?: string; appSlug?: string; id: string; type?: string }) => ({
+            label: `${n.label ?? n.id} (${n.appSlug ?? "unknown"})`,
+            status: "completed" as const,
+          }));
+          await send({ type: "agent_activity", kind: "done", label: `Found ${steps.length} steps` });
+          await send({ type: "operation_card", operation: { title: changed ? "Workflow updated" : "Workflow planned", steps, status: "completed" as const, actions: [{ label: "Test workflow", prompt: "Test this workflow" }, { label: "Add a step", prompt: "Add the next step" }] } });
+        }
+        const replyText = refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change.");
+        await send({ type: "agent_state", state: "completed", title: "Done" });
+        await send({ type: "agent_activity", kind: "done", label: "Response ready" });
+        await send({ type: "chat_result", reply: replyText, graph: result.graph, sessionId: opts.sessionId, applied: !needsApproval && changed, source: "python-copilot", needs_input: refined.needs_input, issues: refined.issues });
+        await send({ type: "done", status: "chat_complete", source: "python-copilot" });
+        const now = new Date().toISOString();
+        await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
+        await appendChatTurn(opts.sessionId, opts.orgId, { role: "assistant", content: replyText, ts: now });
+        return;
+      }
+    } catch (aiErr) {
+      await send({ type: "reasoning", text: `AI agent could not process this (${aiErr instanceof Error ? aiErr.message : "error"}); using pattern engine.`, stage: "intent" });
+    }
+  }
+
+  // ── Fallback: Node.js pattern-matching copilot ──
   const { copilotChat } = await import("./copilot");
   try {
     await send({ type: "agent_state", state: "inspecting", title: "Inspecting workflow" });

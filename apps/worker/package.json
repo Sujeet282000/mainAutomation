@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "build": "echo 'worker: no build needed (tsx runtime)' && exit 0",
     "start": "tsx src/index.ts"
   },
   "dependencies": {

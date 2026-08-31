@@ -257,8 +257,8 @@ test("Copilot conversational fallback routes general questions", async () => {
   });
   assert.ok(result.reply, "Should reply to a general question");
   assert.ok(result.reply.length > 10, "Reply should be substantive");
-  // Source is either copilot-llm (AI service present) or copilot (heuristic fallback)
-  assert.ok(["copilot-llm", "copilot"].includes(result.source), `Source should be copilot-llm or copilot, got ${result.source}`);
+  // Source is copilot-llm (AI service present), copilot-rag (vector search), or copilot (heuristic fallback)
+  assert.ok(["copilot-llm", "copilot-rag", "copilot"].includes(result.source), `Source should be copilot-llm, copilot-rag, or copilot, got ${result.source}`);
 });
 
 test("Copilot conversational fallback handles questions with history context", async () => {

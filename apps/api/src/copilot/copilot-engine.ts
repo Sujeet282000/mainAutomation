@@ -156,6 +156,17 @@ export async function* runCopilotEngine(opts: {
       stage: "plan",
       label: `Planning ${assetClassification.assetType} system`
     };
+    // Run the product-aware system planner
+    try {
+      const { planSystem } = await import("./system-planner");
+      const systemPlan = planSystem({ prompt, graph: opts.graph });
+      if (systemPlan.products.length > 0) {
+        yield {
+          type: "reasoning",
+          text: `Products: ${systemPlan.products.join(", ")}\nSteps: ${systemPlan.steps.map((s) => s.description).join(" → ")}${systemPlan.connections.length ? `\nConnections needed: ${systemPlan.connections.join(", ")}` : ""}`
+        };
+      }
+    } catch { /* system planner unavailable */ }
   }
 
   let intent = parseIntentHeuristic(prompt);
@@ -298,14 +309,52 @@ export async function* runCopilotEngine(opts: {
   };
 
   yield { type: "stage", stage: "map", label: "Mapping fields between steps" };
-  const mapped = fillEmptyFields(graph);
-  graph = mapped.graph;
-  yield {
-    type: "reasoning",
-    text: mapped.filledKeys.length
-      ? `Mapped ${mapped.filledKeys.length} field(s). Low-confidence / resource IDs left blank for you.`
-      : "No high-confidence field mappings applied. Fill resource IDs yourself."
-  };
+  // Use semantic field mapper for schema-aware matching
+  try {
+    const { mapFields, applyMappings } = await import("./field-mapper");
+    const catalogForMapping: Array<{ slug: string; operations: Array<{ key: string; outputSample?: Record<string, unknown>; inputFields?: Array<{ key: string; label: string; type: string; required: boolean }> }> }> = [];
+    for (const card of pieceRegistry.cards()) {
+      const existing = catalogForMapping.find((a) => a.slug === card.piece);
+      if (existing) {
+        const app = APP_CATALOG.find((a) => a.slug === card.piece);
+        const op = app?.operations.find((o) => o.key === card.operation);
+        if (op) existing.operations.push({ key: card.operation, outputSample: op.outputSample, inputFields: op.inputFields as any });
+      } else {
+        const app = APP_CATALOG.find((a) => a.slug === card.piece);
+        const op = app?.operations.find((o) => o.key === card.operation);
+        catalogForMapping.push({ slug: card.piece, operations: op ? [{ key: card.operation, outputSample: op.outputSample, inputFields: op.inputFields as any }] : [] });
+      }
+    }
+    const fieldResult = mapFields(graph, catalogForMapping);
+    if (fieldResult.mappings.length > 0) {
+      const { graph: mappedGraph, applied } = applyMappings(graph, fieldResult.mappings, 0.7);
+      graph = mappedGraph;
+      yield {
+        type: "reasoning",
+        text: `Semantic mapping: ${applied.length} high-confidence field(s) auto-mapped. ${fieldResult.unmappedRequired.length ? `${fieldResult.unmappedRequired.length} required field(s) need manual input.` : "All required fields mapped."}`
+      };
+    } else {
+      // Fall back to the original heuristic mapper
+      const mapped = fillEmptyFields(graph);
+      graph = mapped.graph;
+      yield {
+        type: "reasoning",
+        text: mapped.filledKeys.length
+          ? `Mapped ${mapped.filledKeys.length} field(s) heuristically. Low-confidence / resource IDs left blank for you.`
+          : "No high-confidence field mappings applied. Fill resource IDs yourself."
+      };
+    }
+  } catch {
+    // Semantic mapper unavailable — use heuristic
+    const mapped = fillEmptyFields(graph);
+    graph = mapped.graph;
+    yield {
+      type: "reasoning",
+      text: mapped.filledKeys.length
+        ? `Mapped ${mapped.filledKeys.length} field(s). Low-confidence / resource IDs left blank for you.`
+        : "No high-confidence field mappings applied. Fill resource IDs yourself."
+    };
+  }
 
   yield { type: "stage", stage: "assemble", label: "Building the flow" };
   if (!isCatalogGraph(graph)) {

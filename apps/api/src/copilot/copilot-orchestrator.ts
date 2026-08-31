@@ -268,6 +268,10 @@ export function classifyCopilotChapter(
   ) {
     return snapshot.generic ? "rebuild" : "add_step";
   }
+  // On an empty/generic canvas, any prompt mentioning apps should rebuild
+  if (snapshot.generic && mentionedSlug(text)) {
+    return "rebuild";
+  }
   if (/\b(use|change|switch|replace|set|update|modify|alter)\b/i.test(text) && /\b(trigger|action|step|instead)\b/i.test(text)) {
     return "change_step";
   }
@@ -422,9 +426,10 @@ export function appendBlankAction(graph: WorkflowGraph): WorkflowGraph {
 }
 
 const APP_HINTS: Array<{ re: RegExp; slug: string }> = [
+  { re: /\bform\b|\bsubmission\b|\bsubmitted\b|\bintake\b/i, slug: "forms" },
   { re: /gmail|inbox/i, slug: "gmail" },
   { re: /google sheet|spreadsheet|\bsheets\b/i, slug: "google-sheets" },
-  { re: /calendar/i, slug: "google-calendar" },
+  { re: /calendar|meeting|event/i, slug: "google-calendar" },
   { re: /google drive|\bdrive\b/i, slug: "google-drive" },
   { re: /slack/i, slug: "slack" },
   { re: /hubspot/i, slug: "hubspot" },
@@ -444,11 +449,15 @@ const APP_HINTS: Array<{ re: RegExp; slug: string }> = [
   { re: /typeform/i, slug: "typeform" },
   { re: /teams|microsoft teams/i, slug: "microsoft-teams" },
   { re: /zendesk/i, slug: "zendesk" },
-  { re: /openai|chatgpt/i, slug: "openai" },
+  { re: /\bopenai\b|chatgpt|\bsummariz(?:e|ing|y)\b|\bllm\b|\bAI\b(?!\s+service)/i, slug: "openai" },
   { re: /anthropic|claude/i, slug: "anthropic" },
   { re: /gemini/i, slug: "gemini" },
+  { re: /\bschedule\b|every day|cron|every hour|daily|weekly|monthly/i, slug: "schedule" },
   { re: /http\b/i, slug: "http" },
-  { re: /webhook/i, slug: "webhook" }
+  { re: /webhook/i, slug: "webhook" },
+  { re: /gotomeeting|meeting/i, slug: "gotomeeting" },
+  { re: /outlook/i, slug: "outlook" },
+  { re: /\brss\b/i, slug: "rss" }
 ];
 
 function mentionedSlug(prompt: string) {
