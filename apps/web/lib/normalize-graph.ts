@@ -184,5 +184,18 @@ export function normalizeGraph(raw: unknown): ApiGraph {
     edges.push({ id: `e-${trigger.id}-action`, source: trigger.id, target: action.id, sourceHandle: null });
   }
 
+  // Never render edges whose endpoints are absent. Stale/dangling edges can
+  // otherwise produce detached PlusEdge labels/buttons far away from the graph.
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const seenEdges = new Set<string>();
+  edges = edges.filter((edge) => {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return false;
+    if (edge.source === edge.target) return false;
+    const key = `${edge.source}|${edge.target}|${edge.sourceHandle ?? ""}`;
+    if (seenEdges.has(key)) return false;
+    seenEdges.add(key);
+    return true;
+  });
+
   return { nodes, edges };
 }
