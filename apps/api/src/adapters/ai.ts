@@ -61,7 +61,7 @@ registerAdapter("gemini", "complete", async ({ input, auth }) => {
   const key = String(auth?.api_key ?? env.gemini);
   if (!key) throw new Error("Gemini API key missing on connection or GEMINI_API_KEY (MANUAL).");
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${encodeURIComponent(key)}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { normalizeWorkflowGraph } from "@algoverge/shared";
 import { APP_CATALOG } from "../catalog/catalog";
-import { randomToken } from "../crypto";
+import { randomToken, hashToken } from "../crypto";
 import { loadConnectionAuth } from "../connections";
 import { query, queryOne } from "../db";
 import { createExecution } from "../engine";
@@ -638,7 +638,7 @@ productsRouter.post("/developer-apps", async (req, res) => {
   const row = await queryOne(
     `insert into developer_apps (organization_id, name, slug, client_id, client_secret_hash, manifest)
      values ($1,$2,$3,$4,$5,$6) returning id, name, slug, client_id, status, visibility`,
-    [req.organizationId, body.name, slug, clientId, secret, JSON.stringify(body.manifest ?? { version: "1.0.0", triggers: {}, creates: {} })]
+    [req.organizationId, body.name, slug, clientId, hashToken(secret), JSON.stringify(body.manifest ?? { version: "1.0.0", triggers: {}, creates: {} })]
   );
   res.json({ app: row, clientSecret: secret, hint: "Copy the client secret now." });
 });

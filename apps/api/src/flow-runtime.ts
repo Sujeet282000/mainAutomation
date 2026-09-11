@@ -186,8 +186,18 @@ export async function testFlowStep(opts: {
   if (!node) throw new Error("Step not found");
   const ctx = { trigger: {}, steps: {} as Record<string, Record<string, unknown>> };
   const started = Date.now();
-  const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: opts.flowId });
-  return { ok: result.ok, output: result.output, duration_ms: Date.now() - started, status: "succeeded" };
+  try {
+    const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: opts.flowId });
+    return { ok: true, output: result.output, error: undefined, duration_ms: Date.now() - started, status: "succeeded" };
+  } catch (err) {
+    return {
+      ok: false,
+      output: undefined,
+      error: err instanceof Error ? err.message : "Step failed",
+      duration_ms: Date.now() - started,
+      status: "failed",
+    };
+  }
 }
 
 export async function createAndRunFlow(opts: {
@@ -245,12 +255,15 @@ export async function createAndRunFlow(opts: {
   );
   const run = runRows[0];
   if (!run) throw new Error("Failed to create execution run record.");
-  // Normalize created_at to exact PostgreSQL timestamp format to match partition boundaries
-  // PostgreSQL returns timestamptz which we need to match exactly for the FK constraint
-  const createdAtDate = run.created_at instanceof Date ? run.created_at : new Date(run.created_at);
-  // Use the raw date string from PostgreSQL RETURNING — convert Date to ISO and strip Z
-  // This ensures the value matches what PostgreSQL stored in the partition
-  const runCreatedAt = createdAtDate.toISOString().replace('T', ' ').replace('.000Z', '');
+  // run_steps.run_created_at must equal flow_runs.created_at exactly — the FK
+  // targets the monthly partition keyed on (run_id, created_at, org_id), and a
+  // JS round-trip drops microseconds so the value never matches. Fetch the
+  // exact stored timestamp from PostgreSQL instead of trusting RETURNING.
+  const exact = await queryOne<{ created_at: string }>(
+    `SELECT created_at::text AS created_at FROM flow_runs WHERE id = $1`,
+    [run.id],
+  );
+  const runCreatedAt = exact?.created_at ?? String(run.created_at);
   const ctx = { trigger: opts.payload ?? { ping: true }, steps: {} as Record<string, Record<string, unknown>> };
   const ordered: WorkflowGraph["nodes"] = [];
   const seen = new Set<string>();
@@ -273,7 +286,7 @@ export async function createAndRunFlow(opts: {
       ctx.steps[node.id] = result.output;
       await query(
         `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, output_json, started_at, finished_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,$9,now())`,
+         VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,now(),now())`,
         [
           run!.id,
           runCreatedAt,
@@ -283,7 +296,6 @@ export async function createAndRunFlow(opts: {
           seq,
           JSON.stringify(node.config ?? {}),
           JSON.stringify(result.output),
-          started.toISOString(),
         ],
       );
       opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: result.output, durationMs: Date.now() - started.getTime() });
@@ -291,7 +303,7 @@ export async function createAndRunFlow(opts: {
       failed = err instanceof Error ? err.message : "step_failed";
       await query(
         `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, error_json, started_at, finished_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'failed',$7,$8,$9,now())`,
+         VALUES ($1,$2,$3,$4,$5,$6,'failed',$7,$8,now(),now())`,
         [
           run!.id,
           runCreatedAt,
@@ -301,7 +313,6 @@ export async function createAndRunFlow(opts: {
           seq,
           JSON.stringify(node.config ?? {}),
           JSON.stringify({ message: failed }),
-          started.toISOString(),
         ],
       );
       opts.onStepComplete?.({ stepId: node.id, status: "failed", error: failed, durationMs: Date.now() - started.getTime() });

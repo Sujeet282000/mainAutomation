@@ -1,5 +1,7 @@
 import type { AppManifest } from "@algoverge/shared";
 import { getApp } from "./catalog/catalog";
+import { AUTH_FIELDS } from "./catalog/auth-fields";
+import { oauthProviderForApp, oauthProviderReady } from "./catalog/oauth-providers";
 
 export type AuthField = {
   key: string;
@@ -16,13 +18,14 @@ export type AuthField = {
 export type AuthSchema = {
   authType: string;
   fields: AuthField[];
-  oauthProvider?: "google" | "slack";
+  /** Built-in: google | slack. Otherwise a slug from catalog/oauth-providers.ts. */
+  oauthProvider?: string;
   note?: string;
   confirmTitle?: string;
   confirmBody?: string;
 };
 
-const API_KEY: AuthField[] = [{ key: "api_key", label: "API key", type: "password", required: true }];
+const API_KEY: AuthField[] = [{ key: "api_key", label: "API key", type: "password", required: true, help: "Get this from the vendor's developer console.", helpUrlLabel: "Vendor developer console" }];
 
 const BY_SLUG: Record<string, AuthField[]> = {
   openai: [
@@ -106,7 +109,9 @@ const BY_SLUG: Record<string, AuthField[]> = {
 const GOOGLE = new Set(["gmail", "google-sheets", "google-calendar", "google-drive"]);
 
 /** Piece auth contract (doc 4 §4): one of five patterns, never credentials on the workflow. */
-export function authSchemaFor(app: Pick<AppManifest, "slug" | "authType"> | null | undefined): AuthSchema {
+export function authSchemaFor(
+  app: (Pick<AppManifest, "slug" | "authType"> & { name?: string }) | null | undefined,
+): AuthSchema {
   const authType = app?.authType ?? "none";
   const slug = app?.slug ?? "";
   if (authType === "none") return { authType: "none", fields: [] };
@@ -129,10 +134,44 @@ export function authSchemaFor(app: Pick<AppManifest, "slug" | "authType"> | null
         note: "Paste a bot token from Slack if OAuth is not configured for this workspace."
       };
     }
+    // Generic registry providers (Notion, Salesforce, HubSpot, GitHub, Zoom, …):
+    // when the client is configured the modal drives the real consent flow;
+    // otherwise fall back to a token paste pointing at the vendor's docs.
+    const oauth = oauthProviderForApp(slug);
+    if (oauth && oauthProviderReady(oauth.provider)) {
+      return {
+        authType: "oauth2",
+        fields: [],
+        oauthProvider: oauth.provider,
+        confirmTitle: `Are you sure you want to connect your ${app?.name ?? slug} account?`,
+        confirmBody: `You will authorize this account in the ${app?.name ?? slug} window. Orchestra stores encrypted tokens only.`
+      };
+    }
     return {
       authType: "oauth2",
-      fields: [{ key: "access_token", label: "Access token", type: "password", required: true }],
-      note: "OAuth client for this app is not registered yet (manual developer app). Paste a token from the vendor, or wait until OAuth is configured. Do not put credentials on workflow steps."
+      fields: [{
+        key: "access_token",
+        label: "Access token",
+        type: "password",
+        required: true,
+        help: `Paste a personal access token from the ${app?.name ?? slug} developer settings.`,
+        ...(oauth ? { helpUrl: oauth.config.docsUrl, helpUrlLabel: `${app?.name ?? slug} API docs` } : {}),
+      }],
+      note: oauth
+        ? `One-click ${app?.name ?? slug} OAuth needs ${oauth.config.envKey}_CLIENT_ID and ${oauth.config.envKey}_CLIENT_SECRET in the server .env. Until then, connect with a token — stored encrypted either way.`
+        : "OAuth client for this app is not registered yet (manual developer app). Paste a token from the vendor. Do not put credentials on workflow steps."
+    };
+  }
+  // Rich per-app credential fields (Zapier-style setup screens) take priority.
+  const rich = AUTH_FIELDS[slug];
+  if (rich?.length) {
+    return {
+      authType,
+      fields: rich,
+      note:
+        authType === "oauth2"
+          ? "OAuth for this app is not registered yet. Create a developer app with the vendor, paste the token here, and Orchestra will store it encrypted."
+          : undefined,
     };
   }
   if (authType === "basic") {

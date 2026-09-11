@@ -1,7 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from "reactflow";
 import { Plus } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export function PlusEdge({
   id,
@@ -21,7 +23,10 @@ export function PlusEdge({
   pulse?: boolean;
   failed?: boolean;
   success?: boolean;
+  /** Reveal the add button only on edge hover (industry-standard, reduces clutter). */
+  showAddOnHover?: boolean;
 }>) {
+  const [hovered, setHovered] = useState(false);
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -45,7 +50,9 @@ export function PlusEdge({
         ? "#8b5cf6"
         : isActive
           ? "#10b981"
-          : "rgb(148 163 184)";
+          : hovered
+            ? "#8b5cf6"
+            : "#94a3b8";
 
   const strokeWidth = isFailed || isPulse || isActive || isSuccess ? 2.6 : 1.6;
   const animation = isFailed
@@ -73,23 +80,29 @@ export function PlusEdge({
 
   return (
     <>
-      <BaseEdge
-        id={id}
-        path={path}
-        markerEnd={markerEnd}
-        style={{
-          stroke: strokeColor,
-          strokeWidth,
-          strokeDasharray: dashArray,
-          animation,
-          filter,
-          transition: "stroke 220ms ease, stroke-width 220ms ease, filter 220ms ease",
-          ...style
-        }}
-      />
-<<<<<<< Updated upstream
-
-      {(isPulse || isActive) && (
+      {/* Invisible wide hit-area for hover + click; BaseEdge below is the visual line. */}
+      <g
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        <path d={path} fill="none" stroke="transparent" strokeWidth={20} style={{ pointerEvents: "stroke" }} />
+        <BaseEdge
+          id={id}
+          path={path}
+          markerEnd={markerEnd}
+          style={{
+            stroke: strokeColor,
+            strokeWidth,
+            strokeDasharray: dashArray,
+            animation,
+            filter,
+            transition: "stroke 220ms ease, stroke-width 220ms ease, filter 220ms ease",
+            ...style
+          }}
+        />
+      </g>
+      {/* Traveling particle when active/pulse — shows data flowing */}
+      {(isPulse || isActive) && path && (
         <>
           <circle r={isPulse ? 3.5 : 3} fill={particleColor} opacity="0.2">
             <animateMotion dur={isPulse ? "0.9s" : "1.3s"} repeatCount="indefinite" path={path} />
@@ -98,17 +111,6 @@ export function PlusEdge({
             <animateMotion dur={isPulse ? "0.9s" : "1.3s"} repeatCount="indefinite" path={path} />
           </circle>
         </>
-=======
-      {/* Traveling particle when active/pulse — shows data flowing */}
-      {(isPulse || isActive) && path && (
-        <circle r="3" fill={isPulse ? "#8b5cf6" : "#10b981"} opacity="0.8">
-          <animateMotion
-            dur="1.2s"
-            repeatCount="indefinite"
-            path={path}
-          />
-        </circle>
->>>>>>> Stashed changes
       )}
 
       <EdgeLabelRenderer>
@@ -137,7 +139,14 @@ export function PlusEdge({
           )}
           <button
             type="button"
-            className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-line bg-elevated text-ink-muted shadow-sm transition-all duration-200 hover:border-violet-500 hover:text-violet-600 hover:shadow-md"
+            className={cn(
+              "flex h-7 w-7 items-center justify-center rounded-full border-2 border-line bg-elevated text-ink-muted shadow-sm transition-all duration-200 hover:border-violet-500 hover:text-violet-600 hover:shadow-md",
+              data?.showAddOnHover && !hovered
+                ? "pointer-events-none scale-50 opacity-0"
+                : "scale-100 opacity-100"
+            )}
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
             onClick={(e) => {
               e.stopPropagation();
               data?.onAdd?.(id);

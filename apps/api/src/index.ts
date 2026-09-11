@@ -1,3 +1,7 @@
+// Must be the first import: patches Express Router methods so async handler
+// rejections reach the error middleware instead of hanging requests forever
+// (Express 4 does not catch rejected promises on its own).
+import "./async-router";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";

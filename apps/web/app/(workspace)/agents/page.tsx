@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, CheckCircle, Clock, MoreVertical, Play, Plus, Settings, Shield, Trash2 } from "lucide-react";
+import { Bot, CheckCircle, Clock, Loader2, MoreVertical, Play, Plus, Settings, Shield, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -52,6 +52,8 @@ function AgentCard({ agent, onOpen, onDelete }: { agent: Agent; onOpen: () => vo
 function AgentDetail({ agent, onClose }: { agent: Agent; onClose: () => void }) {
   const [message, setMessage] = useState("");
   const [reply, setReply] = useState("");
+  const [replyError, setReplyError] = useState("");
+  const [running, setRunning] = useState(false);
   const [activities, setActivities] = useState<unknown[] | null>(null);
   return (
     <div className="fixed inset-0 z-50 flex bg-bg">
@@ -75,14 +77,23 @@ function AgentDetail({ agent, onClose }: { agent: Agent; onClose: () => void }) 
                 <p className="mb-2 text-[10px] font-semibold uppercase text-ink-muted">Test the agent</p>
                 <div className="flex gap-2">
                   <Input value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Send a message to the agent..." />
-                  <Button onClick={async () => {
-                    const d = await api<{ reply: string }>(`/agents/${agent.id}/run`, { method: "POST", body: JSON.stringify({ message }) });
-                    setReply(d.reply);
-                    const act = await api<{ activities: unknown[] }>(`/agents/${agent.id}/activities`);
-                    setActivities(act.activities);
-                  }}><Play className="mr-1 h-3 w-3" />Run</Button>
+                  <Button disabled={running || !message.trim()} onClick={async () => {
+                    setRunning(true); setReplyError("");
+                    try {
+                      const d = await api<{ reply: string }>(`/agents/${agent.id}/run`, { method: "POST", body: JSON.stringify({ message }) });
+                      setReply(d.reply);
+                      const act = await api<{ activities: unknown[] }>(`/agents/${agent.id}/activities`);
+                      setActivities(act.activities);
+                    } catch (err) {
+                      setReply(err instanceof Error && /NO_MODEL_PROVIDER|MODEL_PROVIDER_FAILED/.test(err.message)
+                        ? "All AI model providers failed (OpenAI, Anthropic, Gemini, Groq). Check your API keys and billing, then try again."
+                        : err instanceof Error ? err.message : "The agent could not run. Please try again.");
+                      setReplyError("The agent could not complete this request.");
+                    } finally { setRunning(false); }
+                  }}>{running ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}{running ? "Running…" : "Run"}</Button>
                 </div>
-                {reply && <div className="mt-3 rounded-lg border border-teal/30 bg-teal/5 p-3 text-sm">{reply}</div>}
+                {replyError && <p className="mt-2 text-xs text-danger">{replyError}</p>}
+                {reply && <div className={cn("mt-3 rounded-lg border p-3 text-sm", replyError ? "border-amber-300/50 bg-amber-500/5" : "border-teal/30 bg-teal/5")}>{reply}</div>}
               </Card>
               {activities && activities.length > 0 && (
                 <Card>

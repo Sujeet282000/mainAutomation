@@ -24,6 +24,7 @@ import { copilotGraph, copilotChat } from "./copilot/copilot";
 import { runCopilotEngine } from "./copilot/copilot-engine";
 import { ensureProjectId, refineCopilotSession, streamCopilotSession } from "./copilot/copilot-http";
 import { probeAiService, signedAiJson } from "./ai-service";
+import { runAgentLoop } from "./agent-runtime";
 
 export const router = Router();
 router.use("/oauth", oauthRouter);
@@ -112,6 +113,45 @@ router.post("/public/forms/:workspaceId/:slug", async (req, res) => {
     }
   }
   res.json({ ok: true, submission: { id: row!.id } });
+});
+
+// ── Public chatbot share links (apps/web/app/c/[workspaceId]/[slug]) ────────
+
+router.get("/public/chatbots/:workspaceId/:slug", async (req, res) => {
+  const bot = await queryOne<{ id: string; name: string; payload: { instructions?: string } }>(
+    `SELECT id, name, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
+    [req.params.workspaceId, req.params.slug],
+  );
+  if (!bot) return res.status(404).json({ error: "not_found" });
+  res.json({ chatbot: { id: bot.id, name: bot.name, instructions: String(bot.payload.instructions ?? "") } });
+});
+
+router.post("/public/chatbots/:workspaceId/:slug/chat", async (req, res) => {
+  const message = String((req.body as { message?: unknown } | undefined)?.message ?? "").trim();
+  if (!message) return res.status(400).json({ error: "missing_message" });
+  const bot = await queryOne<{ id: string; payload: { instructions?: string } }>(
+    `SELECT id, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
+    [req.params.workspaceId, req.params.slug],
+  );
+  if (!bot) return res.status(404).json({ error: "not_found" });
+  const instructions = String(bot.payload.instructions ?? "");
+  const result = await copilotChat({
+    prompt: `${instructions}\n\nUser: ${message}`,
+    workspaceId: req.params.workspaceId,
+  } as any).catch(() => null);
+  const reply = result?.reply ?? result?.summary ?? `I received: "${message}". Connect an AI provider key for a live answer.`;
+  res.json({ reply });
+});
+
+// ── Public interface share links (apps/web/app/i/[workspaceId]/[slug]) ──────
+
+router.get("/public/interfaces/:workspaceId/:slug", async (req, res) => {
+  const iface = await queryOne<{ name: string; payload: { pages?: unknown[] } }>(
+    `SELECT name, payload FROM workspace_items WHERE org_id = $1 AND kind = 'interface' AND payload->>'slug' = $2`,
+    [req.params.workspaceId, req.params.slug],
+  );
+  if (!iface) return res.status(404).json({ error: "not_found" });
+  res.json({ interface: { name: iface.name, pages: iface.payload.pages ?? [] } });
 });
 
 // ── Auth ────────────────────────────────────────────────────────────────────
@@ -541,11 +581,26 @@ authed.post("/connections/:id/test", async (req, res) => {
     [req.params.id, req.orgId],
   );
   if (!conn) return res.status(404).json({ error: "not_found" });
-  const { loadConnectionSecret } = await import("./flow-runtime");
-  const auth = await loadConnectionSecret(conn.id, req.orgId!);
-  if (!auth || !Object.keys(auth).length) {
-    return res.status(400).json({ error: "missing_credentials", hint: "Reconnect this account with valid credentials." });
+  // Zapier-style verification: dedicated vendor probes with actionable
+  // hints, then the legacy inline probes below as a fallback.
+  const { testConnectionById } = await import("./catalog/connection-testers");
+  const dedicated = await testConnectionById(conn.id, req.orgId!).catch((err: unknown) => ({
+    ok: false,
+    hint: err instanceof Error ? err.message : "Test failed",
+    detail: undefined as string | undefined,
+    appSlug: conn.piece_name,
+    tested: true,
+  }));
+  if (dedicated.tested && dedicated.ok) {
+    await query(`UPDATE connections SET status = 'active', updated_at = now() WHERE id = $1 AND org_id = $2`, [conn.id, req.orgId]);
+    return res.json({ ok: true, status: "connected", detail: dedicated.detail });
   }
+  if (dedicated.tested && dedicated.hint) {
+    return res.status(400).json({ error: "test_failed", hint: dedicated.hint });
+  }
+  // tested=false → fall through to the legacy inline probes (Google, Slack, GitHub, HubSpot, Stripe…).
+  const { loadConnectionSecret } = await import("./flow-runtime");
+  const auth = (await loadConnectionSecret(conn.id, req.orgId!)) ?? {};
   try {
     if (conn.piece_name === "openai") {
       const { testOpenAiConnection } = await import("./adapters");
@@ -2114,7 +2169,23 @@ authed.post("/automations/:id/publish", async (req, res) => {
       orgId: req.orgId!, flowId: dbFlow.id, definition: draft, userId: req.user!.userId,
     });
     await query(`UPDATE flows SET published_version_id = $1, status = 'active', updated_at = now() WHERE id = $2`, [versionId, dbFlow.id]);
-    res.json({ ok: true, versionId });
+
+    // Activate triggers (webhook tokens, cron schedules) — same contract as /flows/:id/publish
+    try {
+      const { TriggerActivationService } = await import("./triggers/trigger-activation.service");
+      await new TriggerActivationService({ getTrigger: () => ({}) }, env.apiUrl).onPublished(versionId);
+    } catch {
+      /* activation is best-effort */
+    }
+
+    const hook = await queryOne<{ webhook_token: string | null }>(
+      `SELECT webhook_token FROM triggers_registry WHERE flow_id = $1 AND status = 'active' AND webhook_token IS NOT NULL LIMIT 1`,
+      [dbFlow.id],
+    );
+    const webhookUrl = hook?.webhook_token
+      ? `${env.apiUrl.replace(/\/$/, "")}/api/v1/webhooks/inbound/${hook.webhook_token}`
+      : null;
+    res.json({ ok: true, versionId, webhookUrl });
   } catch (err: any) {
     console.error("POST /automations/:id/publish error:", err);
     res.status(500).json({ error: err.message ?? "publish_failed" });
@@ -2797,6 +2868,7 @@ authed.post("/agents", async (req, res) => {
     automationId: z.string().uuid().optional(),
     tools: z.array(z.record(z.unknown())).optional(),
     approvalRequired: z.boolean().optional(),
+    model: z.string().optional(),
   }).parse(req.body);
   const row = await insertItem(req.orgId!, "agent", body.name, { ...body, status: "active", activities: [] });
   res.json({ agent: presentItem(row!) });
@@ -2804,19 +2876,35 @@ authed.post("/agents", async (req, res) => {
 
 authed.delete("/agents/:id", async (req, res) => {
   await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
-  res.json({ ok: true });
-});
+  res.json({ ok: true });  });
 
 authed.post("/agents/:id/run", async (req, res) => {
   const body = z.object({ message: z.string().min(1) }).parse(req.body);
   const agent = await queryOne(`SELECT * FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
   if (!agent) return res.status(404).json({ error: "not_found" });
   const payload = (agent.payload ?? {}) as Record<string, unknown>;
-  const result = await copilotChat({
-    prompt: `${payload.instructions ?? ""}\n\nEvent: ${body.message}`,
-    workspaceId: req.orgId,
-  } as any).catch(() => null);
-  const reply = result?.reply ?? result?.summary ?? `Agent noted: "${body.message}".`;
+  // The real agent runtime: multi-round model <-> tool loop with allow-listed
+  // piece tools, budgets and durable runs. workspace_items agents store their
+  // allow-list as [{ appSlug, operation, connectionId }] in payload.tools.
+  try {
+    const result = await runAgentLoop({
+      agent: {
+        id: String(agent.id ?? ""),
+        instructions: String(payload.instructions ?? ""),
+        knowledge: String(payload.knowledge ?? ""),
+        tools: payload.tools ?? [],
+        model: typeof payload.model === "string" ? payload.model : null,
+        approval_required: payload.approvalRequired === true,
+        max_actions: typeof payload.maxActions === "number" ? payload.maxActions : 8,
+        status: payload.status === "off" ? "off" : "on",
+      },
+      message: body.message,
+      workspaceId: req.orgId!,
+      organizationId: req.orgId!,
+      userId: req.user?.userId,
+    });
+    const reply = result.reply;
+
   const activities = Array.isArray(payload.activities) ? payload.activities : [];
   activities.unshift({ id: crypto.randomUUID(), message: body.message, reply, created_at: new Date().toISOString() });
   await query(`UPDATE workspace_items SET payload = $3, updated_at = now() WHERE id = $1 AND org_id = $2`, [
@@ -2825,7 +2913,7 @@ authed.post("/agents/:id/run", async (req, res) => {
     JSON.stringify({ ...payload, activities: activities.slice(0, 50) }),
   ]);
   const automationId = typeof payload.automationId === "string" ? payload.automationId : undefined;
-  if (automationId) {
+  if (automationId && result.status === "ok") {
     const { createAndRunFlow } = await import("./flow-runtime");
     await createAndRunFlow({
       orgId: req.orgId!,
@@ -2835,7 +2923,13 @@ authed.post("/agents/:id/run", async (req, res) => {
       triggerKind: "agent",
     }).catch(() => undefined);
   }
-  res.json({ reply });
+  res.json({ reply, traces: result.traces, status: result.status, runId: result.runId });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "agent_failed";
+    const known = ["agent_off", "agents_disabled", "agent_activity_cap", "NO_MODEL_PROVIDER"].some((c) => message.startsWith(c));
+    if (!known) console.error("agent run failed", err);
+    res.status(400).json({ error: message });
+  }
 });
 
 authed.get("/agents/:id/activities", async (req, res) => {
@@ -3294,6 +3388,12 @@ authed.post("/table-assets/:id/views", async (req, res) => {
   );
   res.status(201).json({ id });
 });
+
+// Mount the product-surface router (SDK, developer apps, transfers, email
+// parsers, storage, AI settings) LAST so its handlers only receive paths not
+// already handled above — colliding paths keep the main handlers.
+import { productsRouter } from "./modules/products";
+authed.use(productsRouter);
 
 router.use("/", authed);
 

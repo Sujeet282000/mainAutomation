@@ -176,5 +176,26 @@ export const DIRECTORY_APPS: AppManifest[] = [
   pair("dynamics365", "Microsoft Dynamics 365", "erp", "oauth2", ["new_record", "New Record"], ["create_record", "Create Record"], [name]),
   pair("netsuite", "NetSuite", "erp", "custom", ["new_record", "New Record"], ["create_record", "Create Record"], [name]),
   pair("follow-up-boss", "Follow Up Boss", "realestate", "api_key", ["new_lead", "New Lead"], ["create_lead", "Create Lead"], [email, name]),
-  pair("appfolio", "AppFolio", "realestate", "custom", ["new_lead", "New Lead"], ["create_work_order", "Create Work Order"], [title])
+  pair("appfolio", "AppFolio", "realestate", "custom", ["new_lead", "New Lead"], ["create_work_order", "Create Work Order"], [title]),
+
+  // ── Expansion batch (user-requested catalog completeness) ────────────────
+  pair("asana", "Asana", "productivity", "oauth2", ["task_completed", "Task Completed"], ["create_task", "Create Task"], [title]),
+  pair("clickup", "ClickUp", "productivity", "oauth2", ["task_completed", "Task Completed"], ["create_task", "Create Task"], [title]),
+  pair("monday", "monday.com", "productivity", "oauth2", ["item_created", "Item Created"], ["create_item", "Create Item"], [name]),
+  pair("dropbox", "Dropbox", "storage", "oauth2", ["new_file", "New File"], ["upload_file", "Upload File"], [title]),
+  pair("box", "Box", "storage", "oauth2", ["new_file", "New File"], ["upload_file", "Upload File"], [title]),
+  pair("zoom", "Zoom", "communication", "oauth2", ["meeting_ended", "Meeting Ended"], ["create_meeting", "Create Meeting"], [title]),
+  pair("mailchimp", "Mailchimp", "marketing", "oauth2", ["new_subscriber", "New Subscriber"], ["add_subscriber", "Add Subscriber"], [email]),
+  pair("intercom", "Intercom", "support", "oauth2", ["new_conversation", "New Conversation"], ["send_message", "Send Message"], [msg]),
+  pair("pipedrive", "Pipedrive", "crm", "oauth2", ["new_deal", "New Deal"], ["create_deal", "Create Deal"], [name]),
+  pair("linkedin", "LinkedIn", "social", "oauth2", ["new_post", "New Post"], ["create_post", "Create Post"], [msg]),
+  pair("facebook-pages", "Facebook Pages", "social", "oauth2", ["new_post", "New Page Post"], ["create_post", "Create Post"], [msg]),
+  pair("instagram", "Instagram", "social", "oauth2", ["new_comment", "New Comment"], ["create_post", "Create Post"], [msg]),
+  pair("twitter", "X (Twitter)", "social", "oauth2", ["new_mention", "New Mention"], ["create_tweet", "Create Tweet"], [msg]),
+  pair("reddit", "Reddit", "social", "oauth2", ["new_post", "New Post"], ["create_post", "Create Post"], [title]),
+  pair("spotify", "Spotify", "media", "oauth2", ["new_saved_track", "New Saved Track"], ["add_to_playlist", "Add to Playlist"], [idField]),
+  pair("paypal", "PayPal", "payments", "oauth2", ["new_payment", "New Payment"], ["create_invoice", "Create Invoice"], [email]),
+  pair("quickbooks", "QuickBooks", "accounting", "oauth2", ["new_invoice", "New Invoice"], ["create_invoice", "Create Invoice"], [email]),
+  pair("outlook", "Outlook", "productivity", "oauth2", ["new_email", "New Email"], ["send_email", "Send Email"], [email, title]),
+  pair("sendgrid", "SendGrid", "marketing", "api_key", ["new_event", "New Event"], ["send_email", "Send Email"], [email, title])
 ];

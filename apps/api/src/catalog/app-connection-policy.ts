@@ -1,13 +1,16 @@
 import type { AppManifest } from "@algoverge/shared";
 import { getApp } from "./catalog";
+import { authSchemaFor } from "../auth-schema";
 
 export type ConnectionAuthField = {
   key: string;
   label: string;
-  type: "text" | "password" | "select";
+  type: "text" | "string" | "password" | "select";
   required?: boolean;
   placeholder?: string;
   help?: string;
+  helpUrl?: string;
+  helpUrlLabel?: string;
   options?: { label: string; value: string }[];
 };
 
@@ -17,31 +20,20 @@ export type ConnectionSetup = {
   authType: string;
   oauthProvider?: string;
   fields: ConnectionAuthField[];
+  note?: string;
   capabilities: { triggers: number; actions: number; searches: number };
 };
 
 const GOOGLE = new Set(["gmail", "google-sheets", "google-calendar", "google-drive"]);
 
-function authFields(app: AppManifest | undefined): ConnectionAuthField[] {
-  if (!app || app.authType === "none") return [];
-  if (app.authType === "oauth2") {
-    return [{ key: "oauth", label: "Account", type: "text", required: false, help: "You will authorize this account in the provider window." }];
-  }
-  if (app.authType === "api_key") {
-    return [{ key: "api_key", label: "API key", type: "password", required: true }];
-  }
-  if (app.authType === "basic") {
-    return [
-      { key: "username", label: "Username", type: "text", required: true },
-      { key: "password", label: "Password", type: "password", required: true }
-    ];
-  }
-  return [{ key: "credentials", label: "Credentials JSON", type: "password", required: true, help: "Stored encrypted; never returned to the browser." }];
-}
-
+/**
+ * Connection setup for the connect-account modal: rich per-app credential
+ * fields (Zapier-style), plus capability counts for the header line.
+ */
 export function getConnectionSetup(appSlug: string): ConnectionSetup | null {
   const app = getApp(appSlug);
   if (!app) return null;
+  const schema = authSchemaFor(app);
   const counts = app.operations.reduce(
     (out, operation) => {
       if (operation.type === "trigger") out.triggers += 1;
@@ -55,8 +47,9 @@ export function getConnectionSetup(appSlug: string): ConnectionSetup | null {
     appSlug: app.slug,
     appName: app.name,
     authType: app.authType ?? "none",
-    ...(GOOGLE.has(app.slug) ? { oauthProvider: "google" } : {}),
-    fields: authFields(app),
+    ...(schema.oauthProvider ? { oauthProvider: schema.oauthProvider } : {}),
+    fields: schema.fields as ConnectionAuthField[],
+    ...(schema.note ? { note: schema.note } : {}),
     capabilities: counts
   };
 }

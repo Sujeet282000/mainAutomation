@@ -398,10 +398,16 @@ export async function streamCopilotChat(opts: {
     await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
     await appendChatTurn(opts.sessionId, opts.orgId, { role: "assistant", content: result.reply, ts: now });
   } catch (err) {
+    const rawMessage = err instanceof Error ? err.message : "Copilot error";
+    // When every model provider failed, give the user an actionable message
+    // instead of a raw provider error chain.
+    const message = /^(NO_MODEL_PROVIDER|MODEL_PROVIDER_FAILED)/.test(rawMessage)
+      ? "AI is temporarily unavailable — all model providers (OpenAI, Anthropic, Gemini, Groq, local LLM) failed. Check your API keys and billing, then try again in a moment."
+      : rawMessage;
     await send({ type: "agent_state", state: "error", title: "Error" });
-    await send({ type: "agent_activity", kind: "error", label: "Request failed", detail: err instanceof Error ? err.message : "Copilot error" });
-    await send({ type: "agent_error", message: err instanceof Error ? err.message : "Copilot error", recoverable: true });
-    await send({ type: "error", message: err instanceof Error ? err.message : "Copilot error" });
+    await send({ type: "agent_activity", kind: "error", label: "Request failed", detail: message });
+    await send({ type: "agent_error", message, recoverable: true });
+    await send({ type: "error", message });
     await send({ type: "done", status: "error", source: "copilot-chat-stream" });
   }
 }

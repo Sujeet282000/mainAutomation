@@ -643,9 +643,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           label: e.sourceHandle ? String(e.sourceHandle).replace("path-", "Path ").toUpperCase() : undefined,
           active: runStates[e.source] === "ok" || runStates[e.source] === "running",
           pulse: runStates[e.source] === "running",
-          success: runStates[e.source] === "ok" && runStates[e.target] !== "fail"
+          success: runStates[e.source] === "ok" && runStates[e.target] !== "fail",
+          showAddOnHover: true,
         },
-        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#64748b" }
+        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#94a3b8" }
       })),
     [edges, nodes, runStates]
   );
@@ -1779,6 +1780,11 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                           {testResult.ok ? <Check className="h-4 w-4" /> : null}
                           {testResult.ok ? "Test successful" : "Test failed"}
                         </div>
+                        {!testResult.ok && (() => {
+                          const body = testResult.body as { error?: string } | null;
+                          if (body?.error) return <p className="mb-2 text-xs text-danger">{body.error}</p>;
+                          return null;
+                        })()}
                         {testResult.ms != null && <p className="mb-2 text-xs text-ink-muted">Duration {testResult.ms}ms</p>}
                         <pre className="av-hide-scroll max-h-56 whitespace-pre-wrap break-all rounded-lg bg-muted p-2 text-[11px] leading-relaxed [overflow-wrap:anywhere]">
                           {JSON.stringify(testResult.body, null, 2)}

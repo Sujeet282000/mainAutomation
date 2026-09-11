@@ -194,6 +194,12 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
       </div>
 
       {/* Activity items with slide-in animation */}
+      {activities.length === 0 && isWorking && (
+        <div className="mt-3 flex items-center gap-2 px-2 py-1 text-[12px] text-ink-muted">
+          <Loader2 className="h-3 w-3 animate-spin text-teal" />
+          <span className="animate-pulse">Analyzing your request…</span>
+        </div>
+      )}
       {activities.length > 0 && (
         <div className="mt-3 space-y-1">
           {activities.slice(-8).map((item, idx) => (
@@ -623,6 +629,8 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
   const drag = useRef<{ startX: number; startW: number } | null>(null);
   const widthRef = useRef(width); widthRef.current = width;
   const actId = useRef(0);
+  const liveActivitiesRef = useRef<AgentActivityItem[]>([]);
+  useEffect(() => { liveActivitiesRef.current = liveActivities; }, [liveActivities]);
 
   useEffect(() => {
     setMsgs([]); setProposal(null); setProposalSessionId(undefined); setApproving(false);
@@ -682,8 +690,18 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
           if (ev.type === "blocking_issue") addActivity("warn", ev.title as string, ev.detail as string | undefined);
           if (ev.type === "test_result") addActivity(ev.success ? "done" : "warn", `Tested ${ev.label}`, ev.success ? "Passed" : "Failed");
           if (ev.type === "operation_card" && ev.operation) { streamingOps = [ev.operation as OperationCard]; setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...last, operations: [...streamingOps] }]; return [...m, { role: "assistant", text: "", operations: [...streamingOps] }]; }); }
-          if (ev.type === "stage") { addActivity("done", (ev.label ?? ev.stage ?? "Working") as string); }
-          if (ev.type === "reasoning" && ev.text) { const txt = String(ev.text); if (txt.length > 5) { const summary = reasoningToActivity(txt); addActivity("done", summary); } }
+          if (ev.type === "stage") { const stageLabel = String(ev.label ?? ev.stage ?? "Working"); const lastStage = liveActivitiesRef.current[liveActivitiesRef.current.length - 1]; if (!lastStage || lastStage.label !== stageLabel) addActivity("done", stageLabel); }
+          if (ev.type === "reasoning" && ev.text) {
+            const txt = String(ev.text);
+            if (txt.length > 5) {
+              const summary = reasoningToActivity(txt);
+              // Replace the in-flight activity instead of stacking a new row per
+              // reasoning event — keeps the progress list short and readable.
+              const lastReasoning = liveActivitiesRef.current[liveActivitiesRef.current.length - 1];
+              if (lastReasoning && lastReasoning.kind === "running") updateActivity(lastReasoning.id, "done");
+              else if (!lastReasoning || lastReasoning.label !== summary) addActivity("done", summary);
+            }
+          }
           if (ev.type === "analysis_summary" && ev.title && Array.isArray(ev.items)) { const title = String(ev.title); const items = ev.items as string[]; addActivity("done", title); items.forEach((item) => addActivity("done", `  ${item}`)); }
           if (ev.type === "connection_required") { const appName = String(ev.appName || ev.appSlug || "App"); const msg = ev.message ? String(ev.message) : "Connect your account to continue"; addActivity("warn", `${appName} needs authentication`, msg); }
           if (ev.type === "field_mapping") { const src = String(ev.sourceLabel || "Source"); const tgt = String(ev.targetLabel || "Target"); addActivity("done", "Field mapping", `${src} \u2192 ${tgt}`); }
@@ -703,7 +721,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         const hasSuggestion = Boolean(result.graph || result.preview);
         setAgentState("completed"); setAgentTitle("Done");
         setLiveActivities((prev) => prev.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a));
-        setMsgs((m) => { const fa = liveActivities.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a); const last = m[m.length - 1]; const msg: Msg = { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations?.length ? result.operations : streamingOps, clarification: result.clarification, activities: fa, agentState: "completed", agentTitle: "Done", stepCards: (result as Record<string, unknown>).stepCards as StepCard[] | undefined, connectionCards: (result as Record<string, unknown>).connectionCards as ConnectionCard[] | undefined, warnings: (result as Record<string, unknown>).warnings as string[] | undefined }; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...msg, stepCards: msg.stepCards || last.stepCards, connectionCards: msg.connectionCards || last.connectionCards, warnings: msg.warnings || last.warnings }]; return [...m, msg]; });
+        setMsgs((m) => { const fa = liveActivitiesRef.current.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a); const last = m[m.length - 1]; const msg: Msg = { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations?.length ? result.operations : streamingOps, clarification: result.clarification, activities: fa, agentState: "completed", agentTitle: "Done", stepCards: (result as Record<string, unknown>).stepCards as StepCard[] | undefined, connectionCards: (result as Record<string, unknown>).connectionCards as ConnectionCard[] | undefined, warnings: (result as Record<string, unknown>).warnings as string[] | undefined }; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...msg, stepCards: msg.stepCards || last.stepCards, connectionCards: msg.connectionCards || last.connectionCards, warnings: msg.warnings || last.warnings }]; return [...m, msg]; });
         if (result.graph && result.applied) {
           setCheckpoint(true);
           void onApply(result.graph, result.sessionId);
@@ -775,11 +793,6 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
       {/* ── Messages ───────────────────────────────────────────────── */}
       <div ref={scroller} className="av-hide-scroll min-h-0 min-w-0 flex-1 overflow-y-auto space-y-1 px-3 pt-3 pb-3 text-sm">
         {empty && <div className="space-y-3"><div className="rounded-2xl border border-teal/30 bg-teal-soft/20 p-3"><div className="flex items-center gap-2"><Bot className="h-4 w-4 text-teal" /><p className="text-sm font-semibold text-ink">{draftConfigured ? "Ask about this workflow" : "What should we automate?"}</p></div><p className="mt-1 text-[11px] leading-relaxed text-ink-muted">{draftConfigured ? "Ask Copilot to modify or improve the workflow you already selected." : "Describe your goal and Copilot will help build the workflow."}</p></div><div><p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted">{draftConfigured ? "Workflow actions" : "Quick start ideas"}</p><SuggestionBadges badges={draftConfigured ? WORKFLOW_PROMPTS : EMPTY_CANVAS_PROMPTS} onSelect={(p) => { setInput(p); }} /></div></div>}
-
-        {/* Live build pipeline (only while working) */}
-        {isWorking && (
-          <BuildPipeline activities={liveActivities} agentState={agentState} agentTitle={agentTitle} />
-        )}
 
         {/* Chat messages with clear user/assistant spacing */}
         {msgs.map((m, i) => (
@@ -897,6 +910,12 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
             )}
           </div>
         ))}
+
+        {/* Live build pipeline — rendered below the newest message so the
+            agent's "thinking" shows where the response is generating. */}
+        {isWorking && (
+          <BuildPipeline activities={liveActivities} agentState={agentState} agentTitle={agentTitle} />
+        )}
 
         {/* Proposal card */}
         {proposal !== null && <div className="rounded-xl border border-teal/40 bg-teal-soft/20 p-3 text-xs text-ink"><div className="flex items-center justify-between gap-2"><span className="inline-flex items-center gap-1 rounded-full border border-teal/40 bg-teal-soft/40 px-2 py-1 text-[10px] font-semibold text-teal"><Sparkles className="h-2.5 w-2.5" /> Suggestion ready</span><span className="text-[10px] text-ink-muted">Review before applying</span></div><p className="mt-2">Copilot prepared a workflow change. Applying writes the draft {"\u2014"} it still does not publish.</p><Button size="sm" className="mt-2" disabled={approving} onClick={async () => { setApproving(true); try { await onApply(proposal, proposalSessionId); setCheckpoint(true); setProposal(null); setProposalSessionId(undefined); } finally { setApproving(false); } }}>{approving ? "Applying\u2026" : "Apply suggestion"}</Button></div>}

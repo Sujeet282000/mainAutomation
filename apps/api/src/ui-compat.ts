@@ -222,6 +222,14 @@ export function registerUiCompat(authed: Router) {
       );
       return res.json({ connection: { id: req.params.id } });
     }
+    if (req.body?.name) {
+      const row = await queryOne<{ id: string }>(
+        `UPDATE connections SET label = $3, updated_at = now() WHERE id = $1 AND org_id = $2 RETURNING id`,
+        [req.params.id, req.orgId, String(req.body.name)],
+      );
+      if (!row) return res.status(404).json({ error: "not_found" });
+      return res.json({ connection: { id: row.id, name: String(req.body.name) } });
+    }
     return next();
   });
 

@@ -7,6 +7,8 @@ import ReactFlow, {
   BackgroundVariant,
   Controls,
   MiniMap,
+  Handle,
+  Position,
   addEdge,
   useReactFlow,
   useNodesState,
@@ -17,7 +19,7 @@ import ReactFlow, {
   type Node,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { Network, Plus, Trash2, Save } from "lucide-react";
+import { Maximize2, Network, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -65,6 +67,8 @@ function CanvasNodeComponent({ data, selected }: { data: CanvasNodeData; selecte
       colors.bg, colors.border,
       selected && "ring-2 ring-teal ring-offset-2"
     )}>
+      {/* Handles make boxes connectable by dragging between them. */}
+      <Handle type="target" position={Position.Top} className="!h-2.5 !w-2.5 !border-2 !border-white !bg-slate-400" />
       <div className="mb-1.5 flex items-center gap-1.5">
         <span className={cn("h-2 w-2 rounded-full", colors.dot)} />
         <span className="text-[9px] font-bold uppercase tracking-wider text-ink-muted">{data.kind}</span>
@@ -72,6 +76,7 @@ function CanvasNodeComponent({ data, selected }: { data: CanvasNodeData; selecte
       <div className="text-sm font-semibold text-ink">{data.label || "Untitled"}</div>
       {data.appSlug && <div className="mt-1 truncate text-[10px] text-ink-muted">{data.appSlug}{data.operation ? ` → ${data.operation}` : ""}</div>}
       {data.description && <div className="mt-1 line-clamp-2 text-[10px] text-ink-muted">{data.description}</div>}
+      <Handle type="source" position={Position.Bottom} className="!h-2.5 !w-2.5 !border-2 !border-white !bg-slate-400" />
     </div>
   );
 }
@@ -144,7 +149,7 @@ function CanvasEditor({
           )}
         </div>
         <Button size="sm" variant="ghost" onClick={deleteSelected} title="Delete selected"><Trash2 className="h-3.5 w-3.5" /></Button>
-        <Button size="sm" onClick={() => fitView({ padding: 0.2 })} title="Fit view"><Save className="h-3.5 w-3.5" /></Button>
+        <Button size="sm" onClick={() => fitView({ padding: 0.2 })} title="Fit view"><Maximize2 className="h-3.5 w-3.5" /></Button>
         <Button size="sm" onClick={() => onSave(nodes, edges)} disabled={saving}>
           {saving ? "Saving..." : "Save"}
         </Button>
