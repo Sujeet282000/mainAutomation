@@ -160,7 +160,7 @@ export async function decryptJson<T>(kms: Kms, orgId: string, secret: string, bu
 
 export function redact(obj: unknown): unknown {
   if (!obj || typeof obj !== "object") return obj;
-  const secrets = /token|secret|password|authorization|api[_-]?key|refresh/i;
+  const secrets = /token|secret|password|authorization|api[_-]?key|refresh|cookie|set-cookie|private[_-]?key|bearer/i;
   if (Array.isArray(obj)) return obj.map(redact);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {

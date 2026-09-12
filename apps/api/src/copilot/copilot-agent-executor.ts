@@ -65,6 +65,12 @@ const TOOL_DESCRIPTIONS = [
     safeForAuto: true,
   },
   {
+    name: "workflow.apply_operations",
+    description: "Apply validated visual-builder operations such as adding, configuring, connecting, mapping, or testing workflow steps",
+    inputSchema: "{ operations: AgentOperation[] }",
+    safeForAuto: true,
+  },
+  {
     name: "integrations.search",
     description: "Search available integrations by keyword",
     inputSchema: "{ query: string }",

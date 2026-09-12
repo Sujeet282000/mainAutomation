@@ -38,6 +38,8 @@ export interface SystemPlan {
   entryProduct: ProductType;
   /** Whether this is a cross-product system */
   isSystem: boolean;
+  /** Which predefined template matched, if any (null = ad-hoc capability match) */
+  template: string | null;
   /** Ordered steps with dependencies */
   steps: SystemPlanStep[];
   /** Required connections */
@@ -238,6 +240,7 @@ export function planSystem(opts: {
     products,
     entryProduct,
     isSystem,
+    template: systemPattern,
     steps,
     connections: [...new Set(connections)],
     missingInfo,
@@ -268,47 +271,55 @@ export function planToGraph(plan: SystemPlan, catalog: Array<{ slug: string; nam
     knowledge: "openai",
   };
 
-  // Map capabilities to likely operations
+  // Map capabilities to catalog-verified operations (slugs and keys below are
+  // validated against APP_CATALOG — entries pointing at operations that do not
+  // exist are dropped by the builder, so keep this list honest).
   const capToOp: Record<string, { slug: string; op: string; asTrigger: boolean }> = {
-    create_form: { slug: "forms", op: "new_submission", asTrigger: true },
-    collect_submission: { slug: "forms", op: "new_submission", asTrigger: true },
+    create_form: { slug: "forms", op: "submitted", asTrigger: true },
+    collect_submission: { slug: "forms", op: "submitted", asTrigger: true },
     create_table: { slug: "google-sheets", op: "append_row", asTrigger: false },
     insert_record: { slug: "google-sheets", op: "append_row", asTrigger: false },
     search_records: { slug: "google-sheets", op: "read_sheet", asTrigger: false },
     create_workflow: { slug: "gmail", op: "new_email", asTrigger: true },
-    add_condition: { slug: "filter", op: "filter", asTrigger: false },
-    add_delay: { slug: "delay", op: "delay", asTrigger: false },
+    add_condition: { slug: "filter", op: "only_continue_if", asTrigger: false },
+    add_delay: { slug: "delay", op: "for", asTrigger: false },
     ai_summarize: { slug: "openai", op: "summarize", asTrigger: false },
     ai_classify: { slug: "openai", op: "classify", asTrigger: false },
     ai_extract: { slug: "openai", op: "extract", asTrigger: false },
-    ai_qualify: { slug: "openai", op: "score", asTrigger: false },
+    ai_qualify: { slug: "openai", op: "classify", asTrigger: false },
     send_slack: { slug: "slack", op: "send_message", asTrigger: false },
     send_email: { slug: "gmail", op: "send_email", asTrigger: false },
   };
 
+  let prevId: string | null = null;
+  let position = 0;
   for (const step of plan.steps) {
-    const mapping = capToOp[step.capability] ?? { slug: productToApp[step.product] ?? "http", op: "request", asTrigger: false };
-
-    // Validate against catalog
+    const mapping = capToOp[step.capability];
+    // Only catalog-validated steps make it into the graph — a step we cannot
+    // map to a real app+operation is skipped instead of becoming junk like
+    // "google-sheets:request" (which the visual builder cannot render).
+    if (!mapping) continue;
     const app = catalog.find((a) => a.slug === mapping.slug);
     const op = app?.operations.find((o) => o.key === mapping.op);
+    if (!app || !op) continue;
 
     const id = `${step.product}-${step.order}`;
     nodes.push({
       id,
-      type: step.order === 1 && mapping.asTrigger ? "trigger" : "action",
-      appSlug: app?.slug ?? mapping.slug,
-      operation: op?.key ?? mapping.op,
-      label: op?.name ?? step.description,
-      position: { x: 280, y: 40 + (step.order - 1) * 160 },
+      type: position === 0 && mapping.asTrigger ? "trigger" : "action",
+      appSlug: app.slug,
+      operation: op.key,
+      label: op.name || step.description,
+      position: { x: 280, y: 40 + position * 160 },
       config: {},
       connectionId: null,
     });
 
-    if (step.order > 1) {
-      const prevId = `${step.product}-${step.order - 1}`;
-      edges.push({ id: `e-${prevId}-${id}`, source: prevId, target: id });
-    }
+    // Link to the previous SURVIVING node (never a recomputed id — that is how
+    // dangling edges like e-table-1-table-2 used to appear).
+    if (prevId) edges.push({ id: `e-${prevId}-${id}`, source: prevId, target: id });
+    prevId = id;
+    position += 1;
   }
 
   return { nodes, edges };

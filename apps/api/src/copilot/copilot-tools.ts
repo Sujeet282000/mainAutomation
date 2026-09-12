@@ -12,6 +12,7 @@ import { persistBuilderDraft, loadBuilderGraph } from "../flow-runtime";
 import { pickForCopilot } from "../connections";
 import { pieceRegistry } from "../pieces/registry";
 import { validateWorkflowGraph } from "../workflow-validation";
+import { applyAgentOperations, type AgentOperation } from "../agent-operation-applier";
 
 export interface CopilotToolContext {
   workspaceId: string;
@@ -19,6 +20,7 @@ export interface CopilotToolContext {
   flowId?: string;
   versionId?: string;
   selectedNodeId?: string;
+  graph?: WorkflowGraph;
 }
 
 export interface CopilotToolResult {
@@ -85,6 +87,39 @@ export async function validateWorkflow(ctx: CopilotToolContext): Promise<Copilot
   return {
     ok: issues.length === 0,
     data: { issues, publishable: issues.length === 0 },
+  };
+}
+
+/** Apply validated visual-builder operations to the current draft graph. */
+export async function applyWorkflowOperations(
+  ctx: CopilotToolContext,
+  input: Record<string, unknown>,
+): Promise<CopilotToolResult> {
+  if (!ctx.graph) {
+    return { ok: false, error: { code: "NO_GRAPH", message: "No workflow canvas is selected." } };
+  }
+  if (!Array.isArray(input.operations)) {
+    return { ok: false, error: { code: "INVALID_OPERATIONS", message: "operations must be an array." } };
+  }
+
+  const result = await applyAgentOperations({
+    graph: ctx.graph,
+    operations: input.operations as AgentOperation[],
+    workspaceId: ctx.workspaceId,
+    organizationId: ctx.workspaceId,
+    allowDestructive: false,
+  });
+  return {
+    ok: result.rejected.length === 0 && result.needsConfirmation.length === 0,
+    data: {
+      graph: result.graph,
+      operations: input.operations,
+      applied_operations: result.applied,
+      rejected_operations: result.rejected,
+      needs_confirmation: result.needsConfirmation,
+      issues: result.issues,
+      test_results: result.testResults,
+    },
   };
 }
 
@@ -195,6 +230,7 @@ export async function inspectRun(runId: string, workspaceId: string): Promise<Co
 export const COPILOT_TOOLS: Record<string, (ctx: CopilotToolContext, input: Record<string, unknown>) => Promise<CopilotToolResult>> = {
   "workflow.get": (ctx) => getWorkflow(ctx),
   "workflow.validate": (ctx) => validateWorkflow(ctx),
+  "workflow.apply_operations": (ctx, input) => applyWorkflowOperations(ctx, input),
   "integrations.search": (_ctx, input) => listIntegrations(String(input.query ?? "")),
   "integrations.schema": (_ctx, input) => getIntegrationSchema(String(input.slug ?? "")),
   "connections.list": (ctx, input) => listConnections(ctx, input.pieceName as string | undefined),

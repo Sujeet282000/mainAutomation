@@ -15,6 +15,13 @@ export type {
   AssetStatus as AssetStatusValue,
 } from "./assets";
 
+export {
+  RUN_STATUSES,
+  STEP_STATUSES,
+  isTerminalRunStatus,
+} from "./execution-status";
+export type { RunStatus, StepStatus } from "./execution-status";
+
 // ─── Tables ──────────────────────────────────────────────────────────────────
 export {
   TableFieldType,

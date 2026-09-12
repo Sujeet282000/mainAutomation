@@ -4,8 +4,8 @@
 // This test kills the worker between the side effect and the state write.
 // ============================================================================
 
-import { describe, it, expect, beforeAll, afterAll } from "node:test";
-import assert from "node:assert";
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
 
 describe("Part 11: Idempotency", () => {
   it("should not repeat a side-effecting step on redelivery", async () => {
@@ -65,12 +65,12 @@ describe("Part 11: Idempotency", () => {
     const hash1 = definitionHash(def1);
     const hash2 = definitionHash(def2);
 
-    expect(hash1).toMatch(/^[0-9a-f]{64}$/);
-    expect(hash2).toMatch(/^[0-9a-f]{64}$/);
-    expect(hash1).not.toBe(hash2);
+    assert.match(hash1, /^[0-9a-f]{64}$/);
+    assert.match(hash2, /^[0-9a-f]{64}$/);
+    assert.notEqual(hash1, hash2);
 
     // Same definition = same hash (deterministic)
-    expect(definitionHash(def1)).toBe(hash1);
+    assert.equal(definitionHash(def1), hash1);
   });
 });
 
@@ -88,14 +88,14 @@ describe("Part 11: Flow Schema Validation", () => {
       settings: { timezone: "UTC", concurrency: 1, errorHandling: { mode: "fail" } },
     });
 
-    expect(result.success).toBe(false);
+    assert.equal(result.success, false);
   });
 
   it("should reject credential material in flow definitions", async () => {
     const { containsCredentialMaterial } = await import("@algoverge/core");
 
-    expect(containsCredentialMaterial({ api_key: "secret" })).toBe(true);
-    expect(containsCredentialMaterial({ access_token: "xyz" })).toBe(true);
-    expect(containsCredentialMaterial({ name: "normal" })).toBe(false);
+    assert.equal(containsCredentialMaterial({ api_key: "secret" }), true);
+    assert.equal(containsCredentialMaterial({ access_token: "xyz" }), true);
+    assert.equal(containsCredentialMaterial({ name: "normal" }), false);
   });
 });

@@ -444,6 +444,21 @@ export function safeParseFlowDefinition(raw: unknown) {
       error: { message: "credential_material" },
     };
   }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const steps = (raw as { steps?: unknown }).steps;
+    if (Array.isArray(steps)) {
+      const ids = steps
+        .filter((step): step is { id?: unknown } => Boolean(step) && typeof step === "object")
+        .map((step) => step.id)
+        .filter((id): id is string => typeof id === "string");
+      if (new Set(ids).size !== ids.length) {
+        return {
+          success: false as const,
+          error: { message: "duplicate_step_id" },
+        };
+      }
+    }
+  }
   return FlowDefinition.safeParse(raw);
 }
 

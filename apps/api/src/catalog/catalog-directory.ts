@@ -185,6 +185,7 @@ export const DIRECTORY_APPS: AppManifest[] = [
   pair("dropbox", "Dropbox", "storage", "oauth2", ["new_file", "New File"], ["upload_file", "Upload File"], [title]),
   pair("box", "Box", "storage", "oauth2", ["new_file", "New File"], ["upload_file", "Upload File"], [title]),
   pair("zoom", "Zoom", "communication", "oauth2", ["meeting_ended", "Meeting Ended"], ["create_meeting", "Create Meeting"], [title]),
+  pair("ms-teams", "Microsoft Teams", "communication", "oauth2", ["new_channel_message", "New Channel Message"], ["send_channel_message", "Send Channel Message"], [msg]),
   pair("mailchimp", "Mailchimp", "marketing", "oauth2", ["new_subscriber", "New Subscriber"], ["add_subscriber", "Add Subscriber"], [email]),
   pair("intercom", "Intercom", "support", "oauth2", ["new_conversation", "New Conversation"], ["send_message", "Send Message"], [msg]),
   pair("pipedrive", "Pipedrive", "crm", "oauth2", ["new_deal", "New Deal"], ["create_deal", "Create Deal"], [name]),

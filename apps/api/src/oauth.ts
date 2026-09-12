@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "crypto";
 import { env } from "./config";
 import { encryptJson, randomToken } from "./crypto";
 import { query, queryOne } from "./db";
@@ -108,10 +109,17 @@ oauthRouter.get("/:provider/start", authMiddleware, workspaceMiddleware, async (
   const redirectUri = process.env[config.redirectEnvKey ?? `${config.envKey}_REDIRECT_URI`] ??
     `${env.apiUrl.replace(/\/$/, "")}/api/v1/oauth/${provider}/callback`;
 
+  // PKCE (S256): required by X (Twitter), best practice everywhere else.
+  const codeVerifier = config.pkce ? crypto.randomBytes(48).toString("base64url") : null;
+  const codeChallenge = codeVerifier
+    ? crypto.createHash("sha256").update(codeVerifier).digest("base64url")
+    : null;
+
   const state = randomToken(16);
   await query(
-    `insert into oauth_states (state, user_id, org_id, app_slug, redirect_to, expires_at) values ($1,$2,$3,$4,$5, now() + interval '15 minutes')`,
-    [state, req.user.userId, req.orgId, appSlug, redirectTo || null],
+    `insert into oauth_states (state, user_id, org_id, app_slug, redirect_to, code_verifier, expires_at)
+     values ($1,$2,$3,$4,$5,$6, now() + interval '15 minutes')`,
+    [state, req.user.userId, req.orgId, appSlug, redirectTo || null, codeVerifier],
   );
 
   const url = new URL(config.authUrl);
@@ -121,6 +129,10 @@ oauthRouter.get("/:provider/start", authMiddleware, workspaceMiddleware, async (
   url.searchParams.set("state", state);
   const scope = [...config.scopes].join(config.authUrl.includes("microsoftonline") ? " " : " ");
   if (scope) url.searchParams.set("scope", scope);
+  if (codeChallenge) {
+    url.searchParams.set("code_challenge", codeChallenge);
+    url.searchParams.set("code_challenge_method", "S256");
+  }
   for (const [k, v] of Object.entries(config.authParams ?? {})) url.searchParams.set(k, v);
 
   res.json({ url: url.toString(), provider, appSlug });
@@ -132,7 +144,7 @@ oauthRouter.get("/:provider/callback", async (req, res) => {
   if (!config) return res.status(404).send("Unknown OAuth provider.");
   const code = String(req.query.code ?? "");
   const state = String(req.query.state ?? "");
-  const row = await queryOne<{ user_id: string; org_id: string; app_slug: string; redirect_to: string | null }>(
+  const row = await queryOne<{ user_id: string; org_id: string; app_slug: string; redirect_to: string | null; code_verifier: string | null }>(
     `select * from oauth_states where state=$1 and expires_at > now()`,
     [state],
   );
@@ -148,6 +160,7 @@ oauthRouter.get("/:provider/callback", async (req, res) => {
 
   const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri });
   if (config.clientAuth === "body") body.set("client_id", clientId), body.set("client_secret", clientSecret);
+  if (row.code_verifier) body.set("code_verifier", row.code_verifier);
 
   let tokens: Record<string, unknown>;
   try {

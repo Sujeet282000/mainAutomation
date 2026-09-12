@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { CopilotMode, AgentState, AgentActivityItem, AgentActivityKind } from "./copilot-types";
+import type { CopilotMode, AgentState, AgentActivityItem, AgentActivityKind, CopilotUIAction } from "./copilot-types";
 import { WorkflowPreview, type WorkflowPreviewData } from "./workflow-preview";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ export type CopilotTodo = { kind: string; message: string };
 const MIN_W = 280; const MAX_W = 720; const SNAP_MIN = 196; const DEFAULT_W = 340;
 
 type SuggestionBadge = { label: string; prompt: string; icon?: "zap" | "check" | "arrow" | "pencil" | "alert" };
-type OperationCard = { title: string; steps: OperationStep[]; status: "running" | "completed" | "failed"; actions?: Array<{ label: string; prompt: string }> };
+type OperationCard = { title: string; steps: OperationStep[]; status: "running" | "completed" | "failed"; detail?: string; actions?: Array<{ label: string; prompt: string }> };
 type OperationStep = { label: string; status: "pending" | "running" | "completed" | "failed" | "skipped"; detail?: string };
 type Clarification = { question: string; options: Array<{ label: string; prompt: string; description?: string }> };
 
@@ -74,35 +74,6 @@ const WORKFLOW_PROMPTS: SuggestionBadge[] = [
 
 const PRODUCT_ICONS: Record<string, string> = { form: "\ud83d\udcdd", table: "\ud83d\uddc3", workflow: "\u26a1", agent: "\ud83e\udd16", chatbot: "\ud83d\udcac", interface: "\ud83d\udda5", connection: "\ud83d\udd17" };
 
-/** Map agent states to user-safe display labels — never expose internals */
-const STATE_DISPLAY: Record<AgentState, { label: string; icon: "spinner" | "check" | "alert" | "idle" }> = {
-  idle: { label: "Ready", icon: "idle" },
-  understanding: { label: "Understanding your request", icon: "spinner" },
-  inspecting: { label: "Inspecting workflow", icon: "spinner" },
-  planning: { label: "Designing workflow", icon: "spinner" },
-  executing: { label: "Building workflow", icon: "spinner" },
-  testing: { label: "Testing workflow", icon: "spinner" },
-  validating: { label: "Validating workflow", icon: "spinner" },
-  waiting_for_user: { label: "Waiting for your choice", icon: "alert" },
-  completed: { label: "Done", icon: "check" },
-  blocked: { label: "Needs your attention", icon: "alert" },
-  error: { label: "Something went wrong", icon: "alert" },
-};
-
-/** Map backend SSE stages to user-facing pipeline steps */
-const PIPELINE_STAGES = [
-  { key: "intent", label: "Understanding your request" },
-  { key: "plan", label: "Finding capabilities" },
-  { key: "retrieve", label: "Looking at your workflow" },
-  { key: "select", label: "Checking available apps" },
-  { key: "connections", label: "Checking connections" },
-  { key: "schemas", label: "Reading data fields" },
-  { key: "mapping", label: "Mapping fields" },
-  { key: "assemble", label: "Building workflow" },
-  { key: "validate", label: "Validating workflow" },
-  { key: "persist", label: "Saving draft" },
-];
-
 const THINKING_PATTERNS = [
   /^\s*Thinking\.\.\.\s*/i,
   /^\s*(?:The user is asking me to|The user wants me to|Let me (?:analyze|think|consider|look|check|examine|inspect|understand|review)|I should (?:first|start|begin|check|look|analyze)|Looking at (?:the|this|what)|Given the context|The user might be|I need to (?:first|check|look|see|understand|analyze)|Wait\s*[\u2014,]|But wait\s*[\u2014,]|Actually\s*[\u2014,]|Now\s*[\u2014,]|So\s*[\u2014,]).*/im,
@@ -112,9 +83,13 @@ const THINKING_PATTERNS = [
   /(?:Let me explain what(?:'s| is) needed|ask for the action step direction|explain what(?:'s| is) needed and ask)/g,
 ];
 
+/** Internal diagnostics that must never surface as user-visible activity */
+const INTERNAL_REASONING = /\b(ai plane|model gateway|python (model )?gateway|fallback|falling back|using the (node|built-in|pattern|legacy)|provider error|engine failed|plane (is up|failed)|signed ai|grounding)\b/i;
+
 /** Convert raw backend reasoning text into a concise user-facing activity label */
 function reasoningToActivity(text: string): string {
   const lower = text.toLowerCase();
+  if (INTERNAL_REASONING.test(lower)) return "";
   if (/\b(intent|understand|classify|parse)\b/.test(lower)) return "Understanding your request";
   if (/\b(retrieve|find|search|lookup|catalog)\b/.test(lower)) return "Finding matching apps";
   if (/\b(select|pick|choose|match)\b/.test(lower)) return "Selecting operations";
@@ -126,9 +101,23 @@ function reasoningToActivity(text: string): string {
   if (/\b(persist|save|draft|store)\b/.test(lower)) return "Saving draft";
   if (/\b(test|run|execute|trigger)\b/.test(lower)) return "Testing workflow";
   if (/\b(error|fail|broken|issue)\b/.test(lower)) return "Found an issue";
-  // Fallback: take first sentence, truncated
-  const first = text.split(/\n/)[0] || text;
-  return first.length > 60 ? first.slice(0, 57) + "..." : first;
+  // No confident mapping — skip rather than leak raw model chatter into the UI.
+  return "";
+}
+
+/** Provider/infra errors never belong in chat — swap in an actionable message. */
+function friendlyReply(text: string): string {
+  if (!text) return text;
+  const t = text.trim();
+  const looksLikeProviderError =
+    /^Provider error \d+:/.test(t) ||
+    (/\b(429|401|403)\b/.test(t) && /\b(credits?|quota|unauthorized|api key|billing|insufficient)/i.test(t)) ||
+    /insufficient_(quota|credits?|key)/i.test(t) ||
+    (/\{\s*"error"\s*:/s.test(t) && t.length < 600);
+  if (looksLikeProviderError) {
+    return "The AI service is temporarily unavailable — your model provider rejected the request (quota or credentials). Check your provider API keys and billing, then try again. The built-in engine can still create and edit workflows in the meantime.";
+  }
+  return text;
 }
 
 function stripChainOfThought(text: string): string {
@@ -156,9 +145,10 @@ function ActivityIcon({ kind, size = "sm" }: { kind: AgentActivityKind; size?: "
 /** Live build pipeline — shows user-safe progress with animated transitions */
 function BuildPipeline({ activities, agentState, agentTitle }: { activities: AgentActivityItem[]; agentState: AgentState; agentTitle: string }) {
   const isWorking = agentState !== "idle" && agentState !== "completed" && agentState !== "error";
+  // Determinate-feel progress: grows with completed activities, capped below
+  // 100% until the agent actually finishes (the final state snaps it to done).
   const doneCount = activities.filter((a) => a.kind === "done").length;
-  const totalEstimate = PIPELINE_STAGES.length;
-  const progress = Math.min(1, doneCount / totalEstimate);
+  const progress = Math.min(0.92, doneCount * 0.18);
 
   if (!isWorking && activities.length === 0) return null;
 
@@ -193,7 +183,9 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
         </div>
       </div>
 
-      {/* Activity items with slide-in animation */}
+      {/* Activity items — consecutive duplicates are collapsed so the same
+          step never renders twice (stage + activity events describe the same
+          progress); internal diagnostics were already filtered at ingest. */}
       {activities.length === 0 && isWorking && (
         <div className="mt-3 flex items-center gap-2 px-2 py-1 text-[12px] text-ink-muted">
           <Loader2 className="h-3 w-3 animate-spin text-teal" />
@@ -202,7 +194,10 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
       )}
       {activities.length > 0 && (
         <div className="mt-3 space-y-1">
-          {activities.slice(-8).map((item, idx) => (
+          {activities
+            .filter((a, i, arr) => i === 0 || arr[i - 1].label !== a.label)
+            .slice(-8)
+            .map((item, idx, visible) => (
             <div
               key={item.id}
               className={cn(
@@ -210,7 +205,7 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
                 item.kind === "running" && "bg-teal-soft/20",
                 item.kind === "done" && "opacity-80",
                 // Slide-in animation for new items
-                idx === activities.slice(-8).length - 1 && "animate-[slideIn_0.3s_ease-out]",
+                idx === visible.length - 1 && "animate-[slideIn_0.3s_ease-out]",
               )}
             >
               <ActivityIcon kind={item.kind} />
@@ -236,11 +231,10 @@ function BuildPipeline({ activities, agentState, agentTitle }: { activities: Age
         </div>
       )}
 
-      {/* Status footer */}
+      {/* Status footer — honest activity count, never a fake x/10 pipeline */}
       {isWorking && (
         <div className="mt-2 flex items-center justify-between">
           <span className="text-[10px] text-ink-muted animate-pulse">Working...</span>
-          {doneCount > 0 && <span className="text-[10px] text-ink-muted">{doneCount}/{totalEstimate} steps</span>}
         </div>
       )}
     </div>
@@ -316,6 +310,7 @@ function OperationCardView({ card, onSend }: { card: OperationCard; onSend?: (pr
         {card.status === "completed" && <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-ok text-[8px] text-white">{"\u2713"}</div>}
         {card.status === "failed" && <AlertCircle className="h-3.5 w-3.5 text-danger" />}
         <span className="font-semibold text-ink">{card.title}</span>
+        {card.detail && <span className="ml-auto text-[10px] text-ink-muted">{card.detail}</span>}
       </div>
       <div className="mt-2 space-y-1.5">
         {card.steps.map((step, i) => (
@@ -480,7 +475,8 @@ function TestResultView({ card, onSend }: { card: TestResultCard; onSend?: (prom
 }
 
 function SuggestionBadges({ badges, onSelect }: { badges: SuggestionBadge[]; onSelect: (prompt: string) => void }) {
-  return (<div className="flex flex-wrap gap-1.5">{badges.map((badge) => (<button key={badge.label} type="button" className="inline-flex items-center gap-1 rounded-full border border-line bg-elevated px-2.5 py-1 text-[11px] font-medium text-ink transition-all hover:border-teal/50 hover:bg-teal-soft/20 hover:text-teal active:scale-95" onClick={() => onSelect(badge.prompt)}><BadgeIcon type={badge.icon} />{badge.label}</button>))}</div>);
+  const unique = badges.filter((b, i, arr) => arr.findIndex((x) => x.label === b.label) === i);
+  return (<div className="flex flex-wrap gap-1.5">{unique.map((badge) => (<button key={badge.label} type="button" className="inline-flex items-center gap-1 rounded-full border border-line bg-elevated px-2.5 py-1 text-[11px] font-medium text-ink transition-all hover:border-teal/50 hover:bg-teal-soft/20 hover:text-teal active:scale-95" onClick={() => onSelect(badge.prompt)}><BadgeIcon type={badge.icon} />{badge.label}</button>))}</div>);
 }
 
 function ClarificationView({ clarification, onSelect }: { clarification: Clarification; onSelect: (prompt: string) => void }) {
@@ -493,7 +489,7 @@ function ClarificationView({ clarification, onSelect }: { clarification: Clarifi
 }
 
 /** Typed action buttons — handles real UI actions, not just chat prompts */
-function ActionButtons({ actions, onSend }: { actions: Array<{ type: string; label: string; prompt?: string; href?: string; appSlug?: string; stepId?: string }>; onSend?: (prompt: string) => void }) {
+function ActionButtons({ actions, onSend, onUiAction }: { actions: Array<{ type: string; label: string; prompt?: string; href?: string; appSlug?: string; stepId?: string }>; onSend?: (prompt: string) => void; onUiAction?: (action: CopilotUIAction) => void }) {
   const iconMap: Record<string, React.ReactNode> = {
     connect_account: <Zap className="h-2.5 w-2.5" />,
     choose_app: <ChevronRight className="h-2.5 w-2.5" />,
@@ -528,6 +524,11 @@ function ActionButtons({ actions, onSend }: { actions: Array<{ type: string; lab
             type="button"
             className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all active:scale-95", colors)}
             onClick={() => {
+              const typed: CopilotUIAction = { type: (action.type as CopilotUIAction["type"]) ?? "prompt", label: action.label, prompt: action.prompt, href: action.href, appSlug: action.appSlug, stepId: action.stepId };
+              if (onUiAction && action.type !== "prompt" && action.type !== "navigate" && action.type !== "retry") {
+                onUiAction(typed);
+                return;
+              }
               if (action.type === "navigate" && action.href) {
                 window.open(action.href, "_blank");
               } else if (action.type === "connect_account" && action.appSlug) {
@@ -557,9 +558,9 @@ function ActionButtons({ actions, onSend }: { actions: Array<{ type: string; lab
   );
 }
 
-/** Render the assistant text with chain-of-thought stripped */
+/** Render the assistant text with chain-of-thought stripped and provider errors made friendly */
 function AgentMessage({ text, onSend }: { text: string; onSend?: (prompt: string) => void }) {
-  const cleaned = stripChainOfThought(text);
+  const cleaned = stripChainOfThought(friendlyReply(text));
   if (!cleaned) return null;
   const lines = cleaned.split("\n");
   const buttons: Array<{ label: string; prompt?: string }> = [];
@@ -607,7 +608,7 @@ function CopyButton({ text }: { text: string }) {
 
 // ── Main CopilotPanel ───────────────────────────────────────────────────────
 
-export function CopilotPanel({ automationId, open, modal, onOpenModal, building, draftConfigured, draftOutline: _draftOutline, firstHumanAction, mode, onModeChange, reasoning: _reasoning, showReasoning: _showReasoning, onToggleReasoning: _onToggleReasoning, stages: _stages, todos: _todos, planeHint: _planeHint, onClose, onExpand, onBuild, onStop, onChat, streamChat, onApply, onRevert, onCheckpoint, incomingPrompt, onIncomingPromptHandled }: { automationId: string; open: boolean; building: boolean; draftConfigured: boolean; draftOutline?: string; firstHumanAction?: string; mode: CopilotMode; onModeChange: (mode: CopilotMode) => void; reasoning: string; showReasoning: boolean; onToggleReasoning: () => void; stages: Activity[]; todos: CopilotTodo[]; modal?: boolean; onOpenModal?: () => void; planeHint?: string; onClose: () => void; onExpand: () => void; onCheckpoint: () => void; onBuild: (prompt: string) => void | Promise<{ graph?: unknown; summary?: string; rebuilt?: boolean; changed?: boolean } | void>; onStop: () => void; onChat: (prompt: string) => Promise<ChatResult>; streamChat?: (prompt: string, onEvent: (ev: Record<string, unknown>) => void, signal?: AbortSignal) => Promise<ChatResult>; onApply: (graph: unknown, sessionId?: string) => void | Promise<void>; onRevert: () => void; incomingPrompt?: string | null; onIncomingPromptHandled?: () => void }) {
+export function CopilotPanel({ automationId, open, modal, onOpenModal, building, draftConfigured, draftOutline: _draftOutline, firstHumanAction, mode, onModeChange, reasoning: _reasoning, showReasoning: _showReasoning, onToggleReasoning: _onToggleReasoning, stages: _stages, todos: _todos, planeHint: _planeHint, onClose, onExpand, onBuild, onStop, onChat, streamChat, onApply, onRevert, onUiAction, onCheckpoint, incomingPrompt, onIncomingPromptHandled }: { automationId: string; open: boolean; building: boolean; draftConfigured: boolean; draftOutline?: string; firstHumanAction?: string; mode: CopilotMode; onModeChange: (mode: CopilotMode) => void; reasoning: string; showReasoning: boolean; onToggleReasoning: () => void; stages: Activity[]; todos: CopilotTodo[]; modal?: boolean; onOpenModal?: () => void; planeHint?: string; onClose: () => void; onExpand: () => void; onCheckpoint: () => void; onBuild: (prompt: string) => void | Promise<{ graph?: unknown; summary?: string; rebuilt?: boolean; changed?: boolean } | void>; onStop: () => void; onChat: (prompt: string) => Promise<ChatResult>; streamChat?: (prompt: string, onEvent: (ev: Record<string, unknown>) => void, signal?: AbortSignal) => Promise<ChatResult>; onApply: (graph: unknown, sessionId?: string) => void | Promise<void>; onRevert: () => void; onUiAction?: (action: CopilotUIAction) => void; incomingPrompt?: string | null; onIncomingPromptHandled?: () => void }) {
   const [input, setInput] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [sending, setSending] = useState(false);
@@ -671,7 +672,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         setLiveActivities((prev) => [...prev.map((a) => ({ ...a, kind: "done" as AgentActivityKind })), { id: `act-${++actId.current}`, kind: "done", label: "Workflow built", detail: "Draft ready for review", timestamp: Date.now() }]);
         setAgentState("completed"); setAgentTitle("Workflow ready");
         setMsgs((m) => { const summary = result && "summary" in result && result.summary ? String(result.summary) : "Outlined a draft. Connect anything I cannot do, test a step, then publish."; return [...m, { role: "assistant", text: summary, activities: [...liveActivities], agentState: "completed", agentTitle: "Workflow ready", operations: [{ title: "Workflow built", steps: [{ label: "Analyzed request", status: "completed" }, { label: "Planned steps", status: "completed" }, { label: "Created nodes", status: "completed" }, { label: "Connected steps", status: "completed" }], status: "completed", actions: [{ label: "Test workflow", prompt: "Test this workflow" }, { label: "Add a step", prompt: "Add the next step" }] }] }]; });
-      } catch (err) { setAgentState("error"); setAgentTitle("Build failed"); addActivity("error", "Build failed", err instanceof Error ? err.message : "Unknown error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? err.message : "Copilot is unavailable." }]); }
+      } catch (err) { setAgentState("error"); setAgentTitle("Build failed"); addActivity("error", "Build failed", err instanceof Error ? "Check your AI provider keys and try again" : "Unknown error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? friendlyReply(err.message) : "Copilot is unavailable." }]); }
       return;
     }
 
@@ -695,11 +696,15 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
             const txt = String(ev.text);
             if (txt.length > 5) {
               const summary = reasoningToActivity(txt);
-              // Replace the in-flight activity instead of stacking a new row per
-              // reasoning event — keeps the progress list short and readable.
-              const lastReasoning = liveActivitiesRef.current[liveActivitiesRef.current.length - 1];
-              if (lastReasoning && lastReasoning.kind === "running") updateActivity(lastReasoning.id, "done");
-              else if (!lastReasoning || lastReasoning.label !== summary) addActivity("done", summary);
+              if (!summary) {
+                // Internal diagnostic ("AI plane is up", failover chatter) — never render it.
+              } else {
+                // Replace the in-flight activity instead of stacking a new row per
+                // reasoning event — keeps the progress list short and readable.
+                const lastReasoning = liveActivitiesRef.current[liveActivitiesRef.current.length - 1];
+                if (lastReasoning && lastReasoning.kind === "running") updateActivity(lastReasoning.id, "done", summary === lastReasoning.label ? undefined : summary);
+                else if (!lastReasoning || lastReasoning.label !== summary) addActivity("done", summary);
+              }
             }
           }
           if (ev.type === "analysis_summary" && ev.title && Array.isArray(ev.items)) { const title = String(ev.title); const items = ev.items as string[]; addActivity("done", title); items.forEach((item) => addActivity("done", `  ${item}`)); }
@@ -728,9 +733,8 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         } else if (result.graph) {
           setProposal(result.graph); setProposalSessionId(result.sessionId);
         }
-      } catch (err) { setAgentState("error"); setAgentTitle("Error"); addActivity("error", "Request failed", err instanceof Error ? err.message : "Unknown error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? err.message : "Copilot is unavailable." }]); }
+      } catch (err) { setAgentState("error"); setAgentTitle("Error"); addActivity("error", "Request failed", err instanceof Error ? "Check your AI provider keys and try again" : "Unknown error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? friendlyReply(err.message) : "Copilot is unavailable." }]); }
       finally { setSending(false); }
-    } else {
       try {
         const result = await onChat(prompt);
         const hasSuggestion = Boolean(result.graph || result.preview);
@@ -742,7 +746,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         } else if (result.graph) {
           setProposal(result.graph); setProposalSessionId(result.sessionId);
         }
-      } catch (err) { setAgentState("error"); setAgentTitle("Error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? err.message : "Copilot is unavailable." }]); }
+      } catch (err) { setAgentState("error"); setAgentTitle("Error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? friendlyReply(err.message) : "Copilot is unavailable." }]); }
       finally { setSending(false); }
     }
   }
@@ -886,16 +890,11 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
                       }
                     }
                     if (quickActions.length === 0) return null;
-                    return <div className="mt-1"><ActionButtons actions={quickActions} onSend={(p) => { setInput(p); void send("chat", p); }} /></div>;
+                    return <div className="mt-1"><ActionButtons actions={quickActions} onSend={(p) => { setInput(p); void send("chat", p); }} onUiAction={onUiAction} /></div>;
                   })()}
 
                   {/* Applied badge + Copy button */}
                   <div className="flex items-center gap-2 mt-1">
-                    {m.suggestion && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-teal/40 bg-teal-soft/30 px-2 py-0.5 text-[10px] font-medium text-teal">
-                        <Sparkles className="h-2.5 w-2.5" /> Suggestion
-                      </span>
-                    )}
                     {m.applied && (
                       <span className="inline-flex items-center gap-1 rounded-full border border-ok/30 bg-ok/10 px-2 py-0.5 text-[10px] font-medium text-ok">
                         <Check className="h-2.5 w-2.5" /> Applied to draft

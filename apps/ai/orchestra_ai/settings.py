@@ -36,9 +36,9 @@ def live_secret(value: SecretStr | None) -> str | None:
 class RouteSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="forbid")
 
-    provider: Literal["openai", "anthropic", "google", "local"]
+    provider: Literal["openai", "anthropic", "google", "groq", "local"]
     model: str
-    fallback_provider: Literal["openai", "anthropic", "google", "local"] | None = None
+    fallback_provider: Literal["openai", "anthropic", "google", "groq", "local"] | None = None
     fallback_model: str | None = None
     temperature: float = Field(ge=0, le=2)
     max_tokens: int = Field(ge=1, le=32_768)

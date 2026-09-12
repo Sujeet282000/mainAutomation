@@ -17,6 +17,8 @@ ALTER TABLE public.canvases
   ADD COLUMN IF NOT EXISTS organization_id UUID;
 ALTER TABLE public.canvases
   ADD COLUMN IF NOT EXISTS source_automation_id UUID;
+ALTER TABLE public.canvases
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 ALTER TABLE public.interfaces
   ADD COLUMN IF NOT EXISTS workspace_id UUID;

@@ -736,13 +736,18 @@ export async function copilotGraph(
     });
   }
 
-  // Try product-aware system planner for multi-product requests
+  // Try product-aware system planner — ONLY for genuine multi-product systems
+  // ("build a lead management system with form, AI and Slack"). Simple
+  // trigger→action requests ("when Gmail arrives, add a Sheets row") must fall
+  // through to the regex/RAG builders, which resolve the *named* apps instead
+  // of generic product templates.
   try {
     const { planSystem, planToGraph } = await import("./system-planner");
     const { searchKnowledge } = await import("./knowledge-rag");
     const knowledge = searchKnowledge(trimmed, { k: 3 });
     const systemPlan = planSystem({ prompt: trimmed, graph: opts?.graph, knowledge });
-    if (systemPlan.steps.length >= 2 && systemPlan.confidence > 0.5) {
+    const isGenuineSystem = Boolean(systemPlan.template) || systemPlan.isSystem;
+    if (isGenuineSystem && systemPlan.steps.length >= 2 && systemPlan.confidence > 0.5) {
       const planGraph = planToGraph(systemPlan, APP_CATALOG as any);
       if (planGraph.nodes.length >= 2 && planGraph.edges.length > 0) {
         return done(planGraph, "system-planner", describeGraph(planGraph), {

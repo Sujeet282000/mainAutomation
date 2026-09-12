@@ -176,7 +176,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const handleNavigate = useCallback(() => setMobileOpen(false), []);
 
   return (
-    <div className={cn("flex min-h-0 bg-bg", editor ? "h-screen overflow-hidden" : "min-h-screen")}>
+    /* Fixed-viewport app shell: the sidebar and header never scroll with the
+       page — only <main> scrolls. This keeps the logo pinned and gives the
+       nav its own independent scroll area. */
+    <div className="flex h-screen overflow-hidden bg-bg">
       <CommandPalette />
 
       {/* Mobile overlay */}
@@ -187,12 +190,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-40 flex flex-col overflow-hidden border-r border-line bg-elevated transition-all duration-300 ease-in-out lg:static",
+          "fixed inset-y-0 left-0 z-40 flex h-full flex-col overflow-hidden border-r border-line bg-elevated transition-all duration-300 ease-in-out lg:static",
           editor || collapsed ? "w-[72px]" : "w-[232px]",
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        {/* Logo */}
+        {/* Logo — pinned (never scrolls) */}
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-line/50 px-3">
           <Logo compact={editor || collapsed} />
           {!editor && (
@@ -206,7 +209,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
         </div>
 
-        {/* Navigation */}
+        {/* Navigation — independent scroll area (menus scroll, logo stays) */}
         <nav className="sidebar-scroll flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-2 py-3">
           {NAV.map((group) => (
             <NavGroup
@@ -220,21 +223,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
 
-        {/* Footer */}
-        {!collapsed && !editor && (
-          <div className="shrink-0 border-t border-line/50 px-3 py-3">
-            <div className="flex items-center gap-2 text-[11px] text-ink-muted">
-              <div className="h-1.5 w-1.5 rounded-full bg-ok animate-pulse" />
-              <span>All systems operational</span>
-            </div>
+        {/* Footer — same height in both states so open/close don't jump */}
+        <div className={cn("flex h-11 shrink-0 items-center border-t border-line/50 px-3", collapsed || editor ? "justify-center" : "justify-start")}>
+          <div className="flex items-center gap-2 text-[11px] text-ink-muted">
+            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-ok animate-pulse" />
+            {!(collapsed || editor) && <span>All systems operational</span>}
           </div>
-        )}
+        </div>
       </aside>
 
-      {/* Main content */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Main content column — the ONLY scrolling area */}
+      <div className="flex h-screen min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top header */}
-        <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-2 border-b border-line bg-elevated/90 px-3 backdrop-blur">
+        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-line bg-elevated px-3">
           <button className="rounded-lg p-2 lg:hidden" onClick={() => setMobileOpen((v) => !v)}>
             <Menu className="h-4 w-4" />
           </button>
@@ -304,8 +305,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        {/* Page content */}
-        <main className={cn("flex min-h-0 flex-1 flex-col", editor ? "overflow-hidden p-0" : "p-5 lg:p-8")}>
+        {/* Page content — scrolls inside the shell; sidebar/header stay put */}
+        <main className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain", editor ? "overflow-hidden p-0" : "p-5 lg:p-8")}>
           {children}
         </main>
       </div>

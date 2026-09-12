@@ -2240,9 +2240,85 @@ authed.post("/automations/:id/duplicate", async (req, res) => {
 // EXECUTIONS (frontend alias for runs)
 // ============================================================================
 
+// GET /analytics/summary — one round-trip per chart family; all aggregates
+// computed in Postgres (no row-by-row work in Node), windowed and index-backed.
+authed.get("/analytics/summary", async (req, res) => {
+  const orgId = req.orgId!;
+  const window = Math.min(Math.max(Number(req.query.days) || 14, 7), 90);
+  // Daily run volume / success rate / avg duration (uses flow_runs_status_created_idx)
+  const dailyP = query(
+    `SELECT date_trunc('day', created_at)::date::text AS day,
+            count(*)::int AS runs,
+            count(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+            count(*) FILTER (WHERE status = 'failed')::int AS failed,
+            count(DISTINCT flow_id)::int AS active_workflows,
+            avg(duration_ms)::int AS avg_ms
+     FROM flow_runs
+     WHERE org_id = $1 AND created_at >= now() - ($2 || ' days')::interval
+     GROUP BY 1 ORDER BY 1`,
+    [orgId, String(window)],
+  );
+  // Execution volume by trigger kind, 30 days
+  const triggersP = query(
+    `SELECT trigger_kind, count(*)::int AS runs
+     FROM flow_runs
+     WHERE org_id = $1 AND created_at >= now() - interval '30 days'
+     GROUP BY 1 ORDER BY 2 DESC`,
+    [orgId],
+  );
+  // Slowest steps (7 days) — step-level latency from run_steps
+  const slowStepsP = query(
+    `SELECT rs.step_id, rs.step_type, f.name AS flow_name,
+            avg(rs.duration_ms)::int AS avg_ms, max(rs.duration_ms)::int AS max_ms, count(*)::int AS runs
+     FROM run_steps rs
+     JOIN flow_runs r ON r.id = rs.run_id AND r.created_at = rs.run_created_at AND r.org_id = rs.org_id
+     JOIN flows f ON f.id = r.flow_id
+     WHERE rs.org_id = $1 AND rs.created_at >= now() - interval '7 days' AND rs.duration_ms IS NOT NULL
+     GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT 5`,
+    [orgId],
+  );
+  // Recent failures with the REAL error message (first failed step's error_json)
+  const failuresP = query(
+    `SELECT r.id, r.created_at, f.name AS automation_name,
+            (SELECT rs.error_json FROM run_steps rs
+              WHERE rs.run_id = r.id AND rs.run_created_at = r.created_at AND rs.org_id = r.org_id
+                AND rs.status = 'failed' ORDER BY rs.sequence_no ASC LIMIT 1) AS error
+     FROM flow_runs r
+     JOIN flows f ON f.id = r.flow_id
+     WHERE r.org_id = $1 AND r.status = 'failed'
+     ORDER BY r.created_at DESC LIMIT 5`,
+    [orgId],
+  );
+  // Latency percentiles (7 days)
+  const latencyP = queryOne<{ p50: number | null; p95: number | null; p99: number | null }>(
+    `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::int AS p50,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95,
+            percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms)::int AS p99
+     FROM flow_runs
+     WHERE org_id = $1 AND created_at >= now() - interval '7 days' AND duration_ms IS NOT NULL`,
+    [orgId],
+  );
+  const [daily, triggers, slowSteps, failures, latency] = await Promise.all([dailyP, triggersP, slowStepsP, failuresP, latencyP]);
+  res.json({
+    daily,
+    triggers,
+    slowSteps,
+    failures: failures.map((f: Record<string, unknown>) => ({
+      id: f.id,
+      created_at: f.created_at,
+      automation_name: f.automation_name,
+      error: typeof f.error === "object" && f.error ? f.error : f.error ? { message: String(f.error) } : { message: "Run failed" },
+    })),
+    latency: latency ?? { p50: null, p95: null, p99: null },
+  });
+});
+
 authed.get("/executions", async (req, res) => {
   const rows = await query(
-    `SELECT r.*, f.name as flow_name, f.id as automation_id
+    `SELECT r.*, f.name as flow_name, f.id as automation_id,
+            (SELECT rs.error_json FROM run_steps rs
+              WHERE rs.run_id = r.id AND rs.run_created_at = r.created_at AND rs.org_id = r.org_id
+                AND rs.status = 'failed' ORDER BY rs.sequence_no ASC LIMIT 1) AS error_json
      FROM flow_runs r
      JOIN flows f ON f.id = r.flow_id
      WHERE r.org_id = $1
@@ -2257,6 +2333,9 @@ authed.get("/executions", async (req, res) => {
     trigger_type: r.trigger_kind,
     created_at: r.created_at,
     finished_at: r.finished_at,
+    error: r.status === "failed"
+      ? (typeof r.error_json === "object" && r.error_json ? r.error_json : { message: "Run failed" })
+      : undefined,
   }));
   res.json({ executions });
 });

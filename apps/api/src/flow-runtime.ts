@@ -2,8 +2,9 @@ import { coerceWorkflowGraph, definitionHash, graphToFlowDefinition } from "@alg
 import type { WorkflowGraph } from "@algoverge/shared";
 import { runAdapter } from "./adapters";
 import { getApp } from "./catalog/catalog";
-import { encryptJson, decryptJson } from "./crypto";
-import { query, queryOne } from "./db";
+import { encryptJson, decryptJson, redact } from "./crypto";
+import { query, queryOne, withTransaction } from "./db";
+import { buildTriggerEnvelope } from "./trigger-envelope";
 
 export function persistBuilderDraft(graph: unknown) {
   try {
@@ -47,6 +48,22 @@ export async function ensureRunPartition() {
         `CREATE TABLE IF NOT EXISTS public."${name}" PARTITION OF public.flow_runs FOR VALUES FROM ($1) TO ($2)`,
         [startStr, endStr],
       );
+      // Partition creation materializes the parent's indexes under auto-generated
+      // names (…_key). Only add our named copy when it doesn't already exist, so
+      // re-running this never stacks duplicate indexes on the partition.
+      await query(`
+        DO $do$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'public' AND tablename = '${name}'
+              AND indexdef LIKE '%(id, created_at, org_id)%'
+          ) THEN
+            EXECUTE 'CREATE UNIQUE INDEX "${name}_id_created_at_org_id_idx" ON public."${name}" (id, created_at, org_id)';
+          END IF;
+        END
+        $do$;
+      `);
     } catch {
       // Partition may already exist — continue
     }
@@ -101,6 +118,19 @@ export async function ensureFlowVersion(opts: {
 
 export async function loadConnectionSecret(connectionId: string | null | undefined, orgId: string) {
   if (!connectionId) return null;
+  // OAuth connections get proactive token refresh here — executions and step
+  // tests always see a valid access token (or a needs_attention connection).
+  try {
+    const { ensureFreshToken } = await import("./oauth-refresh");
+    const piece = await queryOne<{ piece_name: string }>(
+      `SELECT piece_name FROM connections WHERE id = $1 AND org_id = $2`,
+      [connectionId, orgId],
+    );
+    const fresh = await ensureFreshToken(connectionId, orgId, piece?.piece_name ?? "");
+    if (fresh) return fresh;
+  } catch {
+    /* fall through to plain load */
+  }
   const row = await queryOne<{ ciphertext: Buffer | null; encrypted_payload: unknown }>(
     `SELECT ciphertext, encrypted_payload FROM connections WHERE id = $1 AND org_id = $2`,
     [connectionId, orgId],
@@ -207,6 +237,9 @@ export async function createAndRunFlow(opts: {
   payload?: Record<string, unknown>;
   graph?: unknown;
   triggerKind?: string;
+  eventId?: string | null;
+  idempotencyKey?: string | null;
+  receivedAt?: string;
   onStepComplete?: (step: { stepId: string; status: string; output?: unknown; error?: string; durationMs?: number }) => void;
 }) {
   await ensureRunPartition();
@@ -223,6 +256,17 @@ export async function createAndRunFlow(opts: {
     userId: opts.userId,
   });
   const graph = loadBuilderGraph(draft);
+  const triggerEnvelope = buildTriggerEnvelope({
+    workspaceId: opts.orgId,
+    organizationId: opts.orgId,
+    automationId: flow.id,
+    versionId,
+    triggerType: opts.triggerKind ?? "test",
+    payload: opts.payload ?? { ping: true },
+    eventId: opts.eventId,
+    idempotencyKey: opts.idempotencyKey,
+    receivedAt: opts.receivedAt,
+  });
   // Ensure project_id exists — create one if the flow doesn't have one
   let projectId = flow.project_id;
   if (!projectId) {
@@ -241,19 +285,41 @@ export async function createAndRunFlow(opts: {
     // Update the flow with the project_id
     await query(`UPDATE flows SET project_id = $1 WHERE id = $2`, [projectId, flow.id]).catch(() => undefined);
   }
-  const runRows = await query<{ id: string; created_at: Date }>(
-    `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, status, context)
-     VALUES ($1,$2,$3,$4,$5,'running',$6) RETURNING id, created_at`,
-    [
-      opts.orgId,
-      projectId,
-      flow.id,
-      versionId,
-      opts.triggerKind ?? "test",
-      JSON.stringify({ trigger: opts.payload ?? { ping: true } }),
-    ],
-  );
-  const run = runRows[0];
+  const run = await withTransaction(async (client) => {
+    if (triggerEnvelope.idempotencyKey) {
+      const claim = await client.query<{ flow_run_id: string | null }>(
+        `INSERT INTO trigger_events
+          (org_id, workspace_id, automation_id, version_id, event_id, trigger_type, received_at, idempotency_key, payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (org_id, idempotency_key) DO NOTHING
+         RETURNING flow_run_id`,
+        [opts.orgId, opts.orgId, flow.id, versionId, triggerEnvelope.eventId, triggerEnvelope.triggerType, triggerEnvelope.receivedAt, triggerEnvelope.idempotencyKey, JSON.stringify(triggerEnvelope.payload)],
+      );
+      if (!claim.rows[0]) {
+        const existing = await client.query<{ flow_run_id: string | null }>(
+          `SELECT flow_run_id FROM trigger_events WHERE org_id=$1 AND idempotency_key=$2 FOR UPDATE`,
+          [opts.orgId, triggerEnvelope.idempotencyKey],
+        );
+        if (existing.rows[0]?.flow_run_id) return { id: existing.rows[0].flow_run_id, created_at: new Date() };
+        throw new Error("TRIGGER_EVENT_CLAIM_INCOMPLETE");
+      }
+    }
+
+    const inserted = await client.query<{ id: string; created_at: Date }>(
+      `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, trigger_event_id, idempotency_key, status, context)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8) RETURNING id, created_at`,
+      [opts.orgId, projectId, flow.id, versionId, triggerEnvelope.triggerType, triggerEnvelope.eventId, triggerEnvelope.idempotencyKey, JSON.stringify({ trigger: triggerEnvelope.payload })],
+    );
+    const created = inserted.rows[0];
+    if (!created) throw new Error("Failed to create execution run record.");
+    if (triggerEnvelope.idempotencyKey) {
+      await client.query(
+        `UPDATE trigger_events SET flow_run_id=$1 WHERE org_id=$2 AND idempotency_key=$3`,
+        [created.id, opts.orgId, triggerEnvelope.idempotencyKey],
+      );
+    }
+    return created;
+  });
   if (!run) throw new Error("Failed to create execution run record.");
   // run_steps.run_created_at must equal flow_runs.created_at exactly — the FK
   // targets the monthly partition keyed on (run_id, created_at, org_id), and a
@@ -264,7 +330,7 @@ export async function createAndRunFlow(opts: {
     [run.id],
   );
   const runCreatedAt = exact?.created_at ?? String(run.created_at);
-  const ctx = { trigger: opts.payload ?? { ping: true }, steps: {} as Record<string, Record<string, unknown>> };
+  const ctx = { trigger: triggerEnvelope.payload, steps: {} as Record<string, Record<string, unknown>> };
   const ordered: WorkflowGraph["nodes"] = [];
   const seen = new Set<string>();
   const walk = (node: WorkflowGraph["nodes"][number]) => {
@@ -294,7 +360,7 @@ export async function createAndRunFlow(opts: {
           node.id,
           stepTypeOf(node),
           seq,
-          JSON.stringify(node.config ?? {}),
+          JSON.stringify(redact(node.config ?? {})),
           JSON.stringify(result.output),
         ],
       );
@@ -311,7 +377,7 @@ export async function createAndRunFlow(opts: {
           node.id,
           stepTypeOf(node),
           seq,
-          JSON.stringify(node.config ?? {}),
+          JSON.stringify(redact(node.config ?? {})),
           JSON.stringify({ message: failed }),
         ],
       );

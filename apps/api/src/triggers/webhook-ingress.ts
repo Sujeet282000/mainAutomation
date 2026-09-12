@@ -149,6 +149,9 @@ webhookRouter.post("/v1/webhooks/inbound/:token", async (req: Request, res: Resp
           userId: member.user_id,
           payload: (req.body && typeof req.body === "object" ? req.body : { body: req.body }) as Record<string, unknown>,
           triggerKind: "webhook",
+          eventId,
+          idempotencyKey: eventId ? `webhook:${trigger.flow_id}:${eventId}` : undefined,
+          receivedAt: payload.receivedAt,
         });
       }
     } catch (err) {

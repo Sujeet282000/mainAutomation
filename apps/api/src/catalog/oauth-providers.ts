@@ -23,6 +23,10 @@ export type OAuthProviderConfig = {
   authParams?: Record<string, string>;
   /** true when the provider uses the `state` param only (no PKCE). */
   clientAuth: "body" | "basic";
+  /** Send PKCE code_challenge (S256) on authorize + code_verifier on exchange. */
+  pkce?: boolean;
+  /** True when the provider can issue refresh tokens usable by us. */
+  refreshable?: boolean;
   /** Default redirect env var name; provider-specific override. */
   redirectEnvKey?: string;
   /** Where to send the access token on API calls from adapters. */
@@ -49,6 +53,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     tokenUrl: "https://login.salesforce.com/services/oauth2/token",
     scopes: ["api", "refresh_token", "offline_access"],
     clientAuth: "body",
+    refreshable: true,
     tokenStyle: "bearer",
     docsUrl: "https://developer.salesforce.com/docs/document.atlas.en-us.api_rest.meta/api_rest/intro_defining_remote_access_apps.htm",
   },
@@ -59,6 +64,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     tokenUrl: "https://api.hubapi.com/oauth/v1/token",
     scopes: ["crm.objects.contacts.read", "crm.objects.contacts.write", "crm.objects.companies.read", "crm.objects.deals.read", "crm.objects.deals.write"],
     clientAuth: "body",
+    refreshable: true,
     tokenStyle: "bearer",
     docsUrl: "https://developers.hubspot.com/docs/api/working-with-oauth",
   },
@@ -129,6 +135,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     tokenUrl: "https://zoom.us/oauth/token",
     scopes: ["meeting:write", "meeting:read", "user:read"],
     clientAuth: "basic",
+    refreshable: true,
     tokenStyle: "bearer",
     docsUrl: "https://developers.zoom.us/docs/integrations/oauth/",
   },
@@ -249,6 +256,8 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     tokenUrl: "https://api.twitter.com/2/oauth2/token",
     scopes: ["tweet.read", "tweet.write", "users.read", "offline.access"],
     clientAuth: "basic",
+    pkce: true, // X (Twitter) OAuth2 requires PKCE
+    refreshable: true,
     tokenStyle: "bearer",
     docsUrl: "https://developer.x.com/en/docs/authentication/oauth-2-0/user-access-token",
   },

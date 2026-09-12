@@ -20,7 +20,12 @@ export function ConnectAccountModal({ appSlug, appName, returnTo, replaceConnect
   const setupQ = useQuery({ queryKey: ["connection-setup", appSlug], queryFn: () => api<{ authSchema: AuthSchema }>(`/oauth/connection-setup/${encodeURIComponent(appSlug)}`) });
   const listQ = useQuery({ queryKey: ["connections"], queryFn: () => api<{ connections: Conn[] }>("/connections") });
   const schema = setupQ.data?.authSchema;
-  const google = schema?.oauthProvider === "google" || isGoogleApp(appSlug);
+  const oauthProvider = schema?.oauthProvider ?? "";
+  // Legacy special case kept for Google (pre-registry flow), but any registry
+  // provider (notion, github, salesforce, zoom, …) drives the same flow.
+  const google = oauthProvider === "google" || (!oauthProvider && isGoogleApp(appSlug));
+  const usesOauth = Boolean(oauthProvider);
+  const oauthLabel = appName ?? schema?.appName ?? (oauthProvider ? oauthProvider.charAt(0).toUpperCase() + oauthProvider.slice(1) : appSlug);
   const visibleFields = useMemo(() => schema?.fields ?? [{ key: "api_key", label: "API key", type: "password", required: true }], [schema]);
   const existing = (listQ.data?.connections ?? []).filter((c) => { const connectionApp = c.appSlug ?? c.app_slug ?? ""; return connectionApp === appSlug || (isGoogleApp(connectionApp) && isGoogleApp(appSlug)); });
   const filtered = existing.filter((c) => c.name.toLowerCase().includes(q.toLowerCase()));
@@ -61,6 +66,21 @@ export function ConnectAccountModal({ appSlug, appName, returnTo, replaceConnect
     window.location.assign(d.url);
   }
 
+  async function startOauth() {
+    const token = getToken(); const ws = getWorkspaceId(); const returnQuery = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : "";
+    try {
+      const res = await fetch(`${API_URL}/oauth/${encodeURIComponent(oauthProvider)}/start?appSlug=${encodeURIComponent(appSlug)}${returnQuery}`, { headers: { authorization: `Bearer ${token}`, "x-workspace-id": ws ?? "" } });
+      const d = await res.json();
+      if (!res.ok || !d.url) {
+        setError(d.error ?? `${oauthLabel} OAuth is not configured yet. Ask your admin to set the client ID and secret, or connect with a token instead.`);
+        return;
+      }
+      window.location.assign(d.url);
+    } catch {
+      setError("Could not start the authorization. Please try again.");
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={onClose}>
       <div className="w-full max-w-md overflow-hidden rounded-2xl border border-line bg-elevated shadow-card" onClick={(e) => e.stopPropagation()}>
@@ -69,10 +89,10 @@ export function ConnectAccountModal({ appSlug, appName, returnTo, replaceConnect
           {setupQ.isError && <p className="mb-3 text-sm text-danger">Unable to load this app's connection setup.</p>}
           {schema?.note && <p className="mb-3 rounded-lg border border-amber-300/40 bg-amber-500/5 p-2.5 text-[11px] text-amber-700">{schema.note}</p>}
           {existing.length > 0 && <div className="mb-4"><input className="mb-2 h-9 w-full rounded-lg border border-line px-3 text-sm" placeholder="Search accounts" value={q} onChange={(e) => setQ(e.target.value)} /><div className="max-h-40 space-y-1 overflow-auto">{filtered.map((c) => <button key={c.id} type="button" className="flex w-full items-center justify-between rounded-lg border border-line px-3 py-2 text-left text-sm hover:bg-muted" onClick={() => onConnected(c.id)} disabled={c.status !== "active" && c.status !== "connected"}><span><span className="block">{c.name}</span><span className="text-[11px] text-ink-muted">{c.status.replace(/_/g, " ")} · existing account</span></span><span className="h-3.5 w-3.5 rounded-full border border-violet-600" /></button>)}</div></div>}
-          {google ? <div className="rounded-xl bg-muted/50 p-4"><p className="text-sm font-medium">Connect your {appName ?? appSlug} account</p><p className="mt-2 text-xs text-ink-muted">Authorize once and reuse the encrypted account across compatible Google apps. Copilot can select it but cannot create credentials.</p></div> : <><label className="text-[13px] text-ink-muted">Connection name<Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} placeholder="Personal" /></label>{visibleFields.map((f) => <label key={f.key} className="mt-3 block text-[13px] text-ink">{f.label}{f.required !== false && <span className="text-danger"> *</span>}{f.type === "select" ? <select className="mt-1 h-9 w-full rounded-lg border border-line bg-elevated px-2 text-sm" value={fields[f.key] ?? f.options?.[0]?.value ?? ""} onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))}>{(f.options ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select> : <Input className="mt-1" type={f.type === "password" ? "password" : "text"} value={fields[f.key] ?? ""} placeholder={f.placeholder ?? ""} onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))} />}{f.help && <p className="mt-1 text-[11px] text-ink-muted">{f.help}</p>}{f.helpUrl && <a className="mt-0.5 inline-block text-[11px] font-medium text-violet-600 hover:underline dark:text-violet-400" href={f.helpUrl} target="_blank" rel="noreferrer">{f.helpUrlLabel ?? "Where do I find this?"} ↗</a>}</label>)}</>}
+          {google ? <div className="rounded-xl bg-muted/50 p-4"><p className="text-sm font-medium">Connect your {oauthLabel} account</p><p className="mt-2 text-xs text-ink-muted">Authorize once and reuse the encrypted account across compatible Google apps. Copilot can select it but cannot create credentials.</p></div> : usesOauth ? <div className="rounded-xl bg-muted/50 p-4"><p className="text-sm font-medium">Connect your {oauthLabel} account</p><p className="mt-2 text-xs text-ink-muted">You'll be redirected to {oauthLabel} to authorize this account securely. We never see your password, and the tokens are stored encrypted.</p></div> : <><label className="text-[13px] text-ink-muted">Connection name<Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} placeholder="Personal" /></label>{visibleFields.map((f) => <label key={f.key} className="mt-3 block text-[13px] text-ink">{f.label}{f.required !== false && <span className="text-danger"> *</span>}{f.type === "select" ? <select className="mt-1 h-9 w-full rounded-lg border border-line bg-elevated px-2 text-sm" value={fields[f.key] ?? f.options?.[0]?.value ?? ""} onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))}>{(f.options ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select> : <Input className="mt-1" type={f.type === "password" ? "password" : "text"} value={fields[f.key] ?? ""} placeholder={f.placeholder ?? ""} onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))} />}{f.help && <p className="mt-1 text-[11px] text-ink-muted">{f.help}</p>}{f.helpUrl && <a className="mt-0.5 inline-block text-[11px] font-medium text-violet-600 hover:underline dark:text-violet-400" href={f.helpUrl} target="_blank" rel="noreferrer">{f.helpUrlLabel ?? "Where do I find this?"} ↗</a>}</label>)}</>}
           {error && <p className="mt-3 text-sm text-danger">{error}</p>}
         </div>
-        <div className="flex justify-end gap-2 border-t border-line bg-muted/40 px-5 py-3"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={() => google ? void startGoogle() : create.mutate()} disabled={create.isPending || setupQ.isLoading}>{google ? "Connect with Google" : create.isPending ? "Saving…" : replaceConnectionId ? "Save and test" : "Connect"}</Button></div>
+        <div className="flex justify-end gap-2 border-t border-line bg-muted/40 px-5 py-3"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={() => google ? void startGoogle() : usesOauth ? void startOauth() : create.mutate()} disabled={create.isPending || setupQ.isLoading}>{google ? "Connect with Google" : usesOauth ? `Connect with ${oauthLabel}` : create.isPending ? "Saving…" : replaceConnectionId ? "Save and test" : "Connect"}</Button></div>
       </div>
     </div>
   );

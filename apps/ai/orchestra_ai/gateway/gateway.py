@@ -95,6 +95,7 @@ PRICE_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "claude-sonnet-4-5": (Decimal("3.00"), Decimal("15.00")),
     "gemini-3.7-flash": (Decimal("0.075"), Decimal("0.30")),
     "gemini-3.1-pro": (Decimal("1.25"), Decimal("5.00")),
+    "openai/gpt-oss-120b": (Decimal("0.00"), Decimal("0.00")),
     "text-embedding-3-small": (Decimal("0.02"), Decimal("0.00")),
 }
 
@@ -281,6 +282,7 @@ class ModelGateway:
             "openai": "openai",
             "anthropic": "anthropic",
             "google": "google",
+            "groq": "groq",
             "local": "local",
         }
         provider = provider_map.get(profile.provider, "openai")
@@ -304,7 +306,12 @@ class ModelGateway:
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:
-        return isinstance(error, ProviderError) and error.status_code in {429, 500, 502, 503, 529}
+        # 401/403 mean bad credentials — cascading to the next provider is the
+        # right move (this is what the Node agent loop already does). 429/5xx
+        # are transient: retry same provider first, then cascade.
+        if not isinstance(error, ProviderError):
+            return False
+        return error.status_code in {429, 500, 502, 503, 529} or error.status_code in {401, 403}
 
     @staticmethod
     def _token_count(model: str, text: str) -> int:
@@ -359,24 +366,59 @@ class ModelGateway:
         raise RuntimeError("unreachable")
 
     async def _complete(self, spec: CallSpec, route: ModelRoute) -> tuple[ProviderReply, ModelRoute]:
-        adapter = self._providers[route.provider]
-        try:
-            reply = await self._with_retry(adapter, spec, route)
-            return reply, route
-        except ProviderError as first_error:
-            if route.fallback_provider is None or route.fallback_model is None:
-                raise first_error
-            fallback = replace(
-                route,
-                provider=route.fallback_provider,
-                model=route.fallback_model,
-                fallback_provider=None,
-                fallback_model=None,
-            )
-            reply = await self._with_retry(
-                self._providers[fallback.provider], spec, fallback
-            )
-            return reply, fallback
+        """Try the primary route, then cascade through every remaining provider.
+
+        Zapier-style resilience: OpenAI out of credits → Anthropic → Gemini →
+        Groq → local. Each provider in the cascade gets its own retry budget,
+        and the route's declared fallback always gets tried first.
+        """
+        tried: set[str] = set()
+        current = route
+        last_error: ProviderError | None = None
+        for _ in range(len(self._providers)):
+            adapter = self._providers.get(current.provider)
+            if adapter is None or current.provider in tried:
+                break
+            tried.add(current.provider)
+            try:
+                reply = await self._with_retry(adapter, spec, current)
+                return reply, current
+            except ProviderError as err:
+                last_error = err
+                if current.fallback_provider and current.fallback_provider not in tried:
+                    current = replace(
+                        current,
+                        provider=current.fallback_provider,
+                        model=current.fallback_model or current.model,
+                        fallback_provider=None,
+                        fallback_model=None,
+                    )
+                    continue
+                nxt = self._next_provider(current.provider, tried)
+                if nxt is None:
+                    break
+                current = replace(current, provider=nxt, model=self._model_for(nxt, current.model))
+        raise last_error or ProviderError(503, "no model provider available")
+
+    def _next_provider(self, failed: str, tried: set[str]) -> str | None:
+        """Next live provider in the standard cascade order, skipping failures."""
+        order = ("openai", "anthropic", "google", "groq", "local")
+        for name in order:
+            if name != failed and name not in tried and name in self._providers:
+                return name
+        return None
+
+    def _model_for(self, provider: str, current_model: str) -> str:
+        """Pick a sensible model when cascading to a different provider."""
+        if provider == "openai":
+            return "gpt-4.1" if current_model.startswith("gpt") else "gpt-4.1"
+        if provider == "anthropic":
+            return "claude-sonnet-4-5"
+        if provider == "google":
+            return "gemini-3.7-flash"
+        if provider == "groq":
+            return "openai/gpt-oss-120b"
+        return current_model
 
     async def call(self, spec: CallSpec) -> GatewayResult:
         route = self._route(spec)
@@ -599,19 +641,25 @@ def provider_status() -> dict[str, Any]:
     openai = live_secret(settings.openai_api_key) is not None
     anthropic = live_secret(settings.anthropic_api_key) is not None
     gemini = live_secret(settings.gemini_api_key) is not None
+    groq = live_secret(settings.groq_api_key) is not None
     local_url = settings.local_base_url
     return {
         "openai": openai,
         "anthropic": anthropic,
         "gemini": gemini,
+        "groq": groq,
         "local": bool(local_url),
-        "mode": "live" if (openai or anthropic or gemini) else "local" if local_url else "heuristic",
+        "mode": "live" if (openai or anthropic or gemini or groq) else "local" if local_url else "heuristic",
     }
 
 
 def _adapt_routes(providers: dict[str, ProviderAdapter]) -> dict[str, ModelRoute]:
     adapted: dict[str, ModelRoute] = {}
     names = set(providers.keys())
+    if not names:
+        # No providers configured: keep declared routes so calls fail fast with
+        # a clear ProviderError instead of crashing here.
+        return dict(ROUTES)
     for purpose, route in ROUTES.items():
         if route.provider in names:
             adapted[purpose] = route
@@ -626,7 +674,7 @@ def _adapt_routes(providers: dict[str, ProviderAdapter]) -> dict[str, ModelRoute
             )
             continue
         first = next(iter(names))
-        model = "gpt-4o-mini" if first == "openai" else ("claude-sonnet-4-5" if first == "anthropic" else "dev-mock")
+        model = "gpt-4o-mini" if first == "openai" else ("claude-sonnet-4-5" if first == "anthropic" else ("openai/gpt-oss-120b" if first == "groq" else ("gemini-3.7-flash" if first == "google" else "qwen2.5:3b-instruct")))
         adapted[purpose] = ModelRoute(first, model, route.temperature, route.max_tokens)  # type: ignore[arg-type]
     return adapted
 
@@ -660,35 +708,20 @@ def get_gateway() -> "ModelGateway":
             _http, _settings.local_api_key, _settings.local_base_url,
         )
 
-        if not (providers.get("openai") or providers.get("anthropic") or providers.get("google")):
-            class DevProvider(ProviderAdapter):
-                """Returns mock structured responses for development without API keys."""
-                async def complete(self, **kwargs):
-                    msgs = kwargs.get("messages", [])
-                    user_msg = ""
-                    for m in msgs:
-                        if hasattr(m, "content"):
-                            user_msg = m.content
-                    mock = {
-                        "summary": f"Automate: {user_msg[:100]}",
-                        "trigger": {"kind": "app_event", "app_hint": "gmail", "event_hint": "new_email", "search_text": user_msg[:80], "schedule_hint": None},
-                        "actions": [{"purpose": "send_message", "operation_hint": "slack:send_message", "order": 0}],
-                        "logic": [],
-                        "ambiguities": [],
-                        "out_of_scope": []
-                    }
-                    import json as _json
-                    return ProviderReply(text=_json.dumps(mock), tokens_in=100, tokens_out=200, cached_tokens=0)
+        groq_key = live_secret(_settings.groq_api_key)
+        if groq_key:
+            # Groq exposes an OpenAI-compatible chat completions API with tool
+            # calling — reuse the local adapter against Groq's base URL.
+            providers["groq"] = LocalOpenAICompatibleAdapter(
+                _http, groq_key, _settings.groq_base_url,
+            )
 
-                async def stream(self, **kwargs):
-                    if False:
-                        yield ""
-                    return
-
-                async def embed(self, **kwargs):
-                    return [[0.0] * 8 for _ in kwargs.get("texts", [])]
-
-            providers["openai"] = DevProvider()  # type: ignore
+        if not (providers.get("openai") or providers.get("anthropic") or providers.get("google") or providers.get("groq")):
+            # Production posture: no keys configured means the model plane is
+            # genuinely unavailable. Every call fails fast with a clear
+            # ProviderError (the Node layer maps it to an actionable user
+            # message) instead of silently returning mock data.
+            pass
 
         _gateway = ModelGateway(
             providers=providers,

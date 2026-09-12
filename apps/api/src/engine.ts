@@ -4,7 +4,7 @@ import { runAdapter } from "./adapters";
 import { getApp } from "./catalog/catalog";
 import { loadConnectionAuth } from "./connections";
 import { redact } from "./crypto";
-import { query, queryOne } from "./db";
+import { query, queryOne, withTransaction } from "./db";
 import { recordUsage, taskUnitsForStep } from "./metering";
 import { enqueueExecution } from "./queue";
 import { isAuthError, missingRequiredMappings, shouldPauseAfterFailures, StepError } from "./runtime-guards";
@@ -55,32 +55,57 @@ export async function createExecution(opts: {
   }>(`select * from automations where id=$1`, [opts.automationId]);
   if (!auto) throw new Error("Automation not found");
   if (auto.status === "paused") throw new Error("Automation is paused after repeated failures. Turn it on after fixing the error.");
-  if (opts.idempotencyKey) {
-    const existing = await queryOne(`select id from executions where workspace_id=$1 and idempotency_key=$2`, [
-      auto.workspace_id,
-      opts.idempotencyKey
-    ]);
-    if (existing) return existing;
-  }
-  const exec = await queryOne<{ id: string }>(
-    `insert into executions (organization_id, workspace_id, automation_id, version_id, trigger_type, trigger_event_id, idempotency_key, status, context)
-     values ($1,$2,$3,$4,$5,$6,$7,'queued',$8) returning id`,
-    [
+  const result = await withTransaction(async (client) => {
+    if (opts.idempotencyKey) {
+      const claim = await client.query<{ legacy_execution_id: string | null }>(
+        `INSERT INTO trigger_events
+          (org_id, workspace_id, automation_id, version_id, event_id, trigger_type, received_at, idempotency_key, payload)
+         VALUES ($1,$2,$3,$4,$5,$6,now(),$7,$8)
+         ON CONFLICT (org_id, idempotency_key) DO NOTHING
+         RETURNING legacy_execution_id`,
+        [auto.organization_id, auto.workspace_id, auto.id, opts.versionId ?? auto.published_version_id ?? auto.current_version_id, (opts.triggerData.id as string) ?? null, opts.triggerType, opts.idempotencyKey, JSON.stringify(opts.triggerData)],
+      );
+      if (!claim.rows[0]) {
+        const existing = await client.query<{ legacy_execution_id: string | null }>(
+          `SELECT legacy_execution_id FROM trigger_events WHERE org_id=$1 AND idempotency_key=$2 FOR UPDATE`,
+          [auto.organization_id, opts.idempotencyKey],
+        );
+        if (existing.rows[0]?.legacy_execution_id) return { id: existing.rows[0].legacy_execution_id, created: false };
+        throw new Error("TRIGGER_EVENT_CLAIM_INCOMPLETE");
+      }
+    }
+    const inserted = await client.query<{ id: string }>(
+      `insert into executions (organization_id, workspace_id, automation_id, version_id, trigger_type, trigger_event_id, idempotency_key, status, context)
+       values ($1,$2,$3,$4,$5,$6,$7,'queued',$8) returning id`,
+      [
+        auto.organization_id,
+        auto.workspace_id,
+        auto.id,
+        opts.versionId ?? auto.published_version_id ?? auto.current_version_id,
+        opts.triggerType,
+        (opts.triggerData.id as string) ?? null,
+        opts.idempotencyKey ?? null,
+        JSON.stringify({ trigger: opts.triggerData })
+      ]
+    );
+    const created = inserted.rows[0];
+    if (!created) throw new Error("Failed to create execution");
+    if (opts.idempotencyKey) {
+      await client.query(
+        `UPDATE trigger_events SET legacy_execution_id=$1 WHERE org_id=$2 AND idempotency_key=$3`,
+        [created.id, auto.organization_id, opts.idempotencyKey],
+      );
+    }
+    return { id: created.id, created: true };
+  });
+  const exec = { id: result.id };
+  if (result.created) {
+    await query(`insert into usage_records (organization_id, workspace_id, metric, quantity) values ($1,$2,'executions',1)`, [
       auto.organization_id,
-      auto.workspace_id,
-      auto.id,
-      opts.versionId ?? auto.published_version_id ?? auto.current_version_id,
-      opts.triggerType,
-      (opts.triggerData.id as string) ?? null,
-      opts.idempotencyKey ?? null,
-      JSON.stringify({ trigger: opts.triggerData })
-    ]
-  );
-  await query(`insert into usage_records (organization_id, workspace_id, metric, quantity) values ($1,$2,'executions',1)`, [
-    auto.organization_id,
-    auto.workspace_id
-  ]);
-  if (opts.enqueue !== false) {
+      auto.workspace_id
+    ]);
+  }
+  if (result.created && opts.enqueue !== false) {
     await enqueueExecution({ executionId: exec!.id, workspaceId: auto.workspace_id, orgId: auto.organization_id });
   }
   return exec!;

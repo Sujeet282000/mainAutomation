@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Literal
 
 import httpx
 
-ProviderName = Literal["openai", "anthropic", "google", "local"]
+ProviderName = Literal["openai", "anthropic", "google", "groq", "local"]
 
 
 @dataclass(frozen=True)

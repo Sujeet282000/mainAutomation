@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ from orchestra_ai.copilot.diagnose import Diagnosis, RunDiagnoser
 from orchestra_ai.copilot.models import Autonomy
 from orchestra_ai.copilot.orchestrator import CopilotOrchestrator
 from orchestra_ai.gateway.gateway import CallSpec, Message, Purpose, get_gateway
+from orchestra_ai.gateway.providers import ProviderError
 from orchestra_ai.prompts.registry import PromptRegistry
 
 router = APIRouter(prefix="/copilot", tags=["copilot"])
@@ -130,11 +131,21 @@ async def refine(
             needs_input=agent.needs_input,
             publishable=False,
         )
+    except ProviderError as exc:
+        # Never leak raw provider errors as a chat "summary" — surface an HTTP
+        # error so the Node control plane fails over to its own cascade.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "ALL_MODEL_PROVIDERS_FAILED",
+                "message": "All model providers failed (OpenAI, Anthropic, Gemini, Groq, local).",
+                "provider_status": exc.status_code,
+            },
+        )
     except Exception as exc:
-        return RefineResponse(
-            applied=False,
-            definition=body.definition,
-            summary=str(exc)[:240],
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "REFINE_FAILED", "message": str(exc)[:240]},
         )
 
 

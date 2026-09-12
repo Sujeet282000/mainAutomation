@@ -258,9 +258,14 @@ export function registerUiCompat(authed: Router) {
       [req.params.id, req.orgId],
     );
     if (!run) return res.status(404).json({ error: "not_found" });
+    // Join on run_created_at = r.created_at inside Postgres: a JS round-trip
+    // drops microseconds, so comparing timestamps client-side never matches
+    // the partitioned run_steps rows.
     const steps = await query(
-      `SELECT * FROM run_steps WHERE run_id = $1 AND run_created_at = $2 ORDER BY sequence_no ASC`,
-      [run.id, run.created_at],
+      `SELECT s.* FROM run_steps s
+       WHERE s.run_id = $1 AND s.run_created_at = (SELECT r2.created_at FROM flow_runs r2 WHERE r2.id = $1 LIMIT 1)
+       ORDER BY s.sequence_no ASC`,
+      [run.id],
     );
     res.json(mapRunToExecution(run as any, steps as any));
   });
@@ -290,8 +295,10 @@ export function registerUiCompat(authed: Router) {
     );
     if (!run) { sendEvent("error", { message: "not_found" }); res.end(); return; }
     const initialSteps = await query(
-      `SELECT * FROM run_steps WHERE run_id = $1 AND run_created_at = $2 ORDER BY sequence_no ASC`,
-      [runId, run.created_at],
+      `SELECT s.* FROM run_steps s
+       WHERE s.run_id = $1 AND s.run_created_at = (SELECT r2.created_at FROM flow_runs r2 WHERE r2.id = $1 LIMIT 1)
+       ORDER BY s.sequence_no ASC`,
+      [runId],
     );
     lastStepCount = initialSteps.length;
     sendEvent("snapshot", mapRunToExecution(run as any, initialSteps as any));
@@ -307,8 +314,10 @@ export function registerUiCompat(authed: Router) {
         );
         if (!currentRun) { done = true; return; }
         const steps = await query(
-          `SELECT * FROM run_steps WHERE run_id = $1 AND run_created_at = $2 ORDER BY sequence_no ASC`,
-          [runId, currentRun.created_at],
+          `SELECT s.* FROM run_steps s
+           WHERE s.run_id = $1 AND s.run_created_at = (SELECT r2.created_at FROM flow_runs r2 WHERE r2.id = $1 LIMIT 1)
+           ORDER BY s.sequence_no ASC`,
+          [runId],
         );
         // Emit new steps as individual events
         for (let i = lastStepCount; i < steps.length; i++) {

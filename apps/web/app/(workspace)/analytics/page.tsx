@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useEffect } from "react";
+import { useMemo, useEffect, useState } from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -26,32 +26,49 @@ type Connection = { id: string; name: string; status: string; appSlug?: string; 
 type Table = { id: string; name: string; record_count?: number };
 type FormRow = { id: string; name: string; slug: string };
 type Agent = { id: string; name: string; status: string };
+type AnalyticsSummary = {
+  daily: Array<{ day: string; runs: number; succeeded: number; failed: number; active_workflows: number; avg_ms: number | null }>;
+  triggers: Array<{ trigger_kind: string; runs: number }>;
+  slowSteps: Array<{ step_id: string; step_type: string; flow_name: string; avg_ms: number; max_ms: number; runs: number }>;
+  failures: Array<{ id: string; created_at: string; automation_name: string; error: { message?: string } }>;
+  latency: { p50: number | null; p95: number | null; p99: number | null };
+};
 
-// ── Animated Bar Chart ───────────────────────────────────────────────────
-function BarChart({ data }: { data: Array<{ label: string; value: number; color?: string }> }) {
+// ── Animated Bar Chart (with hover tooltip) ─────────────────────────────────
+function BarChart({ data }: { data: Array<{ label: string; value: number; color?: string; tooltip?: string }> }) {
   const max = Math.max(...data.map((d) => d.value), 1);
+  const [hover, setHover] = useState<number | null>(null);
   return (
-    <div className="flex items-end gap-2" style={{ height: 140 }}>
-      {data.map((d, i) => (
-        <div key={i} className="flex flex-1 flex-col items-center gap-1.5">
-          <span className={cn("text-[10px] font-semibold", d.value > 0 ? "text-ink" : "text-ink-muted")}>{d.value}</span>
-          <div
-            className={cn(
-              "w-full rounded-t-lg transition-all duration-700 ease-out",
-              d.value > 0 ? (d.color ?? "bg-gradient-to-t from-violet-600 to-violet-400") : "bg-muted"
-            )}
-            style={{ height: `${Math.max((d.value / max) * 90, d.value > 0 ? 6 : 2)}%` }}
-          />
-          <span className="text-[10px] font-medium text-ink-muted">{d.label}</span>
+    <div className="relative">
+      <div className="flex items-end gap-2" style={{ height: 140 }}>
+        {data.map((d, i) => (
+          <div key={i} className="group flex flex-1 cursor-default flex-col items-center gap-1.5" onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+            <span className={cn("text-[10px] font-semibold transition-opacity", d.value > 0 ? "text-ink" : "text-ink-muted", hover !== null && hover !== i && "opacity-40")}>{d.value}</span>
+            <div
+              className={cn(
+                "w-full rounded-t-lg transition-all duration-700 ease-out group-hover:brightness-110",
+                d.value > 0 ? (d.color ?? "bg-gradient-to-t from-violet-600 to-violet-400") : "bg-muted"
+              )}
+              style={{ height: `${Math.max((d.value / max) * 90, d.value > 0 ? 6 : 2)}%` }}
+            />
+            <span className={cn("text-[10px] font-medium transition-colors", hover === i ? "text-ink" : "text-ink-muted")}>{d.label}</span>
+          </div>
+        ))}
+      </div>
+      {hover !== null && data[hover]?.tooltip && (
+        <div className="pointer-events-none absolute -top-2 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-line bg-elevated px-2.5 py-1.5 text-[11px] shadow-card">
+          <span className="font-semibold">{data[hover].label}</span>
+          <span className="text-ink-muted"> — {data[hover].tooltip}</span>
         </div>
-      ))}
+      )}
     </div>
   );
 }
 
-// ── Donut Chart (SVG) ───────────────────────────────────────────────────
+// ── Donut Chart (SVG, with hover tooltip) ────────────────────────────────────
 function DonutChart({ segments, size = 120 }: { segments: Array<{ value: number; color: string; label: string }>; size?: number }) {
   const total = segments.reduce((s, d) => s + d.value, 0) || 1;
+  const [hover, setHover] = useState<string | null>(null);
   const r = (size - 20) / 2;
   const circ = 2 * Math.PI * r;
   let offset = 0;
@@ -70,25 +87,36 @@ function DonutChart({ segments, size = 120 }: { segments: Array<{ value: number;
                 r={r}
                 fill="none"
                 stroke={seg.color}
-                strokeWidth={14}
+                strokeWidth={hover === seg.label ? 17 : 14}
                 strokeDasharray={`${pct} ${circ - pct}`}
                 strokeDashoffset={-offset}
                 strokeLinecap="round"
-                style={{ transition: "stroke-dasharray 0.8s cubic-bezier(0.4, 0, 0.2, 1)" }}
+                style={{ transition: "stroke-dasharray 0.8s cubic-bezier(0.4, 0, 0.2, 1), stroke-width 0.15s", cursor: "default", opacity: hover && hover !== seg.label ? 0.45 : 1 }}
+                onMouseEnter={() => setHover(seg.label)}
+                onMouseLeave={() => setHover(null)}
               />
             );
             offset += pct;
             return el;
           })}
         </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-2xl font-bold text-ink">{total}</span>
-          <span className="text-[10px] text-ink-muted">runs</span>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          {hover ? (
+            <>
+              <span className="text-lg font-bold text-ink">{Math.round(((segments.find((s) => s.label === hover)?.value ?? 0) / total) * 100)}%</span>
+              <span className="text-[10px] text-ink-muted">{hover}</span>
+            </>
+          ) : (
+            <>
+              <span className="text-2xl font-bold text-ink">{total}</span>
+              <span className="text-[10px] text-ink-muted">runs</span>
+            </>
+          )}
         </div>
       </div>
       <div className="space-y-2">
         {segments.map((seg) => (
-          <div key={seg.label} className="flex items-center gap-2.5 text-xs">
+          <div key={seg.label} className={cn("flex items-center gap-2.5 text-xs transition-opacity", hover && hover !== seg.label && "opacity-40")} onMouseEnter={() => setHover(seg.label)} onMouseLeave={() => setHover(null)}>
             <span className="h-3 w-3 rounded-full shadow-sm" style={{ backgroundColor: seg.color }} />
             <span className="min-w-[80px] text-ink-muted">{seg.label}</span>
             <span className="font-bold text-ink">{seg.value}</span>
@@ -120,7 +148,9 @@ function Sparkline({ values, color = "#7c3aed", height = 28, width = 64 }: { val
   );
 }
 
-// ── Trend indicator ──────────────────────────────────────────────────────
+const dayLabelsStatic = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// ── Trend indicator ─────────────────────────────────────────────────────
 function Trend({ value, label }: { value: number; label?: string }) {
   const up = value > 0;
   return (
@@ -285,13 +315,30 @@ export default function AnalyticsPage() {
   const tablesQ = useQuery({ queryKey: ["tables"], queryFn: () => api<{ tables: Table[] }>("/tables") });
   const formsQ = useQuery({ queryKey: ["forms"], queryFn: () => api<{ forms: FormRow[] }>("/forms") });
   const agentsQ = useQuery({ queryKey: ["agents"], queryFn: () => api<{ agents: Agent[] }>("/agents") });
+  const summaryQ = useQuery({
+    queryKey: ["analytics-summary"],
+    queryFn: () => api<AnalyticsSummary>("/analytics/summary?days=14"),
+    refetchInterval: 60_000,
+  });
 
   const isLoading = autosQ.isLoading || runsQ.isLoading;
 
   const stats = useMemo(() => computeStats(autosQ, runsQ, connsQ, tablesQ, formsQ, agentsQ), [autosQ.data, runsQ.data, connsQ.data, tablesQ.data, formsQ.data, agentsQ.data]);
 
+  // Server-computed daily series (14 days) — richer tooltips + real durations.
+  const weekBars = useMemo(() => {
+    const daily = summaryQ.data?.daily ?? [];
+    if (daily.length === 0) {
+      return stats.runsPerDay.map((v, i) => ({ label: dayLabelsStatic[i], value: v, tooltip: `${v} run${v === 1 ? "" : "s"}` }));
+    }
+    return daily.slice(-7).map((d) => ({
+      label: new Date(d.day + "T00:00:00").toLocaleDateString(undefined, { weekday: "short" }),
+      value: d.runs,
+      tooltip: `${d.runs} run${d.runs === 1 ? "" : "s"} · ${d.succeeded} ok · ${d.failed} failed · ${d.avg_ms ? (d.avg_ms / 1000).toFixed(1) + "s avg" : "—"}`,
+    }));
+  }, [summaryQ.data, stats.runsPerDay]);
 
-  const dayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const failures = summaryQ.data?.failures ?? [];
 
   return (
     <div className="pb-10">
@@ -359,10 +406,9 @@ export default function AnalyticsPage() {
                 <Trend value={stats.weeklyTrend} label="vs last wk" />
               </div>
               <BarChart
-                data={dayLabels.map((label, i) => ({
-                  label,
-                  value: stats.runsPerDay[i],
-                  color: stats.runsPerDay[i] > 0 ? "bg-gradient-to-t from-violet-600 to-violet-400" : undefined,
+                data={weekBars.map((d) => ({
+                  ...d,
+                  color: d.value > 0 ? "bg-gradient-to-t from-violet-600 to-violet-400" : undefined,
                 }))}
               />
             </Card>
@@ -498,33 +544,123 @@ export default function AnalyticsPage() {
             </Card>
           </div>
 
-          {/* ═══ RECENT ERRORS ═══ */}
-          {stats.recentErrors.length > 0 && (
+          {/* ═══ RECENT ERRORS (server data — real step error messages) ═══ */}
+          {failures.length > 0 && (
             <Card className="mb-6">
               <div className="mb-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-danger/10"><AlertTriangle className="h-3.5 w-3.5 text-danger" /></div>
                   <div>
                     <p className="text-sm font-semibold">Recent Failures</p>
-                    <p className="text-[11px] text-ink-muted">{stats.recentErrors.length} recent error{stats.recentErrors.length > 1 ? "s" : ""}</p>
+                    <p className="text-[11px] text-ink-muted">{failures.length} recent error{failures.length > 1 ? "s" : ""}</p>
                   </div>
                 </div>
                 <Link href="/activity?status=failed" className="text-[11px] font-medium text-danger hover:underline">View all →</Link>
               </div>
               <div className="grid gap-2 sm:grid-cols-2">
-                {stats.recentErrors.map((r: any) => (
+                {failures.map((r) => (
                   <Link key={r.id} href={`/activity/${r.id}`} className="group rounded-xl border border-danger/10 bg-danger/[0.03] p-3 transition hover:border-danger/30 hover:bg-danger/[0.06]">
                     <div className="flex items-center justify-between">
                       <span className="truncate text-xs font-medium group-hover:text-danger">{r.automation_name ?? "Run"}</span>
                       <StatusBadge status="failed" />
                     </div>
-                    <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-danger/80">{r.error?.message}</p>
+                    <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-danger/80">{r.error?.message ?? "Run failed"}</p>
                     <p className="mt-1 text-[10px] text-ink-muted">{new Date(r.created_at).toLocaleString()}</p>
                   </Link>
                 ))}
               </div>
             </Card>
           )}
+
+          {/* ═══ LATENCY + TRIGGER MIX + SLOWEST STEPS ═══ */}
+          <div className="mb-6 grid gap-4 lg:grid-cols-3">
+            {/* Latency percentiles */}
+            <Card>
+              <div className="mb-4 flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-500/10"><Timer className="h-3.5 w-3.5 text-amber-600" /></div>
+                <div>
+                  <p className="text-sm font-semibold">Run latency (7d)</p>
+                  <p className="text-[11px] text-ink-muted">Percentiles across all workflows</p>
+                </div>
+              </div>
+              <div className="space-y-3">
+                {([
+                  { label: "Median (p50)", ms: summaryQ.data?.latency?.p50, color: "bg-ok" },
+                  { label: "p95", ms: summaryQ.data?.latency?.p95, color: "bg-amber-500" },
+                  { label: "Tail (p99)", ms: summaryQ.data?.latency?.p99, color: "bg-danger" },
+                ] as const).map((row) => {
+                  const maxMs = Math.max(summaryQ.data?.latency?.p99 ?? 0, 1);
+                  return (
+                    <div key={row.label} className="group">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-ink-muted">{row.label}</span>
+                        <span className="font-bold tabular-nums">{row.ms != null ? `${(row.ms / 1000).toFixed(row.ms < 10_000 ? 2 : 1)}s` : "—"}</span>
+                      </div>
+                      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div className={cn("h-full rounded-full transition-all duration-700 group-hover:brightness-110", row.color)}
+                          style={{ width: `${row.ms != null ? Math.min((row.ms / maxMs) * 100, 100) : 0}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+
+            {/* Trigger mix donut */}
+            <Card>
+              <div className="mb-4 flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600/10"><Globe className="h-3.5 w-3.5 text-blue-600" /></div>
+                <div>
+                  <p className="text-sm font-semibold">What starts your runs (30d)</p>
+                  <p className="text-[11px] text-ink-muted">Executions by trigger type</p>
+                </div>
+              </div>
+              {(summaryQ.data?.triggers?.length ?? 0) === 0 ? (
+                <p className="py-6 text-center text-xs text-ink-muted">No runs in the last 30 days</p>
+              ) : (
+                <DonutChart
+                  size={110}
+                  segments={(summaryQ.data?.triggers ?? []).slice(0, 5).map((t, i) => ({
+                    value: t.runs,
+                    label: t.trigger_kind.replace(/_/g, " "),
+                    color: ["#2563eb", "#7c3aed", "#059669", "#f59e0b", "#64748b"][i % 5],
+                  }))}
+                />
+              )}
+            </Card>
+
+            {/* Slowest steps */}
+            <Card>
+              <div className="mb-4 flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-600/10"><Clock className="h-3.5 w-3.5 text-violet-600" /></div>
+                <div>
+                  <p className="text-sm font-semibold">Slowest steps (7d)</p>
+                  <p className="text-[11px] text-ink-muted">Where execution time goes</p>
+                </div>
+              </div>
+              {(summaryQ.data?.slowSteps?.length ?? 0) === 0 ? (
+                <p className="py-6 text-center text-xs text-ink-muted">No step data yet</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {summaryQ.data!.slowSteps.map((s) => {
+                    const maxAvg = Math.max(...summaryQ.data!.slowSteps.map((x) => x.avg_ms), 1);
+                    return (
+                      <div key={`${s.flow_name}-${s.step_id}`} className="group" title={`${s.flow_name} → ${s.step_id}: avg ${(s.avg_ms / 1000).toFixed(2)}s, max ${(s.max_ms / 1000).toFixed(2)}s over ${s.runs} runs`}>
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="min-w-0 truncate text-ink-muted">{s.flow_name} · {s.step_id}</span>
+                          <span className="shrink-0 font-bold tabular-nums">{(s.avg_ms / 1000).toFixed(2)}s</span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                          <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-violet-400 transition-all duration-700 group-hover:brightness-110"
+                            style={{ width: `${(s.avg_ms / maxAvg) * 100}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          </div>
 
           {/* ═══ QUICK ACTIONS ═══ */}
           <Card>

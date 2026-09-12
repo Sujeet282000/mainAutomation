@@ -15,6 +15,48 @@ const STAGE_FOR_DB: Record<string, string> = { connect: "connections", schema: "
 const PERSISTABLE_EVENTS = new Set(["stage", "reasoning", "proposal", "applied", "todo", "usage", "done", "error"]);
 const PERSISTABLE_STAGES = new Set(["intent", "plan", "retrieve", "select", "connections", "schemas", "mapping", "assemble", "validate", "repair", "persist"]);
 
+/** Apps whose steps work without a stored connection. */
+const NO_AUTH_APPS = new Set(["webhook", "http", "manual", "schedule", "delay", "filter", "code"]);
+
+/**
+ * Emit an operation card that mirrors the proposed canvas: one row per node
+ * with honest per-step status (configured / needs setup / needs connection),
+ * plus the edge count so users can see the steps are wired together.
+ */
+async function sendOperationCard(
+  send: (event: Record<string, unknown>) => Promise<void>,
+  resultGraph: { nodes: Array<{ id: string; label?: string; appSlug?: string; operation?: string; connectionId?: string | null; config?: Record<string, unknown> }>; edges: Array<{ id: string }> },
+  title: string,
+) {
+  const steps = resultGraph.nodes.map((n) => {
+    const appLabel = n.label || n.appSlug || n.id;
+    let status: "completed" | "pending" = "completed";
+    let detail: string | undefined;
+    if (!n.appSlug || !n.operation) {
+      status = "pending";
+      detail = "needs setup";
+    } else if (!n.connectionId && !NO_AUTH_APPS.has(n.appSlug)) {
+      status = "pending";
+      detail = "connect account";
+    }
+    return { label: appLabel, status, detail };
+  });
+  const pending = steps.filter((s) => s.status === "pending").length;
+  await send({
+    type: "operation_card",
+    operation: {
+      title,
+      steps,
+      status: "completed" as const,
+      detail: `${steps.length} step${steps.length === 1 ? "" : "s"} \u00b7 ${resultGraph.edges.length} connection${resultGraph.edges.length === 1 ? "" : "s"}${pending > 0 ? ` \u00b7 ${pending} need${pending === 1 ? "s" : ""} setup` : ""}`,
+      actions: [
+        { label: "Test workflow", prompt: "Test this workflow" },
+        { label: "Add a step", prompt: "Add the next step" },
+      ],
+    },
+  });
+}
+
 // ── Conversation history helpers ───────────────────────────────────────
 export type ChatTurn = { role: "user" | "assistant"; content: string; ts: string };
 const MAX_HISTORY_TURNS = 24;
@@ -212,8 +254,6 @@ export async function streamCopilotChat(opts: {
   await send({ type: "agent_started" });
   await send({ type: "agent_state", state: "understanding", title: "Understanding your request" });
   await send({ type: "agent_activity", kind: "running", label: "Reading your request" });
-  await send({ type: "stage", stage: "intent", label: "Understanding your request" });
-  await send({ type: "agent_activity", kind: "done", label: "Understanding your request" });
 
   // Probe the AI service — use the LLM agent when available, pattern matching as fallback
   let ai: Awaited<ReturnType<typeof probeAiService>>;
@@ -226,7 +266,7 @@ export async function streamCopilotChat(opts: {
     try {
       await send({ type: "agent_state", state: "planning", title: "AI agent processing" });
       await send({ type: "agent_activity", kind: "running", label: "AI agent analyzing request" });
-      await send({ type: "reasoning", text: ai.hint || "Using AI agent to process your request", stage: "intent" });
+      // Note: ai.hint is an internal diagnostic ("AI plane is up...") — never shown to users.
       const { persistBuilderDraft } = await import("../flow-runtime");
       const { listCatalogApps } = await import("../catalog/catalog");
       const refined = await signedAiJson<{
@@ -239,7 +279,12 @@ export async function streamCopilotChat(opts: {
         selected_step_id: opts.selectedStepId,
         catalog: listCatalogApps(),
       }, opts.orgId);
-      if (refined) {
+      if (refined && typeof refined.summary === "string" && /^Provider error \d+:/.test(refined.summary)) {
+        // The Python gateway surfaced a raw provider error (e.g. OpenAI 429
+        // "no credits"). Fail over to the Node pattern engine instead of
+        // trusting it as a chat reply. No internals are broadcast — the
+        // frontend simply sees the built-in engine handle it.
+      } else if (refined) {
         const operations = refined.operations ?? [];
         const result = await groundGraph(graph, operations, {
           workspaceId: opts.orgId,
@@ -257,12 +302,7 @@ export async function streamCopilotChat(opts: {
         }
         await send({ type: "agent_activity", kind: "done", label: "AI agent processed request" });
         if (result.graph?.nodes?.length) {
-          const steps = result.graph.nodes.map((n: { label?: string; appSlug?: string; id: string; type?: string }) => ({
-            label: `${n.label ?? n.id} (${n.appSlug ?? "unknown"})`,
-            status: "completed" as const,
-          }));
-          await send({ type: "agent_activity", kind: "done", label: `Found ${steps.length} steps` });
-          await send({ type: "operation_card", operation: { title: changed ? "Workflow updated" : "Workflow planned", steps, status: "completed" as const, actions: [{ label: "Test workflow", prompt: "Test this workflow" }, { label: "Add a step", prompt: "Add the next step" }] } });
+          await sendOperationCard(send, result.graph, changed ? "Workflow updated" : "Workflow planned");
         }
         const replyText = refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change.");
         await send({ type: "agent_state", state: "completed", title: "Done" });
@@ -274,23 +314,77 @@ export async function streamCopilotChat(opts: {
         await appendChatTurn(opts.sessionId, opts.orgId, { role: "assistant", content: replyText, ts: now });
         return;
       }
-    } catch (aiErr) {
-      await send({ type: "reasoning", text: `AI agent could not process this (${aiErr instanceof Error ? aiErr.message : "error"}); using pattern engine.`, stage: "intent" });
+    } catch {
+      // AI agent path unavailable — silently fall through to the Node engine.
+      // (Internal failure details are never useful to end users.)
     }
   }
 
   // ── Agent Executor (tool-based information gathering) ──
-  // When AI service isn't available, try the agent executor to gather
-  // context via tools before falling back to the pattern-matching copilot.
+  // Answers informational questions ("what can Gmail do?") via tools. It must
+  // NEVER intercept workflow-build intents — "when X arrives, do Y" always
+  // belongs to the builders so the user gets a graph, not a table of apps.
   try {
     const { generateAgentPlan, executeAgentPlan } = await import("./copilot-agent-executor");
-    const agentCtx = { workspaceId: opts.orgId, userId: opts.req.user?.userId ?? "", flowId: opts.flowId };
+    const { mentionsWorkflowIntent } = await import("./copilot");
+    if (mentionsWorkflowIntent(opts.prompt) && !graph) throw new Error("build-intent");
+    const agentCtx = { workspaceId: opts.orgId, userId: opts.req.user?.userId ?? "", flowId: opts.flowId, graph };
     const plan = await generateAgentPlan(opts.prompt, agentCtx, graph);
     if (plan && plan.calls.length > 0 && plan.confidence > 0.6) {
       await send({ type: "agent_state", state: "executing", title: "Running tool queries" });
       await send({ type: "agent_activity", kind: "running", label: `Executing ${plan.calls.length} tool query(s)` });
       const agentResult = await executeAgentPlan(plan, agentCtx);
       await send({ type: "agent_activity", kind: "done", label: "Tool queries completed" });
+      const mutationResult = agentResult.results.find((item) => item.tool === "workflow.apply_operations");
+      const mutationData = mutationResult?.result && typeof mutationResult.result === "object" && "data" in mutationResult.result
+        ? (mutationResult.result as { data?: Record<string, unknown> }).data
+        : undefined;
+      if (mutationData && mutationData.graph) {
+        const needsConfirmation = Array.isArray(mutationData.needs_confirmation) ? mutationData.needs_confirmation : [];
+        const definition = persistBuilderDraft(mutationData.graph as any);
+        if (needsConfirmation.length > 0) {
+          await query(
+            `UPDATE copilot_sessions
+                SET proposed_definition = $1, stage = 'persist', updated_at = now()
+              WHERE id = $2 AND org_id = $3`,
+            [JSON.stringify(definition), opts.sessionId, opts.orgId],
+          );
+          await send({
+            type: "proposal",
+            graph: mutationData.graph,
+            definition,
+            operations: mutationData.operations,
+            applied_operations: mutationData.applied_operations,
+            rejected_operations: mutationData.rejected_operations,
+            needs_confirmation: needsConfirmation,
+            issues: mutationData.issues,
+            sessionId: opts.sessionId,
+          });
+        }
+        const reply = agentResult.reply || (needsConfirmation.length > 0
+          ? "I prepared the workflow change. Please approve the confirmation-gated step before it runs."
+          : "I updated the workflow draft.");
+        await send({
+          type: "agent_state",
+          state: "completed",
+          title: needsConfirmation.length > 0 ? "Approval needed" : "Done",
+        });
+        await send({
+          type: "chat_result",
+          reply,
+          graph: mutationData.graph,
+          sessionId: opts.sessionId,
+          applied: needsConfirmation.length === 0 && agentResult.success,
+          operations: mutationData.operations,
+          applied_operations: mutationData.applied_operations,
+          rejected_operations: mutationData.rejected_operations,
+          needs_confirmation: needsConfirmation,
+          issues: mutationData.issues,
+          source: "agent-executor",
+        });
+        await send({ type: "done", status: needsConfirmation.length > 0 ? "approval_required" : "chat_complete", source: "agent-executor" });
+        return;
+      }
       // If the agent got a good response and it's NOT a workflow action, return it directly
       if (agentResult.success && agentResult.reply.length > 20) {
         await send({ type: "agent_state", state: "completed", title: "Done" });
@@ -311,32 +405,20 @@ export async function streamCopilotChat(opts: {
   try {
     await send({ type: "agent_state", state: "inspecting", title: "Inspecting workflow" });
     await send({ type: "agent_activity", kind: "running", label: "Inspecting workflow" });
-    // Emit contextual reasoning about what the copilot is doing
-    const promptLower = opts.prompt.toLowerCase();
-    let reasoningText = "Analyzing your request";
-    if (/\b(add|insert|append)\b/.test(promptLower)) reasoningText = "Identifying the step to add and where it fits in the workflow";
-    else if (/\b(explain|what|how|describe)\b/.test(promptLower)) reasoningText = "Reviewing the current workflow to provide an explanation";
-    else if (/\b(test|run|check)\b/.test(promptLower)) reasoningText = "Preparing to test the workflow";
-    else if (/\b(fix|repair|update|change|modify|replace)\b/.test(promptLower)) reasoningText = "Analyzing the current workflow to apply your changes";
-    else if (/\b(hi|hello|hey|thanks)\b/.test(promptLower)) reasoningText = "Greeting acknowledged";
-    else reasoningText = "Classifying and routing your request through the universal handler";
-    await send({ type: "reasoning", text: reasoningText, stage: "intent" });
-    // Emit analysis_summary with structured workflow inspection data
-    if (graph && graph.nodes.length > 0) {
-      const analysisItems: string[] = [];
-      analysisItems.push(`Found ${graph.nodes.length} step${graph.nodes.length > 1 ? 's' : ''}`);
-      for (const node of graph.nodes) {
-        if (!node.appSlug) {
-          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: No app selected`);
-        } else if (!node.operation) {
-          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: ${node.appSlug} — needs an action`);
-        } else if (!node.connectionId && node.appSlug !== 'webhook' && node.appSlug !== 'http' && node.appSlug !== 'manual' && node.appSlug !== 'schedule') {
-          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: ${node.label || node.appSlug} — needs authentication`);
-        } else {
-          analysisItems.push(`Step ${graph.nodes.indexOf(node) + 1}: ${node.label || node.appSlug} — configured`);
-        }
+    // Structured inspection summary — only for requests that are actually about
+    // the current workflow (explain / problems / fix), never for "add a step".
+    const inspectionRe = /\b(explain|what does|how does|problems?|issues?|wrong|broken|fix|review|audit|health)\b/i;
+    if (graph && graph.nodes.length > 0 && inspectionRe.test(opts.prompt)) {
+      const items: string[] = [];
+      for (const [i, node] of graph.nodes.entries()) {
+        if (!node.appSlug) items.push(`Step ${i + 1} has no app selected yet`);
+        else if (!node.operation) items.push(`Step ${i + 1} (${node.label || node.appSlug}) still needs an action`);
+        else if (!node.connectionId && !NO_AUTH_APPS.has(node.appSlug)) items.push(`Step ${i + 1} (${node.label || node.appSlug}) is not connected to an account`);
       }
-      await send({ type: 'analysis_summary', title: 'Workflow inspection', items: analysisItems });
+      items.push(graph.edges.length === 1
+        ? "The steps are wired together in order — the flow looks structurally sound"
+        : `The steps are wired together (${graph.edges.length} connections)`);
+      await send({ type: "analysis_summary", title: "What I checked", items });
     }
     const result = await copilotChat({
       prompt: opts.prompt,
@@ -353,23 +435,8 @@ export async function streamCopilotChat(opts: {
 
     // Emit operation cards as live-updating step progress
     if (result.graph?.nodes?.length) {
-      const steps = result.graph.nodes.map((n: { label?: string; appSlug?: string; id: string; type?: string }) => ({
-        label: `${n.label ?? n.id} (${n.appSlug ?? "unknown"})`,
-        status: "completed" as const,
-      }));
-      await send({ type: "agent_activity", kind: "done", label: `Found ${steps.length} steps` });
-      await send({
-        type: "operation_card",
-        operation: {
-          title: result.applied ? "Workflow updated" : "Workflow planned",
-          steps,
-          status: "completed" as const,
-          actions: [
-            { label: "Test workflow", prompt: "Test this workflow" },
-            { label: "Add a step", prompt: "Add the next step" },
-          ],
-        },
-      });
+      await send({ type: "agent_activity", kind: "done", label: "Workflow ready" });
+      await sendOperationCard(send, result.graph, result.applied ? "Workflow updated" : "Workflow planned");
     }
 
     // Emit agent completion and final result
@@ -418,7 +485,8 @@ export async function refineCopilotSession(opts: { sessionId: string; orgId: str
   const ai = await probeAiService();
   if (ai.reachable && graph) {
     const refined = await signedAiJson<{ applied?: boolean; definition?: unknown; summary?: string; operations?: AgentOperation[]; needs_input?: string[]; issues?: Array<Record<string, unknown>>; publishable?: boolean }>("/copilot/refine", { definition: persistBuilderDraft(graph), instruction: opts.prompt, selected_step_id: opts.selectedStepId, catalog: listCatalogApps() }, opts.orgId);
-    if (refined) {
+    const providerLeak = refined != null && typeof refined.summary === "string" && /^Provider error \d+:/.test(refined.summary);
+    if (refined && !providerLeak) {
       const operations = refined.operations ?? [];
       const result = await groundGraph(graph, operations, { workspaceId: opts.orgId, organizationId: opts.orgId, allowDestructive: false });
       const changed = JSON.stringify(result.graph) !== JSON.stringify(graph);
