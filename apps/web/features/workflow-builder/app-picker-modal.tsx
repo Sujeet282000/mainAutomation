@@ -110,8 +110,8 @@ const FLOW_BLURBS: Record<string, string> = {
 
 const UTIL_BLURBS: Record<string, string> = {
   openai: "Extract data, analyze information, generate content — and more!",
-  http: "Make authenticated REST API calls from your Zaps.",
-  code: "Write custom Python or JavaScript for your Zaps.",
+  http: "Make authenticated REST API calls from your workflows.",
+  code: "Write custom Python or JavaScript for your workflows.",
   digest: "Condense info from multiple events into a summary for any app.",
   email: "Send and receive email via a custom mailbox.",
   "email-parser": "Parse inbound email into fields.",

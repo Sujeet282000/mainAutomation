@@ -21,12 +21,150 @@ import { oauthRouter } from "./oauth";
 import { registerUiCompat, applyAutomationGraphShape } from "./ui-compat";
 import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
 import { copilotGraph, copilotChat } from "./copilot/copilot";
+import { fireTableRecordEvent } from "./events";
 import { runCopilotEngine } from "./copilot/copilot-engine";
 import { ensureProjectId, refineCopilotSession, streamCopilotSession } from "./copilot/copilot-http";
 import { probeAiService, signedAiJson } from "./ai-service";
-import { runAgentLoop } from "./agent-runtime";
+import { runAgentLoop, decideAgentApproval } from "./agent-runtime";
+import { consumeRateLimit } from "./rate-limit";
 
 export const router = Router();
+
+// ---------------------------------------------------------------------------
+// Public form field validation — server-side truth for the hosted form surface.
+// Mirrors the Field shape the form builder persists: { key, type, label,
+// required?, placeholder?, options? }.
+// ---------------------------------------------------------------------------
+
+const FORM_FIELD_TYPES = new Set([
+  "text", "textarea", "email", "number", "date", "select", "multiselect",
+  "checkbox", "url", "phone", "file", "hidden",
+]);
+
+function validateFormValue(field: { key: string; type: string; label: string; required?: boolean; options?: string[] }, raw: unknown): string | null {
+  const isEmpty = raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "") ||
+    (Array.isArray(raw) && raw.length === 0);
+  if (isEmpty) return field.required === false ? null : `${field.label} is required`;
+  switch (field.type) {
+    case "email":
+      if (typeof raw !== "string" || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(raw)) return `${field.label} must be a valid email`;
+      break;
+    case "number": {
+      if (typeof raw !== "number" && !(typeof raw === "string" && raw !== "" && Number.isFinite(Number(raw))))
+        return `${field.label} must be a number`;
+      break;
+    }
+    case "url":
+      if (typeof raw !== "string") return `${field.label} must be a URL`;
+      try { const u = new URL(raw); if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error(); }
+      catch { return `${field.label} must be a valid http(s) URL`; }
+      break;
+    case "date":
+      if (typeof raw !== "string" || Number.isNaN(Date.parse(raw))) return `${field.label} must be a valid date`;
+      break;
+    case "select":
+      if (field.options?.length && !field.options.includes(String(raw))) return `${field.label} must be one of: ${field.options.join(", ")}`;
+      break;
+    case "multiselect": {
+      const arr = Array.isArray(raw) ? raw : [raw];
+      if (field.options?.length && arr.some((v) => !field.options!.includes(String(v))))
+        return `${field.label} contains an option outside the allowed choices`;
+      break;
+    }
+    case "checkbox":
+      if (typeof raw !== "boolean" && raw !== "true" && raw !== "false" && raw !== true && raw !== false)
+        return `${field.label} must be a boolean`;
+      break;
+    case "file":
+      // File fields accept { name, type, size, dataUrl } objects produced by the
+      // public renderer's base64 reader; cap inline size at 5 MB.
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${field.label} must be a file`;
+      if (typeof (raw as { size?: unknown }).size === "number" && (raw as { size: number }).size > 5 * 1024 * 1024)
+        return `${field.label} exceeds the 5 MB limit`;
+      break;
+    default:
+      break;
+  }
+  return null;
+}
+
+/** Validate a submission payload against persisted field defs. Returns error map or null. */
+function validateFormSubmission(fields: unknown[], data: Record<string, unknown>): Record<string, string> | null {
+  const errors: Record<string, string> = {};
+  for (const f of fields) {
+    const field = f as { key?: unknown; type?: unknown; label?: unknown; options?: unknown; visibleWhen?: { field?: string; op?: string; value?: unknown } };
+    if (typeof field.key !== "string" || typeof field.type !== "string" || !FORM_FIELD_TYPES.has(field.type)) continue;
+    // Conditional fields are only validated when their visibility condition holds.
+    if (!isFieldVisible(field as { visibleWhen?: { field?: string; op?: string; value?: unknown } }, data)) continue;
+    const def = { key: field.key, type: field.type, label: typeof field.label === "string" && field.label ? field.label : field.key, options: Array.isArray(field.options) ? field.options.map(String) : undefined };
+    const err = validateFormValue(def, data[field.key]);
+    if (err) errors[field.key] = err;
+  }
+  return Object.keys(errors).length ? errors : null;
+}
+
+// ---------------------------------------------------------------------------
+// Conditional fields: a field with visibleWhen { field, op, value } is only
+// required/validated when the condition holds in the submitted data. The
+// public renderer mirrors the same semantics client-side.
+// ---------------------------------------------------------------------------
+
+function isFieldVisible(field: { visibleWhen?: { field?: string; op?: string; value?: unknown } }, data: Record<string, unknown>): boolean {
+  const cond = field.visibleWhen;
+  if (!cond || typeof cond.field !== "string") return true;
+  const actual = data[cond.field];
+  switch (cond.op) {
+    case "eq": return actual == cond.value; // eslint-disable-line eqeqeq
+    case "neq": return actual != cond.value; // eslint-disable-line eqeqeq
+    case "contains": return String(actual ?? "").toLowerCase().includes(String(cond.value ?? "").toLowerCase());
+    case "gt": return Number(actual) > Number(cond.value);
+    case "lt": return Number(actual) < Number(cond.value);
+    case "empty": return actual === undefined || actual === null || actual === "";
+    case "not_empty": return !(actual === undefined || actual === null || actual === "");
+    default: return true;
+  }
+}
+
+/** Drop file blobs from a validated payload; they are persisted to form_files. */
+function extractFilePayloads(fields: unknown[], data: Record<string, unknown>): Array<{ fieldKey: string; fileName: string; contentType: string; sizeBytes: number; contentB64: string }> {
+  const files: Array<{ fieldKey: string; fileName: string; contentType: string; sizeBytes: number; contentB64: string }> = [];
+  for (const raw of fields) {
+    const f = raw as { key?: unknown; type?: unknown };
+    if (f.type !== "file" || typeof f.key !== "string") continue;
+    const v = data[f.key];
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    const obj = v as { name?: unknown; type?: unknown; size?: unknown; dataUrl?: unknown };
+    const dataUrl = typeof obj.dataUrl === "string" ? obj.dataUrl : "";
+    const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl);
+    if (!match) continue;
+    files.push({
+      fieldKey: f.key,
+      fileName: String(obj.name ?? "upload.bin").slice(0, 255),
+      contentType: String(obj.type || match[1] || "application/octet-stream").slice(0, 128),
+      sizeBytes: typeof obj.size === "number" ? obj.size : Buffer.byteLength(match[3], "base64"),
+      contentB64: match[3],
+    });
+    // Replace the inline blob with a metadata marker — keep submissions light.
+    data[f.key] = { name: obj.name, type: obj.type, size: obj.size, stored: true };
+  }
+  return files;
+}
+
+async function persistFormFiles(
+  orgId: string,
+  formId: string,
+  submissionId: string,
+  files: Array<{ fieldKey: string; fileName: string; contentType: string; sizeBytes: number; contentB64: string }>,
+): Promise<void> {
+  for (const f of files) {
+    await query(
+      `INSERT INTO form_files (org_id, form_id, submission_id, field_key, file_name, content_type, size_bytes, content_b64)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [orgId, formId, submissionId, f.fieldKey, f.fileName, f.contentType, f.sizeBytes, f.contentB64],
+    );
+  }
+}
+
 router.use("/oauth", oauthRouter);
 
 // ── Health & Meta (unauthenticated) ─────────────────────────────────────────
@@ -75,44 +213,171 @@ router.get("/public/forms/:workspaceId/:slug", async (req, res) => {
 });
 
 router.post("/public/forms/:workspaceId/:slug", async (req, res) => {
+  // 1. Rate limit — per-form fixed window; public surface, so this is mandatory.
+  const rl = await consumeRateLimit("app", `form:${req.params.workspaceId}/${req.params.slug}`, 30, 60);
+  if (!rl.allowed) {
+    res.setHeader("Retry-After", String(rl.resetAfterSec));
+    return res.status(429).json({ error: "rate_limited", retryAfterSec: rl.resetAfterSec });
+  }
+
   const form = await queryOne<{
     id: string;
     org_id: string;
-    schema_json: { fields?: unknown[]; table_id?: string; automation_id?: string };
+    schema_json: { fields?: unknown[]; table_id?: string; automation_id?: string; success_message?: string; redirect_url?: string };
   }>(
     `SELECT id, org_id, schema_json FROM data_tables WHERE org_id = $1 AND slug = $2 AND name LIKE 'form:%'`,
     [req.params.workspaceId, req.params.slug],
   );
   if (!form) return res.status(404).json({ error: "not_found" });
-  const data = req.body && typeof req.body === "object" ? req.body : {};
-  const row = await queryOne<{ id: string }>(
-    `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
-    [form.org_id, form.id, JSON.stringify(data)],
-  );
-  if (form.schema_json?.table_id) {
-    await query(`INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3)`, [
-      form.org_id,
-      form.schema_json.table_id,
-      JSON.stringify(data),
-    ]).catch(() => undefined);
-  }
-  if (form.schema_json?.automation_id) {
-    const { createAndRunFlow } = await import("./flow-runtime");
-    const member = await queryOne<{ user_id: string }>(
-      `SELECT user_id FROM org_members WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
-      [form.org_id],
+
+  const data = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+
+  // 2. Server-side validation against the persisted field definitions.
+  const fieldErrors = validateFormSubmission(form.schema_json?.fields ?? [], data);
+  if (fieldErrors) return res.status(422).json({ error: "validation_failed", fields: fieldErrors });
+
+  // 2b. Pull file blobs out of the payload into durable file storage.
+  const files = extractFilePayloads(form.schema_json?.fields ?? [], data);
+
+  // 3. Persist the submission. A storage failure is a real 500 — never a silent swallow.
+  let row: { id: string };
+  try {
+    row = await queryOne<{ id: string }>(
+      `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
+      [form.org_id, form.id, JSON.stringify(data)],
     );
-    if (member) {
+  } catch (e) {
+    console.error("form_submission_persist_failed", e);
+    return res.status(500).json({ error: "submission_failed" });
+  }
+  if (files.length) {
+    try {
+      await persistFormFiles(form.org_id, form.id, row!.id, files);
+    } catch (e) {
+      console.error("form_files_persist_failed", e);
+      return res.status(500).json({ error: "file_storage_failed", submission: { id: row!.id } });
+    }
+  }
+
+  // 4. Mirror to the linked data table. Failure surfaces a warning but the
+  // submission itself is already durably stored.
+  let tableWarning = false;
+  if (form.schema_json?.table_id) {
+    try {
+      await query(`INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3)`, [
+        form.org_id,
+        form.schema_json.table_id,
+        JSON.stringify(data),
+      ]);
+    } catch (e) {
+      tableWarning = true;
+      console.error("form_table_mirror_failed", e, form.schema_json.table_id);
+    }
+  }
+
+  // 5. Trigger the linked automation through the canonical createAndRunFlow path.
+  // A trigger failure is reported honestly — the submission is not silently lost.
+  let automationTriggered = false;
+  let automationError: string | null = null;
+  if (form.schema_json?.automation_id) {
+    try {
+      const { createAndRunFlow } = await import("./flow-runtime");
+      const member = await queryOne<{ user_id: string }>(
+        `SELECT user_id FROM org_members WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+        [form.org_id],
+      );
+      if (!member) throw new Error("workspace_has_no_members");
       await createAndRunFlow({
         orgId: form.org_id,
         flowId: form.schema_json.automation_id,
         userId: member.user_id,
-        payload: data as Record<string, unknown>,
+        payload: data,
         triggerKind: "form",
-      }).catch(() => undefined);
+      });
+      automationTriggered = true;
+    } catch (e) {
+      automationError = e instanceof Error ? e.message : "automation_trigger_failed";
+      console.error("form_automation_trigger_failed", e, form.schema_json.automation_id);
     }
   }
-  res.json({ ok: true, submission: { id: row!.id } });
+
+  // 6. Fire the table-record event so record-triggered automations also see the submission.
+  try {
+    const { fireTableRecordEvent } = await import("./events");
+    await fireTableRecordEvent({ tableId: form.id, record: { id: row!.id, ...data }, operation: "new_record" });
+  } catch (e) {
+    console.warn("form_record_event_failed", e);
+  }
+
+  res.json({
+    ok: true,
+    submission: { id: row!.id },
+    automationTriggered,
+    ...(automationError ? { automationError } : {}),
+    ...(tableWarning ? { warning: "table_mirror_failed" } : {}),
+    ...(form.schema_json?.success_message ? { successMessage: form.schema_json.success_message } : {}),
+    ...(form.schema_json?.redirect_url ? { redirectUrl: form.schema_json.redirect_url } : {}),
+  });
+});
+
+// Public interface actions: submit an embedded form block (writes to the form's
+// own store and triggers its connected automation) and run a `button` block's
+// workflow. Both re-check the interface is public and the block is exposed.
+router.post("/public/interfaces/:workspaceId/:slug/forms/:formId/submit", async (req, res) => {
+  const rl = await consumeRateLimit("app", `iface-form:${req.params.workspaceId}/${req.params.slug}`, 30, 60);
+  if (!rl.allowed) return res.status(429).json({ error: "rate_limited", retryAfterSec: rl.resetAfterSec });
+  const iface = await queryOne<{ org_id: string; payload: { pages?: unknown[]; is_public?: boolean } }>(
+    `SELECT org_id, payload FROM workspace_items WHERE org_id = $1 AND kind = 'interface' AND payload->>'slug' = $2`,
+    [req.params.workspaceId, req.params.slug],
+  );
+  if (!iface || iface.payload.is_public === false) return res.status(404).json({ error: "not_found" });
+  const form = await queryOne<{ id: string; schema_json: { fields?: unknown[]; automation_id?: string } }>(
+    `SELECT id, schema_json FROM data_tables WHERE id = $1 AND org_id = $2 AND name LIKE 'form:%'`,
+    [req.params.formId, iface.org_id],
+  );
+  if (!form) return res.status(404).json({ error: "form_not_found" });
+  const exposed = (iface.payload.pages ?? []).some((b) => (b as { type?: string; formId?: string })?.type === "form" && (b as { formId?: string }).formId === form.id);
+  if (!exposed) return res.status(403).json({ error: "form_not_exposed" });
+  const data = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+  const fieldErrors = validateFormSubmission(form.schema_json?.fields ?? [], data);
+  if (fieldErrors) return res.status(422).json({ error: "validation_failed", fields: fieldErrors });
+  await query(`INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3)`, [iface.org_id, form.id, JSON.stringify(data)]);
+  if (form.schema_json?.automation_id) {
+    const { createAndRunFlow } = await import("./flow-runtime");
+    const member = await queryOne<{ user_id: string }>(
+      `SELECT user_id FROM org_members WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+      [iface.org_id],
+    );
+    if (member) {
+      await createAndRunFlow({ orgId: iface.org_id, flowId: form.schema_json.automation_id, userId: member.user_id, payload: data, triggerKind: "interface_form" });
+    }
+  }
+  res.json({ ok: true });
+});
+
+router.post("/public/interfaces/:workspaceId/:slug/buttons/:automationId/run", async (req, res) => {
+  const rl = await consumeRateLimit("app", `iface-btn:${req.params.workspaceId}/${req.params.slug}`, 10, 60);
+  if (!rl.allowed) return res.status(429).json({ error: "rate_limited", retryAfterSec: rl.resetAfterSec });
+  const iface = await queryOne<{ org_id: string; payload: { pages?: unknown[]; is_public?: boolean } }>(
+    `SELECT org_id, payload FROM workspace_items WHERE org_id = $1 AND kind = 'interface' AND payload->>'slug' = $2`,
+    [req.params.workspaceId, req.params.slug],
+  );
+  if (!iface || iface.payload.is_public === false) return res.status(404).json({ error: "not_found" });
+  const flow = await queryOne<{ id: string }>(
+    `SELECT id FROM flows WHERE id = $1 AND org_id = $2 AND status = 'active'`,
+    [req.params.automationId, iface.org_id],
+  );
+  if (!flow) return res.status(404).json({ error: "automation_not_found" });
+  const exposed = (iface.payload.pages ?? []).some((b) => (b as { type?: string; automationId?: string })?.type === "button" && (b as { automationId?: string }).automationId === flow.id);
+  if (!exposed) return res.status(403).json({ error: "button_not_exposed" });
+  const { createAndRunFlow } = await import("./flow-runtime");
+  const member = await queryOne<{ user_id: string }>(
+    `SELECT user_id FROM org_members WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+    [iface.org_id],
+  );
+  if (!member) return res.status(500).json({ error: "workspace_has_no_members" });
+  const result = await createAndRunFlow({ orgId: iface.org_id, flowId: flow.id, userId: member.user_id, payload: (req.body ?? {}) as Record<string, unknown>, triggerKind: "interface_button" });
+  res.json({ ok: true, runId: (result as { runId?: string })?.runId ?? null });
 });
 
 // ── Public chatbot share links (apps/web/app/c/[workspaceId]/[slug]) ────────
@@ -129,29 +394,87 @@ router.get("/public/chatbots/:workspaceId/:slug", async (req, res) => {
 router.post("/public/chatbots/:workspaceId/:slug/chat", async (req, res) => {
   const message = String((req.body as { message?: unknown } | undefined)?.message ?? "").trim();
   if (!message) return res.status(400).json({ error: "missing_message" });
-  const bot = await queryOne<{ id: string; payload: { instructions?: string } }>(
+  const bot = await queryOne<{ id: string; payload: Record<string, unknown> }>(
     `SELECT id, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
     [req.params.workspaceId, req.params.slug],
   );
   if (!bot) return res.status(404).json({ error: "not_found" });
-  const instructions = String(bot.payload.instructions ?? "");
-  const result = await copilotChat({
-    prompt: `${instructions}\n\nUser: ${message}`,
-    workspaceId: req.params.workspaceId,
-  } as any).catch(() => null);
-  const reply = result?.reply ?? result?.summary ?? `I received: "${message}". Connect an AI provider key for a live answer.`;
-  res.json({ reply });
+  // Chatbot = Agent + chat channel (P1 #20/#21): reuse the one agent runtime
+  // instead of a second AI path. No tools are exposed on public chat.
+  try {
+    const result = await runAgentLoop({
+      agent: {
+        id: `chatbot:${bot.id}`,
+        instructions: String((bot.payload as { instructions?: string }).instructions ?? ""),
+        knowledge: String((bot.payload as { knowledge?: string }).knowledge ?? ""),
+        tools: [],
+        model: typeof (bot.payload as { model?: string }).model === "string" ? String((bot.payload as { model?: string }).model) : null,
+        approval_required: false,
+        max_actions: 4,
+        status: "on",
+      },
+      message,
+      workspaceId: req.params.workspaceId,
+      organizationId: req.params.workspaceId,
+      persistActivity: false,
+    });
+    res.json({ reply: result.reply });
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "chatbot_failed";
+    if (code.startsWith("NO_MODEL_PROVIDER")) {
+      return res.status(503).json({ error: "no_model_provider", hint: "Connect an AI provider key to enable live chat." });
+    }
+    console.error("chatbot chat failed", err);
+    res.status(400).json({ error: code });
+  }
 });
 
 // ── Public interface share links (apps/web/app/i/[workspaceId]/[slug]) ──────
 
 router.get("/public/interfaces/:workspaceId/:slug", async (req, res) => {
-  const iface = await queryOne<{ name: string; payload: { pages?: unknown[] } }>(
+  // Private interfaces must not be readable through the public route.
+  const iface = await queryOne<{ name: string; payload: { pages?: unknown[]; is_public?: boolean } }>(
     `SELECT name, payload FROM workspace_items WHERE org_id = $1 AND kind = 'interface' AND payload->>'slug' = $2`,
     [req.params.workspaceId, req.params.slug],
   );
-  if (!iface) return res.status(404).json({ error: "not_found" });
-  res.json({ interface: { name: iface.name, pages: iface.payload.pages ?? [] } });
+  if (!iface || iface.payload.is_public === false) return res.status(404).json({ error: "not_found" });
+  // Hydrate exposed form blocks with their real field definitions so the
+  // public renderer can render them without a second lookup.
+  const pages: Record<string, unknown>[] = [];
+  for (const raw of iface.payload.pages ?? []) {
+    const block = { ...(raw as Record<string, unknown>) };
+    if (block.type === "form" && typeof block.formId === "string") {
+      const form = await queryOne<{ id: string; name: string; schema_json: { fields?: unknown[] } }>(
+        `SELECT id, name, schema_json FROM data_tables WHERE id = $1 AND org_id = $2 AND name LIKE 'form:%'`,
+        [block.formId, req.params.workspaceId],
+      );
+      if (form) {
+        block.formName = String(form.name).replace(/^form:/, "");
+        block.fields = form.schema_json?.fields ?? [];
+      } else {
+        block.fields = [];
+      }
+    }
+    pages.push(block);
+  }
+  res.json({ interface: { name: iface.name, pages } });
+});
+
+// Public interface data: read live table records for a `table` block.
+router.get("/public/interfaces/:workspaceId/:slug/tables/:tableId/records", async (req, res) => {
+  const iface = await queryOne<{ payload: { pages?: unknown[]; is_public?: boolean } }>(
+    `SELECT payload FROM workspace_items WHERE org_id = $1 AND kind = 'interface' AND payload->>'slug' = $2`,
+    [req.params.workspaceId, req.params.slug],
+  );
+  if (!iface || iface.payload.is_public === false) return res.status(404).json({ error: "not_found" });
+  // Only tables actually referenced by a table block on this interface are readable.
+  const refs = (iface.payload.pages ?? []).some((b) => (b as { type?: string; tableId?: string })?.type === "table" && (b as { tableId?: string }).tableId === req.params.tableId);
+  if (!refs) return res.status(403).json({ error: "table_not_exposed" });
+  const rows = await query(
+    `SELECT id, data, created_at FROM data_table_rows WHERE table_id = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 50`,
+    [req.params.tableId, req.params.workspaceId],
+  );
+  res.json({ records: rows });
 });
 
 // ── Auth ────────────────────────────────────────────────────────────────────
@@ -652,6 +975,14 @@ authed.post("/connections/:id/test", async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: "test_failed", hint: err instanceof Error ? err.message : "Connection test failed" });
   }
+});
+
+// POST /connections/health — bulk connection health check (P2 #27).
+// Runs vendor probes across all org connections with bounded concurrency.
+authed.post("/connections/health", async (req, res) => {
+  const { checkConnectionHealth } = await import("./catalog/connection-testers");
+  const report = await checkConnectionHealth(req.orgId!);
+  res.json(report);
 });
 
 // NOTE: PATCH /connections/:id lives in ui-compat.ts (credential sealing)
@@ -1827,10 +2158,22 @@ authed.post("/todos/:id/resolve", async (req, res) => {
   if (!todo) return res.status(404).json({ error: "not_found" });
 
   if (body.decision === "approved") {
-    await query(
-      `UPDATE flow_runs SET status = 'running', paused_reason = NULL WHERE id = $1 AND org_id = $2 AND status = 'paused'`,
+    // Re-activate the paused run AND enqueue a transition job — setting the
+    // status alone left approved runs stalled forever (P0 resume fix).
+    const resumed = await query(
+      `UPDATE flow_runs SET status = 'running', paused_reason = NULL, transition_epoch = transition_epoch + 1
+       WHERE id = $1 AND org_id = $2 AND status = 'paused'
+       RETURNING cursor, transition_epoch`,
       [todo.run_id, req.orgId],
     );
+    if (resumed[0]) {
+      const { queues } = await import("./queue");
+      await queues.steps.add(
+        "transition",
+        { runId: todo.run_id, orgId: req.orgId, cursor: Number(resumed[0].cursor ?? 0), epoch: Number(resumed[0].transition_epoch ?? 1) },
+        { jobId: `step:${todo.run_id}:${resumed[0].cursor}:${resumed[0].transition_epoch}`, removeOnComplete: 1000 },
+      ).catch(() => undefined);
+    }
   }
 
   res.json({ ok: true });
@@ -1975,6 +2318,43 @@ authed.get("/audit", async (req, res) => {
     [req.orgId],
   );
   res.json({ logs: rows });
+});
+
+// GET /audit/export?format=json|csv&limit=… — SIEM-ready audit export (P6 #68).
+// Owner/admin only; streamed inline so external tools can pull it on a schedule.
+authed.get("/audit/export", async (req, res) => {
+  const role = await queryOne<{ role: string }>(
+    `SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`,
+    [req.orgId, req.user!.userId],
+  );
+  if (!role || !["owner", "admin"].includes(role.role)) {
+    return res.status(403).json({ error: "forbidden", message: "Audit export requires owner or admin role" });
+  }
+  const format = String(req.query.format ?? "json").toLowerCase();
+  const limit = Math.min(Number(req.query.limit ?? 1000) || 1000, 10_000);
+  const since = req.query.since ? new Date(String(req.query.since)) : null;
+  const params: unknown[] = [req.orgId];
+  let q = `SELECT * FROM audit_logs WHERE org_id = $1`;
+  if (since && !Number.isNaN(since.getTime())) {
+    q += ` AND created_at >= $2`;
+    params.push(since.toISOString());
+  }
+  q += ` ORDER BY created_at DESC LIMIT ${limit}`;
+  const rows = await query<Record<string, unknown>>(q, params);
+
+  if (format === "csv") {
+    const esc = (v: unknown): string => {
+      const s = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const keys = rows.length ? Object.keys(rows[0]) : [];
+    const lines = [keys.join(","), ...rows.map((r) => keys.map((k) => esc(r[k])).join(","))];
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="audit-export-${new Date().toISOString().slice(0, 10)}.csv"`);
+    return res.send(lines.join("\r\n") + "\r\n");
+  }
+  res.setHeader("Content-Disposition", `attachment; filename="audit-export-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.json({ exportedAt: new Date().toISOString(), orgId: req.orgId, count: rows.length, logs: rows });
 });
 
 // ============================================================================
@@ -2236,6 +2616,55 @@ authed.post("/automations/:id/duplicate", async (req, res) => {
   res.json({ automation: { id: newFlow!.id } });
 });
 
+// Export a workflow definition as a portable JSON bundle (no secrets, no org ids).
+authed.get("/automations/:id/export", async (req, res) => {
+  const flow = await queryOne<{ id: string; name: string; draft_definition: unknown; published_version_id: string | null }>(
+    `SELECT id, name, draft_definition, published_version_id FROM flows WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
+  if (!flow) return res.status(404).json({ error: "not_found" });
+  let publishedVersionNumber: number | null = null;
+  if (flow.published_version_id) {
+    const v = await queryOne<{ version_number: number }>(
+      `SELECT version_number FROM flow_versions WHERE id = $1`,
+      [flow.published_version_id],
+    );
+    publishedVersionNumber = v?.version_number ?? null;
+  }
+  res.setHeader("Content-Disposition", `attachment; filename="${flow.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.aa.json"`);
+  res.json({
+    format: "algoverge.workflow/1",
+    exportedAt: new Date().toISOString(),
+    workflow: { name: flow.name, draftDefinition: flow.draft_definition ?? null, publishedVersionNumber },
+  });
+});
+
+// Import a workflow bundle (accepts our own export format or a bare graph).
+authed.post("/automations/import", requireRole("admin"), async (req, res) => {
+  const body = z.object({
+    format: z.string().optional(),
+    workflow: z.object({ name: z.string().min(1), draftDefinition: z.unknown().nullable().optional() }).optional(),
+    name: z.string().optional(),
+    graph: z.record(z.unknown()).optional(),
+  }).parse(req.body);
+
+  const name = body.workflow?.name ?? body.name;
+  if (!name) return res.status(400).json({ error: "name_required" });
+  let draft: unknown;
+  if (body.workflow?.draftDefinition) draft = body.workflow.draftDefinition;
+  else if (body.graph) draft = persistBuilderDraft(body.graph);
+  else return res.status(400).json({ error: "definition_required" });
+
+  const proj = await queryOne<{ id: string }>(`SELECT id FROM projects WHERE org_id = $1 LIMIT 1`, [req.orgId]);
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-import-" + Date.now().toString(36);
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO flows (org_id, project_id, name, slug, origin, created_by, draft_definition)
+     VALUES ($1, $2, $3, $4, 'import', $5, $6) RETURNING id`,
+    [req.orgId, proj!.id, name, slug, req.user!.userId, JSON.stringify(draft)],
+  );
+  res.json({ automation: { id: row!.id } });
+});
+
 // ============================================================================
 // EXECUTIONS (frontend alias for runs)
 // ============================================================================
@@ -2314,18 +2743,44 @@ authed.get("/analytics/summary", async (req, res) => {
 });
 
 authed.get("/executions", async (req, res) => {
-  const rows = await query(
-    `SELECT r.*, f.name as flow_name, f.id as automation_id,
+  // Production-grade listing (P2): status/flow/trigger filters, full-text
+  // search across workflow name + error message, keyset pagination, and a
+  // limit cap — never a fixed "last 100" dump.
+  const status = typeof req.query.status === "string" && req.query.status !== "all" ? String(req.query.status) : null;
+  const flowId = typeof req.query.flowId === "string" && req.query.flowId ? String(req.query.flowId) : null;
+  const trigger = typeof req.query.trigger === "string" && req.query.trigger ? String(req.query.trigger) : null;
+  const search = typeof req.query.search === "string" ? String(req.query.search).trim() : "";
+  const before = typeof req.query.before === "string" && req.query.before ? String(req.query.before) : null;
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
+
+  const params: unknown[] = [req.orgId];
+  let q = `SELECT r.*, f.name as flow_name, f.id as automation_id,
             (SELECT rs.error_json FROM run_steps rs
               WHERE rs.run_id = r.id AND rs.run_created_at = r.created_at AND rs.org_id = r.org_id
                 AND rs.status = 'failed' ORDER BY rs.sequence_no ASC LIMIT 1) AS error_json
      FROM flow_runs r
      JOIN flows f ON f.id = r.flow_id
-     WHERE r.org_id = $1
-     ORDER BY r.created_at DESC LIMIT 100`,
-    [req.orgId],
-  );
-  const executions = rows.map((r: any) => ({
+     WHERE r.org_id = $1`;
+  if (status) { params.push(status); q += ` AND r.status = $${params.length}`; }
+  if (flowId) { params.push(flowId); q += ` AND r.flow_id = $${params.length}`; }
+  if (trigger) { params.push(trigger); q += ` AND r.trigger_kind = $${params.length}`; }
+  if (before) {
+    const at = new Date(String(before));
+    if (!Number.isNaN(at.getTime())) { params.push(at.toISOString()); q += ` AND r.created_at < $${params.length}::timestamptz`; }
+  }
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    const n = params.length;
+    q += ` AND (LOWER(f.name) LIKE $${n} OR EXISTS (
+      SELECT 1 FROM run_steps rs2
+      WHERE rs2.run_id = r.id AND rs2.run_created_at = r.created_at AND rs2.org_id = r.org_id
+        AND rs2.status = 'failed' AND LOWER(COALESCE(rs2.error_json::text, '')) LIKE $${n}))`;
+  }
+  q += ` ORDER BY r.created_at DESC LIMIT ${limit + 1}`;
+  const rows = await query(q, params);
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const executions = page.map((r: any) => ({
     id: r.id,
     status: r.status,
     automation_name: r.flow_name,
@@ -2333,11 +2788,34 @@ authed.get("/executions", async (req, res) => {
     trigger_type: r.trigger_kind,
     created_at: r.created_at,
     finished_at: r.finished_at,
+    duration_ms: r.duration_ms,
     error: r.status === "failed"
       ? (typeof r.error_json === "object" && r.error_json ? r.error_json : { message: "Run failed" })
       : undefined,
   }));
-  res.json({ executions });
+  res.json({
+    executions,
+    pagination: {
+      hasMore,
+      nextBefore: hasMore && page.length ? new Date(String(page[page.length - 1].created_at)).toISOString() : null,
+    },
+  });
+});
+
+// POST /executions/:id/cancel — cancel a queued/running/paused run (P2).
+authed.post("/executions/:id/cancel", async (req, res) => {
+  const row = await queryOne<{ id: string; status: string }>(
+    `UPDATE flow_runs SET status = 'cancelled', finished_at = now(), paused_reason = NULL
+     WHERE id = $1 AND org_id = $2 AND status IN ('queued', 'running', 'paused')
+     RETURNING id, status`,
+    [req.params.id, req.orgId],
+  );
+  if (!row) {
+    const existing = await queryOne<{ status: string }>(`SELECT status FROM flow_runs WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId]);
+    if (!existing) return res.status(404).json({ error: "not_found" });
+    return res.status(409).json({ error: "not_cancellable", status: existing.status });
+  }
+  res.json({ ok: true, status: row.status });
 });
 
 // ============================================================================
@@ -2374,28 +2852,27 @@ authed.post("/approvals/:id/decide", async (req, res) => {
 });
 
 authed.get("/agent-approvals", async (req, res) => {
-  const rows = await query(
-    `SELECT * FROM workspace_items WHERE org_id = $1 AND kind = 'agent' AND payload->>'pendingApproval' = 'true' ORDER BY created_at DESC`,
-    [req.orgId],
-  ).catch(() => []);
-  res.json({
-    approvals: rows.map((r) => ({
-      id: r.id,
-      app_slug: (r.payload as { appSlug?: string })?.appSlug ?? "agent",
-      operation: (r.payload as { operation?: string })?.operation ?? "run",
-      created_at: r.created_at,
-    })),
-  });
+  // Real agent tool approvals from the agent runtime (agent_approvals table).
+  const { rows } = { rows: await query(
+    `SELECT * FROM agent_approvals WHERE workspace_id = $1 AND status = 'pending' ORDER BY created_at DESC`,
+    [req.workspaceId],
+  ) };
+  res.json({ approvals: rows });
 });
 
 authed.post("/agent-approvals/:id/decide", async (req, res) => {
-  z.object({ decision: z.enum(["approved", "rejected"]) }).parse(req.body);
-  await query(
-    `UPDATE workspace_items SET payload = payload || jsonb_build_object('pendingApproval', false, 'lastDecision', $3::text), updated_at = now()
-     WHERE id = $1 AND org_id = $2 AND kind = 'agent'`,
-    [req.params.id, req.orgId, req.body.decision],
-  );
-  res.json({ ok: true });
+  const body = z.object({ decision: z.enum(["approved", "rejected"]) }).parse(req.body);
+  // Route through the real agent runtime so an approved tool call actually
+  // executes and is audited — the previous shim only flipped a payload flag.
+  const result = await decideAgentApproval({
+    approvalId: req.params.id,
+    workspaceId: req.workspaceId!,
+    organizationId: req.orgId!,
+    userId: req.user!.userId,
+    decision: body.decision,
+  });
+  if (!result) return res.status(404).json({ error: "not_found" });
+  res.json(result);
 });
 
 authed.get("/sdk/apps", async (_req, res) => {
@@ -2641,14 +3118,157 @@ authed.post("/tables/:id/records", async (req, res) => {
     `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
     [req.orgId, req.params.id, JSON.stringify(body.data)],
   );
+  // P4 #46: table records are first-class automation triggers.
+  void fireTableRecordEvent({ tableId: req.params.id, record: { id: row!.id, ...body.data }, operation: "new_record" }).catch(() => {});
   res.json({ record: { id: row!.id, data: body.data } });
 });
 
+// PATCH /tables/:id/records/:recordId — update a record (P4 #46)
+authed.patch("/tables/:id/records/:recordId", async (req, res) => {
+  const body = z.object({ data: z.record(z.unknown()) }).parse(req.body);
+  const row = await queryOne<{ id: string; data: Record<string, unknown> }>(
+    `UPDATE data_table_rows SET data = $1, updated_at = now() WHERE id = $2 AND table_id = $3 AND org_id = $4 RETURNING id, data`,
+    [JSON.stringify(body.data), req.params.recordId, req.params.id, req.orgId],
+  );
+  if (!row) return res.status(404).json({ error: "not_found" });
+  void fireTableRecordEvent({ tableId: req.params.id, record: { id: row.id, ...body.data }, operation: "updated_record" }).catch(() => {});
+  res.json({ record: { id: row.id, data: body.data } });
+});
+
+// POST /tables/:id/records/bulk — bulk create (P4 #29)
+authed.post("/tables/:id/records/bulk", async (req, res) => {
+  const body = z.object({ records: z.array(z.record(z.unknown())).min(1).max(1000) }).parse(req.body);
+  const created: string[] = [];
+  for (const data of body.records) {
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
+      [req.orgId, req.params.id, JSON.stringify(data)],
+    );
+    if (row) {
+      created.push(row.id);
+      void fireTableRecordEvent({ tableId: req.params.id, record: { id: row.id, ...data }, operation: "new_record" }).catch(() => {});
+    }
+  }
+  res.json({ created: created.length, ids: created });
+});
+
+// POST /tables/:id/records/bulk-update — bulk update by ids (P4 #29)
+authed.post("/tables/:id/records/bulk-update", async (req, res) => {
+  const body = z.object({ ids: z.array(z.string()).min(1).max(1000), data: z.record(z.unknown()) }).parse(req.body);
+  const merged = body.ids.map(async (id) => {
+    const existing = await queryOne<{ data: Record<string, unknown> }>(
+      `SELECT data FROM data_table_rows WHERE id = $1 AND table_id = $2 AND org_id = $3`,
+      [id, req.params.id, req.orgId],
+    );
+    if (!existing) return null;
+    const next = { ...existing.data, ...body.data };
+    await query(`UPDATE data_table_rows SET data = $1, updated_at = now() WHERE id = $2 AND table_id = $3 AND org_id = $4`,
+      [JSON.stringify(next), id, req.params.id, req.orgId]);
+    void fireTableRecordEvent({ tableId: req.params.id, record: { id, ...next }, operation: "updated_record" }).catch(() => {});
+    return id;
+  });
+  const updated = (await Promise.all(merged)).filter(Boolean);
+  res.json({ updated: updated.length });
+});
+
+// POST /tables/:id/records/bulk-delete — bulk delete by ids (P4 #29)
+authed.post("/tables/:id/records/bulk-delete", async (req, res) => {
+  const body = z.object({ ids: z.array(z.string()).min(1).max(1000) }).parse(req.body);
+  let deleted = 0;
+  for (const id of body.ids) {
+    const row = await queryOne<{ data: Record<string, unknown> }>(
+      `DELETE FROM data_table_rows WHERE id = $1 AND table_id = $2 AND org_id = $3 RETURNING data`,
+      [id, req.params.id, req.orgId],
+    );
+    if (row) {
+      deleted++;
+      void fireTableRecordEvent({ tableId: req.params.id, record: { id, ...row.data }, operation: "deleted_record" }).catch(() => {});
+    }
+  }
+  res.json({ deleted });
+});
+
+// GET /tables/:id/export.csv — CSV export (P4 #29)
+authed.get("/tables/:id/export.csv", async (req, res) => {
+  const table = await queryOne<{ name: string }>(`SELECT name FROM data_tables WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId]);
+  if (!table) return res.status(404).json({ error: "not_found" });
+  const rows = await query<{ id: string; data: Record<string, unknown> }>(
+    `SELECT id, data FROM data_table_rows WHERE table_id = $1 AND org_id = $2 ORDER BY created_at ASC`,
+    [req.params.id, req.orgId],
+  );
+  const esc = (v: unknown): string => {
+    const s = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const keys = [...new Set(rows.flatMap((r) => Object.keys(r.data ?? {})))];
+  const lines = [
+    keys.map(esc).join(","),
+    ...rows.map((r) => keys.map((k) => esc((r.data as Record<string, unknown>)?.[k])).join(",")),
+  ];
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${table.name.replace(/[^"]/g, "")}.csv"`);
+  res.send(lines.join("\r\n") + "\r\n");
+});
+
+// POST /tables/:id/import — CSV import (P4 #29). Accepts raw CSV text with a header row.
+authed.post("/tables/:id/import", async (req, res) => {
+  const body = z.object({ csv: z.string().min(1).max(5 * 1024 * 1024) }).parse(req.body);
+  const parseCsv = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let cur: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else inQuotes = false;
+        } else field += ch;
+      } else if (ch === '"') inQuotes = true;
+      else if (ch === ",") { cur.push(field); field = ""; }
+      else if (ch === "\n" || ch === "\r") {
+        if (ch === "\r" && text[i + 1] === "\n") i++;
+        cur.push(field); field = "";
+        if (cur.length > 1 || cur[0] !== "") rows.push(cur);
+        cur = [];
+      } else field += ch;
+    }
+    if (field !== "" || cur.length > 0) { cur.push(field); if (cur.length > 1 || cur[0] !== "") rows.push(cur); }
+    return rows;
+  };
+  const parsed = parseCsv(body.csv);
+  if (parsed.length < 2) return res.status(400).json({ error: "empty_csv", message: "CSV needs a header row and at least one data row" });
+  const headers = parsed[0].map((h) => h.trim()).filter(Boolean);
+  const records = parsed.slice(1).map((cells) => {
+    const rec: Record<string, unknown> = {};
+    headers.forEach((h, idx) => {
+      const raw = (cells[idx] ?? "").trim();
+      if (raw === "") return;
+      try { rec[h] = JSON.parse(raw); } catch { rec[h] = raw; }
+    });
+    return rec;
+  }).filter((r) => Object.keys(r).length > 0);
+  const created: string[] = [];
+  for (const data of records) {
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
+      [req.orgId, req.params.id, JSON.stringify(data)],
+    );
+    if (row) {
+      created.push(row.id);
+      void fireTableRecordEvent({ tableId: req.params.id, record: { id: row.id, ...data }, operation: "new_record" }).catch(() => {});
+    }
+  }
+  res.json({ imported: created.length });
+});
+
 authed.delete("/tables/:id/records/:recordId", async (req, res) => {
-  await query(
-    `DELETE FROM data_table_rows WHERE id = $1 AND table_id = $2 AND org_id = $3`,
+  const row = await queryOne<{ data: Record<string, unknown> }>(
+    `DELETE FROM data_table_rows WHERE id = $1 AND table_id = $2 AND org_id = $3 RETURNING data`,
     [req.params.recordId, req.params.id, req.orgId],
   );
+  if (row) void fireTableRecordEvent({ tableId: req.params.id, record: { id: req.params.recordId, ...row.data }, operation: "deleted_record" }).catch(() => {});
   res.json({ ok: true });
 });
 
@@ -2823,12 +3443,78 @@ authed.delete("/forms/:id", async (req, res) => {
 });
 
 authed.get("/forms/:id/submissions", async (req, res) => {
-  // Form submissions are stored as data_table_rows
+  // Form submissions are stored as data_table_rows. Support cursor pagination
+  // (before=<iso>) and an optional CSV export for spreadsheet/SIEM use.
+  const before = typeof req.query.before === "string" ? req.query.before : null;
+  const format = typeof req.query.format === "string" ? req.query.format : null;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  const params: unknown[] = [req.params.id, req.orgId];
+  let where = `table_id = $1 AND org_id = $2`;
+  if (before) {
+    const d = new Date(before);
+    if (Number.isNaN(d.getTime())) return res.status(400).json({ error: "invalid_before" });
+    params.push(d.toISOString());
+    where += ` AND created_at < $${params.length}`;
+  }
+  if (format === "csv") {
+    const rows = await query<{ data: Record<string, unknown>; created_at: string }>(
+      `SELECT data, created_at FROM data_table_rows WHERE ${where} ORDER BY created_at DESC LIMIT ${limit}`,
+      params,
+    );
+    const fieldKeys = new Set<string>(["submitted_at"]);
+    for (const r of rows) {
+      if (r.data && typeof r.data === "object") for (const k of Object.keys(r.data)) fieldKeys.add(k);
+    }
+    const cols = [...fieldKeys];
+    const esc = (v: unknown) => {
+      const s = v === undefined || v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [cols.join(",")];
+    for (const r of rows) {
+      lines.push(cols.map((c) => (c === "submitted_at" ? esc(r.created_at) : esc((r.data as Record<string, unknown>)?.[c]))).join(","));
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="submissions-${req.params.id}.csv"`);
+    return res.send(lines.join("\n"));
+  }
   const rows = await query(
-    `SELECT * FROM data_table_rows WHERE table_id = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 100`,
+    `SELECT id, data, created_at FROM data_table_rows WHERE ${where} ORDER BY created_at DESC LIMIT ${limit + 1}`,
+    params,
+  );
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  res.json({
+    submissions: page.map((r: any) => ({ id: r.id, data: r.data, created_at: r.created_at })),
+    hasMore,
+    nextBefore: hasMore ? page[page.length - 1].created_at : null,
+  });
+});
+
+// Download a stored form file. Org-scoped: members can only fetch files
+// belonging to their own org's forms.
+authed.get("/forms/:id/files/:fileId", async (req, res) => {
+  const f = await queryOne<{ file_name: string; content_type: string; content_b64: string }>(
+    `SELECT ff.file_name, ff.content_type, ff.content_b64
+     FROM form_files ff
+     JOIN data_tables dt ON dt.id = ff.form_id AND dt.org_id = ff.org_id
+     WHERE ff.id = $1 AND ff.org_id = $2 AND dt.id = $3 AND dt.name LIKE 'form:%'`,
+    [req.params.fileId, req.orgId, req.params.id],
+  );
+  if (!f) return res.status(404).json({ error: "not_found" });
+  res.setHeader("Content-Type", f.content_type);
+  res.setHeader("Content-Disposition", `attachment; filename="${f.file_name.replace(/["\\\r\n]/g, "_")}"`);
+  res.send(Buffer.from(f.content_b64, "base64"));
+});
+
+// File listing for a form (metadata only, never bytes, until download).
+authed.get("/forms/:id/files", async (req, res) => {
+  const rows = await query(
+    `SELECT id, submission_id, field_key, file_name, content_type, size_bytes, created_at
+     FROM form_files WHERE form_id = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 200`,
     [req.params.id, req.orgId],
   );
-  res.json({ submissions: rows.map((r: any) => ({ id: r.id, data: r.data, created_at: r.created_at })) });
+  res.json({ files: rows });
 });
 
 // ============================================================================
@@ -2895,6 +3581,36 @@ authed.post("/interfaces", async (req, res) => {
 
 authed.delete("/interfaces/:id", async (req, res) => {
   await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'interface'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
+});
+
+// Update interface pages/visibility. Block types: heading, text, table, form,
+// button — every block maps to real runtime behavior (see /public/interfaces).
+authed.patch("/interfaces/:id", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1).optional(),
+    isPublic: z.boolean().optional(),
+    pages: z.array(z.object({
+      type: z.enum(["heading", "text", "table", "form", "button"]),
+      text: z.string().optional(),
+      tableId: z.string().uuid().nullable().optional(),
+      formId: z.string().uuid().nullable().optional(),
+      automationId: z.string().uuid().nullable().optional(),
+      buttonLabel: z.string().optional(),
+    })).optional(),
+  }).parse(req.body);
+  const existing = await queryOne<{ id: string; payload: Record<string, unknown> }>(
+    `SELECT id, payload FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'interface'`,
+    [req.params.id, req.orgId],
+  );
+  if (!existing) return res.status(404).json({ error: "not_found" });
+  const payload = { ...existing.payload } as Record<string, unknown>;
+  if (body.pages !== undefined) payload.pages = body.pages;
+  if (body.isPublic !== undefined) payload.is_public = body.isPublic;
+  const sets = [`payload = $3`, `updated_at = now()`];
+  const params: unknown[] = [req.params.id, req.orgId, JSON.stringify(payload)];
+  if (body.name) { sets.push(`name = $4`); params.push(body.name); }
+  await query(`UPDATE workspace_items SET ${sets.join(", ")} WHERE id = $1 AND org_id = $2`, params);
   res.json({ ok: true });
 });
 
@@ -3055,11 +3771,17 @@ authed.post("/ai/generate", async (req, res) => {
   if (ai.reachable) {
     try {
       const result = await signedAiJson<{ text?: string; content?: string }>("/generate", { prompt: body.prompt }, req.orgId!);
-      return res.json({ text: result?.text ?? result?.content ?? "Generated content" });
-    } catch { /* fall through */ }
+      const text = result?.text ?? result?.content;
+      if (!text) return res.status(502).json({ error: "ai_empty_response", hint: "The AI service returned no content. Retry or write this field manually." });
+      return res.json({ text });
+    } catch { /* fall through to explicit failure below */ }
   }
-  // Fallback: generate placeholder text based on the prompt
-  res.json({ text: `[AI] ${body.prompt.slice(0, 200)}` });
+  // No silent placeholder content — the caller must see a real failure so it
+  // can offer Retry / manual entry instead of silently saving invented text.
+  return res.status(503).json({
+    error: "ai_unavailable",
+    hint: "AI service is unavailable right now. Retry shortly or fill this field manually.",
+  });
 });
 
 authed.get("/canvases", async (req, res) => {
@@ -3119,6 +3841,64 @@ authed.patch("/canvases/:id", async (req, res) => {
 authed.delete("/canvases/:id", async (req, res) => {
   await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'canvas'`, [req.params.id, req.orgId]);
   res.json({ ok: true });
+});
+
+// Zapier-style Canvas→Zap linkage: convert a canvas diagram into a draft
+// workflow. Canvas boxes become builder-graph nodes (trigger/logic/action);
+// notes and data boxes become actions with a chosen app; canvas edges become
+// graph edges. The result opens in the visual builder for configuration.
+authed.post("/canvases/:id/convert", async (req, res) => {
+  const canvas = await queryOne<{ id: string; name: string; payload: { graph?: { nodes?: Array<Record<string, unknown>>; edges?: Array<{ source: string; target: string }> } } }>(
+    `SELECT id, name, payload FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'canvas'`,
+    [req.params.id, req.orgId],
+  );
+  if (!canvas) return res.status(404).json({ error: "not_found" });
+  const cnodes = (canvas.payload.graph?.nodes ?? []).filter((n) => {
+    const kind = String(n.kind ?? "action").toLowerCase();
+    return kind !== "text" && kind !== "chatbot"; // notes/deployments don't map to steps
+  });
+  if (cnodes.length === 0) return res.status(400).json({ error: "nothing_to_convert" });
+
+  // Map canvas kinds → graph node types. The first trigger-kind box wins;
+  // if none exists, the first box becomes the trigger.
+  const nodeTypeOf = (kind: string) => (kind === "logic" ? "logic" : "action");
+  let triggerAssigned = false;
+  const nodes = cnodes.map((n, i) => {
+    const kind = String(n.kind ?? "action").toLowerCase();
+    const isTrigger = kind === "trigger" || (!triggerAssigned && i === 0);
+    if (isTrigger) triggerAssigned = true;
+    return {
+      id: String(n.id ?? `node_${i}`),
+      type: isTrigger ? "trigger" : nodeTypeOf(kind),
+      appSlug: String(n.appSlug ?? ""),
+      operation: String(n.operation ?? ""),
+      label: String(n.label ?? "Step"),
+      position: { x: Number(n.x ?? 80), y: Number(n.y ?? 40 + i * 160) },
+      config: {},
+      connectionId: null,
+    };
+  });
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const canvasEdges = canvas.payload.graph?.edges ?? [];
+  // Keep canvas edges that connect converted nodes; chain the rest in y-order
+  // so the draft is always a connected flow.
+  let edges = canvasEdges
+    .filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target))
+    .map((e, i) => ({ id: `e${i}`, source: e.source, target: e.target }));
+  if (edges.length === 0) {
+    const ordered = [...nodes].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
+    edges = ordered.slice(1).map((n, i) => ({ id: `e${i}`, source: ordered[i].id, target: n.id }));
+  }
+
+  const draft = persistBuilderDraft({ nodes, edges });
+  const proj = await queryOne<{ id: string }>(`SELECT id FROM projects WHERE org_id = $1 LIMIT 1`, [req.orgId]);
+  const slug = canvas.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-flow-" + Date.now().toString(36);
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO flows (org_id, project_id, name, slug, origin, created_by, draft_definition)
+     VALUES ($1, $2, $3, $4, 'canvas', $5, $6) RETURNING id`,
+    [req.orgId, proj!.id, canvas.name, slug, req.user!.userId, JSON.stringify(draft)],
+  );
+  res.json({ automation: { id: row!.id } });
 });
 
 // ============================================================================

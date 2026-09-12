@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ExternalLink, FileInput, GripVertical, Loader2, Plus, Table2, Trash2, Workflow } from "lucide-react";
-import { api, getWorkspaceId } from "@/lib/api";
+import { api, API_URL, getWorkspaceId } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,22 @@ import { PageInfo } from "@/components/ui/page-info";
 import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/utils";
 
-type Field = { key: string; type: string; label: string; required?: boolean; placeholder?: string };
+type Field = { key: string; type: string; label: string; required?: boolean; placeholder?: string; options?: string[]; visibleWhen?: { field: string; op: string; value?: string | number } };
+
+const FIELD_TYPE_OPTIONS = [
+  { value: "text", label: "Short text" },
+  { value: "textarea", label: "Long text" },
+  { value: "email", label: "Email" },
+  { value: "number", label: "Number" },
+  { value: "date", label: "Date" },
+  { value: "select", label: "Dropdown" },
+  { value: "multiselect", label: "Multi-select" },
+  { value: "checkbox", label: "Checkbox" },
+  { value: "url", label: "URL" },
+  { value: "phone", label: "Phone" },
+  { value: "file", label: "File upload" },
+  { value: "hidden", label: "Hidden field" },
+];
 type FormRow = { id: string; name: string; slug: string; fields: Field[]; table_id?: string | null; automation_id?: string | null; created_at?: string; submission_count?: number };
 type Submission = { id: string; data: Record<string, unknown>; created_at: string };
 
@@ -41,13 +56,21 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
   const workflows = useQuery({ queryKey: ["automations"], queryFn: () => api<{ automations: Array<{ id: string; name: string }> }>("/automations") });
   const [connectWorkflowId, setConnectWorkflowId] = useState(form.automation_id ?? "");
 
-  // Submissions
+  // Submissions — server-paginated with CSV export
   const [showSubs, setShowSubs] = useState(false);
+  const [subsBefore, setSubsBefore] = useState<string | null>(null);
   const subs = useQuery({
-    queryKey: ["form-subs", form.id],
-    queryFn: () => api<{ submissions: Submission[] }>(`/forms/${form.id}/submissions`),
+    queryKey: ["form-subs", form.id, subsBefore],
+    queryFn: () => api<{ submissions: Submission[]; hasMore: boolean; nextBefore: string | null }>(
+      `/forms/${form.id}/submissions?limit=50${subsBefore ? `&before=${encodeURIComponent(subsBefore)}` : ""}`,
+    ),
     enabled: showSubs,
   });
+
+  function exportCsv() {
+    const token = localStorage.getItem("token") ?? "";
+    window.open(`${API_URL}/forms/${form.id}/submissions?format=csv&limit=500`, "_blank");
+  }
 
   async function saveConnections() {
     setSaving(true);
@@ -115,11 +138,24 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
                 {f.type === "textarea" ? (
                   <textarea className="w-full rounded-lg border border-line px-3 py-2 text-sm" rows={3} placeholder={f.placeholder} readOnly />
                 ) : f.type === "select" ? (
-                  <select className="w-full rounded-lg border border-line px-3 py-2 text-sm" disabled><option>Choose...</option></select>
+                  <select className="w-full rounded-lg border border-line px-3 py-2 text-sm" disabled>
+                    <option>Choose…</option>
+                    {(f.options ?? []).map((o) => <option key={o}>{o}</option>)}
+                  </select>
+                ) : f.type === "multiselect" ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {(f.options ?? []).length
+                      ? (f.options ?? []).map((o) => <span key={o} className="rounded-full border border-line px-2.5 py-0.5 text-[11px] text-ink-muted">{o}</span>)
+                      : <span className="text-[11px] text-ink-muted">No options configured.</span>}
+                  </div>
+                ) : f.type === "file" ? (
+                  <div className="rounded-lg border border-dashed border-line px-3 py-3 text-center text-[11px] text-ink-muted">File upload · max 5 MB</div>
+                ) : f.type === "hidden" ? (
+                  <div className="rounded border border-dashed border-line px-2 py-1 text-[10px] text-ink-muted">Hidden field — not shown publicly</div>
                 ) : f.type === "checkbox" ? (
                   <div className="flex items-center gap-2"><input type="checkbox" className="h-4 w-4 rounded border-line" disabled /><span className="text-sm">{f.label}</span></div>
                 ) : (
-                  <Input type={f.type} placeholder={f.placeholder ?? f.label} readOnly />
+                  <Input type={f.type === "phone" ? "tel" : f.type} placeholder={f.placeholder ?? f.label} readOnly />
                 )}
               </div>
             ))}
@@ -133,19 +169,100 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
           <div className="border-b border-line p-4">
             <p className="mb-3 text-[10px] font-semibold uppercase text-ink-muted">Form fields ({fields.length})</p>
             {fields.map((f, i) => (
-              <div key={f.key} className="mb-2 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-xs">
-                <GripVertical className="h-3 w-3 text-ink-muted" />
-                <span className="flex-1 truncate font-medium">{f.label}</span>
-                <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] text-ink-muted">{f.type}</span>
-                <button
-                  className="text-ink-muted hover:text-danger"
-                  onClick={() => { const n = [...fields]; n.splice(i, 1); setFields(n); }}
-                >×</button>
+              <div key={f.key} className="mb-2 rounded-lg border border-line px-2.5 py-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <GripVertical className="h-3 w-3 shrink-0 text-ink-muted" />
+                  <input
+                    className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-medium hover:border-line focus:border-teal focus:outline-none"
+                    value={f.label}
+                    placeholder="Field label"
+                    onChange={(e) => { const n = [...fields]; n[i] = { ...f, label: e.target.value }; setFields(n); }}
+                  />
+                  <button
+                    className="shrink-0 text-ink-muted hover:text-danger"
+                    onClick={() => { const n = [...fields]; n.splice(i, 1); setFields(n); }}
+                  >×</button>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  <select
+                    className="rounded border border-line bg-elevated px-1.5 py-1 text-[11px]"
+                    value={f.type}
+                    onChange={(e) => { const n = [...fields]; n[i] = { ...f, type: e.target.value }; setFields(n); }}
+                  >
+                    {FIELD_TYPE_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                  <input
+                    className="rounded border border-line bg-elevated px-1.5 py-1 text-[11px]"
+                    placeholder="Placeholder"
+                    value={f.placeholder ?? ""}
+                    onChange={(e) => { const n = [...fields]; n[i] = { ...f, placeholder: e.target.value || undefined }; setFields(n); }}
+                  />
+                </div>
+                {(f.type === "select" || f.type === "multiselect") && (
+                  <input
+                    className="mt-1.5 w-full rounded border border-line bg-elevated px-1.5 py-1 text-[11px]"
+                    placeholder="Options, comma-separated"
+                    value={(f.options ?? []).join(", ")}
+                    onChange={(e) => { const n = [...fields]; n[i] = { ...f, options: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) }; setFields(n); }}
+                  />
+                )}
+                <label className="mt-1.5 flex items-center gap-1.5 text-[10px] text-ink-muted">
+                  <input
+                    type="checkbox"
+                    className="h-3 w-3"
+                    checked={f.required !== false}
+                    onChange={(e) => { const n = [...fields]; n[i] = { ...f, required: e.target.checked }; setFields(n); }}
+                  />
+                  Required
+                </label>
+                {/* Conditional visibility — only validated/shown when the condition holds */}
+                {i > 0 && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-[10px] text-ink-muted hover:text-teal">Show conditionally…</summary>
+                    <div className="mt-1.5 grid grid-cols-3 gap-1">
+                      <select
+                        className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
+                        value={f.visibleWhen?.field ?? ""}
+                        onChange={(e) => { const n = [...fields]; n[i] = { ...f, visibleWhen: e.target.value ? { field: e.target.value, op: f.visibleWhen?.op ?? "eq", value: f.visibleWhen?.value ?? "" } : undefined }; setFields(n); }}
+                      >
+                        <option value="">Always show</option>
+                        {fields.filter((_, j) => j !== i && !/^(file|button|ai|formula|linked)$/.test(fields[j].type)).map((other) => (
+                          <option key={other.key} value={other.key}>{other.label || other.key}</option>
+                        ))}
+                      </select>
+                      {f.visibleWhen && (
+                        <>
+                          <select
+                            className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
+                            value={f.visibleWhen.op}
+                            onChange={(e) => { const n = [...fields]; n[i] = { ...f, visibleWhen: { ...f.visibleWhen!, op: e.target.value } }; setFields(n); }}
+                          >
+                            <option value="eq">equals</option>
+                            <option value="neq">not equals</option>
+                            <option value="contains">contains</option>
+                            <option value="gt">&gt;</option>
+                            <option value="lt">&lt;</option>
+                            <option value="empty">is empty</option>
+                            <option value="not_empty">is not empty</option>
+                          </select>
+                          {!/^(empty|not_empty)$/.test(f.visibleWhen.op) && (
+                            <input
+                              className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
+                              placeholder="Value"
+                              value={String(f.visibleWhen.value ?? "")}
+                              onChange={(e) => { const n = [...fields]; n[i] = { ...f, visibleWhen: { ...f.visibleWhen!, value: e.target.value } }; setFields(n); }}
+                            />
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </details>
+                )}
               </div>
             ))}
             <button
               className="mt-2 flex w-full items-center gap-1.5 rounded-lg border border-dashed border-line px-2.5 py-2 text-[11px] text-ink-muted hover:border-teal hover:text-teal"
-              onClick={() => setFields([...fields, { key: `field_${Date.now()}`, type: "text", label: `Field ${fields.length + 1}` }])}
+              onClick={() => setFields([...fields, { key: `field_${Date.now()}`, type: "text", label: `Field ${fields.length + 1}`, required: true }])}
             >
               <Plus className="h-3 w-3" /> Add field
             </button>
@@ -233,10 +350,22 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
               className="flex w-full items-center justify-between rounded-lg border border-line px-3 py-2 text-xs hover:bg-muted"
               onClick={() => setShowSubs(!showSubs)}
             >
-              <span className="font-medium">Submissions ({subs.data?.submissions?.length ?? 0})</span>
-              <span className="text-ink-muted">{showSubs ? "Hide" : "Show"}</span>
+              <span className="font-medium">Submissions</span>
+              <span className="flex items-center gap-2">
+                {showSubs && subs.data?.submissions?.length ? (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    className="rounded border border-line px-1.5 py-0.5 text-[10px] text-ink-muted hover:border-teal hover:text-teal"
+                    onClick={(e) => { e.stopPropagation(); exportCsv(); }}
+                  >
+                    Export CSV
+                  </span>
+                ) : null}
+                <span className="text-ink-muted">{showSubs ? "Hide" : "Show"}</span>
+              </span>
             </button>
-            {showSubs && subs.data?.submissions && (
+            {showSubs && subs.data && (
               <div className="mt-2 space-y-1.5 max-h-64 overflow-y-auto">
                 {subs.data.submissions.length === 0 && (
                   <p className="text-center text-[11px] text-ink-muted py-4">No submissions yet.</p>
@@ -250,13 +379,36 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
                       {Object.entries(sub.data ?? {}).map(([k, v]) => (
                         <div key={k} className="flex gap-2">
                           <span className="font-medium text-ink">{k}:</span>
-                          <span className="truncate text-ink-muted">{String(v)}</span>
+                          <span className="truncate text-ink-muted">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
                         </div>
                       ))}
                     </div>
                   </div>
                 ))}
+                {(subs.data.hasMore || subsBefore) && (
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      className="rounded border border-line px-2 py-1 text-[10px] text-ink-muted hover:border-teal hover:text-teal disabled:opacity-50"
+                      disabled={!subsBefore}
+                      onClick={() => setSubsBefore(null)}
+                    >
+                      Newest
+                    </button>
+                    <button
+                      className="rounded border border-line px-2 py-1 text-[10px] text-ink-muted hover:border-teal hover:text-teal disabled:opacity-50"
+                      disabled={!subs.data.hasMore}
+                      onClick={() => setSubsBefore(subs.data!.nextBefore)}
+                    >
+                      Older →
+                    </button>
+                  </div>
+                )}
               </div>
+            )}
+            {showSubs && subs.isError && (
+              <p className="mt-2 rounded border border-danger/30 bg-danger/5 p-2 text-[11px] text-danger">
+                Failed to load submissions. Please retry.
+              </p>
             )}
           </div>
 
@@ -347,11 +499,11 @@ export default function FormsPage() {
         />
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {(list.data?.forms ?? []).map((f) => {
           const publicUrl = `/f/${ws}/${f.slug}`;
           return (
-            <Card key={f.id} className="group cursor-pointer transition-all hover:shadow-md hover:border-teal/40" onClick={() => setOpen(f)}>
+            <Card key={f.id} interactive className="group hover:border-teal/40" onClick={() => setOpen(f)}>
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10">

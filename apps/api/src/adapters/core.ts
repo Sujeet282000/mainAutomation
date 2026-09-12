@@ -53,6 +53,27 @@ registerAdapter("paths", "router", async ({ input }) => {
   return { output: { matched }, control: "paths", matchedHandles: matched };
 });
 
+// Aggregator (P1 #14): fan-in node after Router/Loop branches. Merges the
+// outputs of all incoming steps into one object/array downstream.
+registerAdapter("aggregator", "merge", async ({ input, workspaceId }) => {
+  const graph = input.__graph as { nodes?: Array<{ id: string }>; edges?: Array<{ source: string; target: string }> } | undefined;
+  const nodeRef = input.__nodeId as string | undefined;
+  const strategy = String(input.strategy ?? "merge");
+  if (graph && nodeRef) {
+    const incoming = (graph.edges ?? []).filter((e) => e.target === nodeRef).map((e) => e.source);
+    const parts = incoming.map((sourceId) => (input.__steps as Record<string, unknown> | undefined)?.[sourceId]).filter((v) => v !== undefined);
+    if (strategy === "append") return { output: { items: parts, count: parts.length } };
+    const merged = Object.assign({}, ...parts.filter((p) => p && typeof p === "object"));
+    return { output: { merged, count: parts.length } };
+  }
+  // Fallback: merge anything provided directly as `items`.
+  const parts = Array.isArray(input.items) ? input.items : [];
+  if (strategy === "append") return { output: { items: parts, count: parts.length } };
+  const merged = Object.assign({}, ...parts.filter((p) => p && typeof p === "object"));
+  void workspaceId;
+  return { output: { merged, count: parts.length } };
+});
+
 registerAdapter("loop", "for_each", async ({ input }) => {
   let items: unknown = input.items;
   if (typeof items === "string") {

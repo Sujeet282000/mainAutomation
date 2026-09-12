@@ -6,7 +6,8 @@ import { useQuery } from "@tanstack/react-query";
 import { LayoutTemplate, Sparkles, Workflow } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/lib/api";
-import { generateCopilotDraft, persistCopilotSession } from "@/lib/copilot";
+import { planCopilotWorkflow, type CopilotPlanResult } from "@/lib/copilot";
+import { PlanReviewModal } from "@/features/workflow-builder/plan-review-modal";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,6 +19,8 @@ export default function NewAutomationPage() {
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [plan, setPlan] = useState<CopilotPlanResult | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
   const templates = useQuery({
     queryKey: ["templates"],
     queryFn: () => api<{ templates: Array<{ slug: string; name: string; description?: string }> }>("/templates")
@@ -72,25 +75,44 @@ export default function NewAutomationPage() {
         <Button
           className="mt-3"
           variant="secondary"
-          disabled={busy}
+          disabled={busy || planLoading}
           onClick={async () => {
-            setBusy(true);
+            setBusy(true); setPlanLoading(true); setError("");
             try {
-              const copilot = await generateCopilotDraft({ prompt, mode: "auto_build" });
-              const d = await api<{ automation: { id: string } }>("/automations", {
-                method: "POST",
-                body: JSON.stringify({ name: prompt.slice(0, 60) || name, graph: copilot.graph, origin: "copilot" })
-              });
-              await persistCopilotSession(copilot.sessionId, d.automation.id).catch(() => undefined);
-              router.push(`/automations/${d.automation.id}/editor?idea=${encodeURIComponent(prompt)}`);
+              // Plan first; the workflow is only created after the user reviews the plan.
+              const result = await planCopilotWorkflow({ prompt, requestId: `req_${Date.now()}` });
+              setBusy(false); setPlanLoading(false);
+              setPlan(result);
             } catch (err) {
-              setError(err instanceof Error ? err.message : "Create failed");
-              setBusy(false);
+              setError(err instanceof Error ? err.message : "Copilot unavailable");
+              setBusy(false); setPlanLoading(false);
             }
           }}
         >
-          Generate workflow
+          {planLoading ? "Planning…" : "Generate workflow"}
         </Button>
+        <PlanReviewModal
+          open={plan !== null}
+          plan={plan}
+          loading={planLoading}
+          error={null}
+          onCancel={() => setPlan(null)}
+          onEdit={() => setPlan(null)}
+          onConfirm={async () => {
+            if (!plan?.sessionId || !plan?.graph) { setPlan(null); return; }
+            try {
+              const d = await api<{ automation: { id: string } }>("/automations", {
+                method: "POST",
+                body: JSON.stringify({ name: prompt.slice(0, 60) || name, graph: plan.graph, origin: "copilot" })
+              });
+              await api(`/copilot/sessions/${plan.sessionId}/approve`, { method: "POST" }).catch(() => undefined);
+              router.push(`/automations/${d.automation.id}/editor?idea=${encodeURIComponent(prompt)}`);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "Create failed");
+              setPlan(null);
+            }
+          }}
+        />
         <p className="mt-2 text-xs text-ink-muted">Creates a draft you can refine in the builder. Copilot cannot publish or create accounts.</p>
       </Card>
       {!!templates.data?.templates.length && (

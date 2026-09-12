@@ -417,3 +417,48 @@ export async function testConnectionById(
   }
   return { ...result, appSlug, tested: true };
 }
+
+/**
+ * Bulk connection health check (P2 #27): runs vendor probes across every
+ * connection in the org with bounded concurrency, updates connection status
+ * rows, and returns an aggregate health report. Connections whose app has no
+ * dedicated probe report `tested: false` with their stored status — the
+ * caller's own per-app checks (routes.ts) remain the fallback for those.
+ */
+export async function checkConnectionHealth(orgId: string): Promise<{
+  total: number;
+  healthy: number;
+  unhealthy: number;
+  untested: number;
+  results: Array<{ id: string; appSlug: string; ok: boolean | null; hint?: string }>;
+}> {
+  const conns = await query<{ id: string; piece_name: string }>(
+    `SELECT id, piece_name FROM connections WHERE org_id = $1 ORDER BY created_at ASC`,
+    [orgId],
+  );
+  const results: Array<{ id: string; appSlug: string; ok: boolean | null; hint?: string }> = [];
+  const CONCURRENCY = 5;
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(CONCURRENCY, conns.length) }, async () => {
+    while (cursor < conns.length) {
+      const idx = cursor++;
+      const conn = conns[idx];
+      try {
+        const r = await testConnectionById(conn.id, orgId);
+        results.push({ id: conn.id, appSlug: r.appSlug, ok: r.tested ? r.ok : null, hint: r.hint });
+      } catch (err) {
+        results.push({
+          id: conn.id,
+          appSlug: conn.piece_name,
+          ok: false,
+          hint: err instanceof Error ? err.message : "Health check failed",
+        });
+      }
+    }
+  });
+  await Promise.all(workers);
+  const healthy = results.filter((r) => r.ok === true).length;
+  const unhealthy = results.filter((r) => r.ok === false).length;
+  const untested = results.filter((r) => r.ok === null).length;
+  return { total: results.length, healthy, unhealthy, untested, results };
+}

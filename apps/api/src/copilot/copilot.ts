@@ -1134,6 +1134,11 @@ function isConversationalQuestion(prompt: string, snapshot: DraftSnapshot): bool
   // Workflow-modification keywords → not conversational
   if (/\b(build|generate|create|add|insert|append|remove|delete|replace|change|switch|set|use|fix|fill|map|autocomplete|connect|authenticate|rebuild|start over|update|modify)\b/i.test(lower)) return false;
   if (/\b(when |whenever |then |also )\b/i.test(lower) && snapshot.generic) return false;
+  // Questions about the CURRENT draft's state ("what is happening in this
+  // workflow", "what should I do next") must be answered by the deterministic
+  // inspector, not the LLM — the inspection is grounded in real step data and
+  // must not vary with model availability.
+  if (/\b(this|the|my)\s+(workflow|flow|automation|zap)\b/i.test(lower) && snapshot.nodeCount > 0) return false;
   // If the prompt is a question (contains ?) or a general knowledge phrase, route to LLM
   const isQuestion = lower.includes("?");
   const hasQuestionWord = /^(what|how|why|where|when|who|which|can|could|should|would|is|are|do|does|will)\b/i.test(lower);

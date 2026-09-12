@@ -41,7 +41,7 @@ export default function BillingPage() {
             </div>
           )}
 
-          <div className="mb-6 grid gap-3 sm:grid-cols-3">
+          <div className="ws-stagger mb-6 grid gap-3 sm:grid-cols-3">
             {(q.data?.usage ?? []).map((u) => (
               <Card key={u.metric}>
                 <div className="text-2xl font-semibold">{u.quantity}</div>

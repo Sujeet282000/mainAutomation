@@ -22,6 +22,10 @@ const NO_AUTH_APPS = new Set(["webhook", "http", "manual", "schedule", "delay", 
  * Emit an operation card that mirrors the proposed canvas: one row per node
  * with honest per-step status (configured / needs setup / needs connection),
  * plus the edge count so users can see the steps are wired together.
+ *
+ * Also emits per-step richer events the builder UI consumes directly:
+ *  - `connection_required` → connection card with a real "Connect" action
+ *  - `step_completed`      → per-step done/error activity + first unconfigured step pointer
  */
 async function sendOperationCard(
   send: (event: Record<string, unknown>) => Promise<void>,
@@ -55,6 +59,25 @@ async function sendOperationCard(
       ],
     },
   });
+
+  // Per-step events the builder UI turns into connection cards and activity.
+  for (const n of resultGraph.nodes) {
+    const appName = n.label || n.appSlug || "App";
+    if (n.appSlug && !n.connectionId && !NO_AUTH_APPS.has(n.appSlug)) {
+      await send({
+        type: "connection_required",
+        stepId: n.id,
+        appSlug: n.appSlug,
+        appName,
+        message: "Connect your account so this step can run",
+        actions: [{ type: "connect_account", label: `Connect ${appName}`, appSlug: n.appSlug, stepId: n.id }],
+      });
+    } else if (n.appSlug && n.operation) {
+      // Only configured steps emit completion — blank steps are already shown
+      // as "needs setup" in the operation card and must not render as errors.
+      await send({ type: "step_completed", stepId: n.id, label: appName, success: true, detail: n.connectionId ? undefined : "no account needed" });
+    }
+  }
 }
 
 // ── Conversation history helpers ───────────────────────────────────────
@@ -114,6 +137,26 @@ async function groundGraph(graph: unknown, operations: unknown[], opts: { worksp
   return applyAgentOperations({ graph, operations, workspaceId: opts.workspaceId, organizationId: opts.organizationId, allowDestructive: opts.allowDestructive });
 }
 
+/** Emit field_mapping events for config values that reference earlier steps' outputs. */
+async function sendFieldMappings(
+  send: (event: Record<string, unknown>) => Promise<void>,
+  resultGraph: { nodes: Array<{ id: string; label?: string; appSlug?: string; type?: string; config?: Record<string, unknown> }> },
+) {
+  for (const node of resultGraph.nodes) {
+    const config = node.config ?? {};
+    const mapped = Object.entries(config).filter(([, v]) => typeof v === "string" && /\{\{|steps\.|trigger\./i.test(String(v)));
+    if (mapped.length === 0) continue;
+    const sourceNode = resultGraph.nodes.find((n) => n.type === "trigger") ?? resultGraph.nodes[0];
+    await send({
+      type: "field_mapping",
+      stepId: node.id,
+      sourceLabel: sourceNode?.label || sourceNode?.appSlug || "Previous steps",
+      targetLabel: node.label || node.appSlug || "Step",
+      mappings: mapped.map(([field, value]) => ({ source: String(value), target: field })),
+    });
+  }
+}
+
 async function persistGroundedGraph(sessionId: string, graph: unknown, pendingOps?: unknown[]) {
   const coerced = coerceWorkflowGraph(graph);
   const definition = persistBuilderDraft(coerced);
@@ -146,6 +189,7 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
       await send({ type: "agent_activity", kind: "running", label: "Reading your request" });
       await send({ type: "reasoning", text: ai.hint, stage: "intent" });
       let sawResult = false;
+      let lastGrounded: { issues?: Array<{ code?: string }>; rejected?: unknown[]; needsConfirmation?: unknown[] } | null = null;
       for await (const ev of streamAiCopilotGenerate({ sessionId: opts.sessionId, flowId: opts.flowId || opts.sessionId, prompt: opts.prompt, orgId: opts.orgId, userEmail: opts.req.user?.email ?? "", projectId: opts.projectId || opts.orgId, autonomy: mode })) {
         if ((ev.type === "result" || ev.type === "proposal") && ev.graph) {
           const operations = Array.isArray(ev.operations) ? ev.operations : [];
@@ -161,6 +205,7 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
               needsApproval ? operations : undefined,
             );
             sawResult = true;
+            lastGrounded = grounded;
             await send({ ...ev, graph: persisted.graph, definition: persisted.definition, sessionId: opts.sessionId, operations, applied_operations: grounded.applied, rejected_operations: grounded.rejected, needs_confirmation: grounded.needsConfirmation, issues: grounded.issues, applied: mode === "auto_build" && !needsApproval, mode, source: "python-copilot" });
             continue;
           } catch (error) {
@@ -170,7 +215,13 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
         }
         await send({ ...ev, stage: STAGE_FOR_DB[String(ev.stage ?? "")] ?? ev.stage, label: ev.label ?? ev.stage });
       }
-      if (sawResult) { await send({ type: "done", status: "draft_ready", publishable: true, note: "Review and publish. Confirmation-gated operations must be explicitly approved.", source: "python-copilot" }); return; }
+      if (sawResult) {
+        // Honest publishable flag: only claim publishable when the last grounded
+        // result had no blocking issues and nothing is waiting on the user.
+        const blocking = lastGrounded?.issues?.length || lastGrounded?.rejected?.length || lastGrounded?.needsConfirmation?.length;
+        await send({ type: "done", status: blocking ? "needs_attention" : "draft_ready", publishable: !blocking, note: blocking ? "Some steps need setup (connection/configuration) before this can publish." : "Review and publish. Confirmation-gated operations must be explicitly approved.", source: "python-copilot" });
+        return;
+      }
     } catch (err) { await send({ type: "reasoning", text: `AI plane failed (${err instanceof Error ? err.message : "error"}); using the Node catalog engine.` }); }
   } else await send({ type: "reasoning", text: ai.hint });
 
@@ -278,7 +329,7 @@ export async function streamCopilotChat(opts: {
         instruction: opts.prompt,
         selected_step_id: opts.selectedStepId,
         catalog: listCatalogApps(),
-      }, opts.orgId);
+      }, opts.orgId, 90000);
       if (refined && typeof refined.summary === "string" && /^Provider error \d+:/.test(refined.summary)) {
         // The Python gateway surfaced a raw provider error (e.g. OpenAI 429
         // "no credits"). Fail over to the Node pattern engine instead of
@@ -303,11 +354,12 @@ export async function streamCopilotChat(opts: {
         await send({ type: "agent_activity", kind: "done", label: "AI agent processed request" });
         if (result.graph?.nodes?.length) {
           await sendOperationCard(send, result.graph, changed ? "Workflow updated" : "Workflow planned");
+          await sendFieldMappings(send, result.graph);
         }
         const replyText = refined.summary ?? (changed ? "I updated the workflow draft." : "I prepared a plan for the requested change.");
         await send({ type: "agent_state", state: "completed", title: "Done" });
         await send({ type: "agent_activity", kind: "done", label: "Response ready" });
-        await send({ type: "chat_result", reply: replyText, graph: result.graph, sessionId: opts.sessionId, applied: !needsApproval && changed, source: "python-copilot", needs_input: refined.needs_input, issues: refined.issues });
+        await send({ type: "chat_result", reply: replyText, graph: result.graph, sessionId: opts.sessionId, applied: !needsApproval && changed, needs_confirmation: needsApproval ? result.needsConfirmation : [], source: "python-copilot", needs_input: refined.needs_input, issues: refined.issues });
         await send({ type: "done", status: "chat_complete", source: "python-copilot" });
         const now = new Date().toISOString();
         await appendChatTurn(opts.sessionId, opts.orgId, { role: "user", content: opts.prompt, ts: now });
@@ -437,6 +489,7 @@ export async function streamCopilotChat(opts: {
     if (result.graph?.nodes?.length) {
       await send({ type: "agent_activity", kind: "done", label: "Workflow ready" });
       await sendOperationCard(send, result.graph, result.applied ? "Workflow updated" : "Workflow planned");
+      await sendFieldMappings(send, result.graph);
     }
 
     // Emit agent completion and final result
@@ -484,7 +537,7 @@ export async function refineCopilotSession(opts: { sessionId: string; orgId: str
   const graph = opts.graph ? coerceWorkflowGraph(opts.graph) : session?.proposed_definition ? loadBuilderGraph(session.proposed_definition) : undefined;
   const ai = await probeAiService();
   if (ai.reachable && graph) {
-    const refined = await signedAiJson<{ applied?: boolean; definition?: unknown; summary?: string; operations?: AgentOperation[]; needs_input?: string[]; issues?: Array<Record<string, unknown>>; publishable?: boolean }>("/copilot/refine", { definition: persistBuilderDraft(graph), instruction: opts.prompt, selected_step_id: opts.selectedStepId, catalog: listCatalogApps() }, opts.orgId);
+    const refined = await signedAiJson<{ applied?: boolean; definition?: unknown; summary?: string; operations?: AgentOperation[]; needs_input?: string[]; issues?: Array<Record<string, unknown>>; publishable?: boolean }>("/copilot/refine", { definition: persistBuilderDraft(graph), instruction: opts.prompt, selected_step_id: opts.selectedStepId, catalog: listCatalogApps() }, opts.orgId, 90000);
     const providerLeak = refined != null && typeof refined.summary === "string" && /^Provider error \d+:/.test(refined.summary);
     if (refined && !providerLeak) {
       const operations = refined.operations ?? [];

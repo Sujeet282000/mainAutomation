@@ -1,3 +1,5 @@
+import { classifyHttpFailure } from "../retry-policy";
+
 const BLOCKED_HOSTS = new Set(["localhost", "metadata.google.internal", "169.254.169.254"]);
 
 function isPrivateIp(hostname: string) {
@@ -89,7 +91,16 @@ export async function requireOk(res: Response, label: string) {
     /* raw */
   }
   if (!res.ok) {
-    throw new Error(`${label} failed (${res.status}): ${typeof body === "string" ? body : JSON.stringify(body)}`);
+    // Attach HTTP-aware retry semantics: 429/5xx are retryable (with
+    // Retry-After), 401/403/404 are not — the runtime gates retries on this.
+    const decision = classifyHttpFailure(res.status, res.headers.get("retry-after"));
+    const err = new Error(
+      `${label} failed (${res.status}): ${typeof body === "string" ? body : JSON.stringify(body)}`
+    ) as Error & { retryable?: boolean; code?: string; retryAfterMs?: number };
+    err.retryable = decision.retryable;
+    err.code = decision.code;
+    if (decision.retryAfterMs !== undefined) err.retryAfterMs = decision.retryAfterMs;
+    throw err;
   }
   return body as Record<string, unknown>;
 }

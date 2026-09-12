@@ -1,4 +1,5 @@
 import { getApp } from "./catalog/catalog";
+import { classifyHttpFailure } from "./retry-policy";
 
 export class StepError extends Error {
   retryable: boolean;
@@ -18,8 +19,22 @@ export function isAuthError(err: unknown) {
   );
 }
 
+/**
+ * Retry gate used by the legacy engine and queue re-enqueues.
+ * Priority: explicit error semantics (StepError / requireOk classification)
+ * beat message sniffing, so a 429 is retryable even though the message
+ * contains a status code, and an adapter-marked non-retryable error stays
+ * non-retryable.
+ */
 export function isNonRetryableError(err: unknown) {
   if (err instanceof StepError && !err.retryable) return true;
+  if (err && typeof err === "object" && "retryable" in err && typeof (err as { retryable?: unknown }).retryable === "boolean") {
+    return !(err as { retryable: boolean }).retryable;
+  }
+  // HTTP-status aware classification from the message (e.g. "failed (429): ...")
+  const message = err instanceof Error ? err.message : String(err);
+  const statusMatch = message.match(/\((\d{3})\)/);
+  if (statusMatch) return !classifyHttpFailure(Number(statusMatch[1])).retryable;
   return isAuthError(err);
 }
 

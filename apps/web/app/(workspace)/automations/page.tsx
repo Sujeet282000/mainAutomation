@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LayoutGrid, List, MoreHorizontal, Plus, Search, Workflow } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, API_URL } from "@/lib/api";
 import { summarizeGraph, type GraphPayload } from "@/lib/graph";
 import { AppIcon } from "@/components/app-icon";
 import { Button } from "@/components/ui/button";
@@ -98,6 +98,32 @@ export default function AutomationsPage() {
         description="Build workflows that connect apps. Each workflow is one trigger plus one or more actions."
         actions={
           <div className="flex gap-2">
+            <label className="cursor-pointer">
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  try {
+                    const text = await file.text();
+                    const parsed = JSON.parse(text) as { workflow?: { name?: string }; name?: string };
+                    const res = await api<{ automation: { id: string } }>("/automations/import", {
+                      method: "POST",
+                      body: JSON.stringify(parsed),
+                    });
+                    toast.success("Workflow imported");
+                    qc.invalidateQueries({ queryKey: ["automations"] });
+                    router.push(`/automations/${res.automation.id}/editor`);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Import failed — invalid bundle");
+                  }
+                }}
+              />
+              <Button variant="secondary">Import</Button>
+            </label>
             <Link href="/templates">
               <Button variant="secondary">Explore templates</Button>
             </Link>
@@ -112,7 +138,7 @@ export default function AutomationsPage() {
       {list.isLoading ? (
         <SkeletonStatGrid count={3} />
       ) : (
-        <div className="mb-5 grid gap-3 sm:grid-cols-3">
+        <div className="ws-stagger mb-5 grid gap-3 sm:grid-cols-3">
           <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">All workflows</p><p className="mt-1 text-2xl font-semibold">{list.data?.automations.length ?? 0}</p></div>
           <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Live</p><p className="mt-1 text-2xl font-semibold text-ok">{(list.data?.automations ?? []).filter((a) => a.status === "on").length}</p></div>
           <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Drafts to finish</p><p className="mt-1 text-2xl font-semibold text-violet-700">{(list.data?.automations ?? []).filter((a) => a.status === "draft").length}</p></div>
@@ -158,19 +184,22 @@ export default function AutomationsPage() {
       )}
 
       {view === "cards" ? (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="ws-stagger grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {items.map((a) => {
             const sum = summarizeGraph(a.graph);
             return (
-              <div key={a.id} className="rounded-2xl border border-line bg-elevated p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-violet-300 hover:shadow-card">
+              <div key={a.id} className="ws-lift group rounded-2xl border border-line bg-elevated p-4 shadow-sm">
                 <div className="flex items-start gap-3">
                   <Link href={`/automations/${a.id}/editor`} className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2"><h3 className="truncate font-semibold">{a.name}</h3><StatusBadge status={a.status === "on" ? "on" : a.status === "off" ? "off" : "draft"} /></div>
-                    <div className="mt-3 flex items-center gap-2 text-xs text-ink-muted"><span className="flex -space-x-1">{sum.apps.slice(0, 4).map((slug) => <AppIcon key={slug} slug={slug} size="sm" className="ring-2 ring-elevated" />)}</span><span className="truncate">{sum.path || "Open editor"}</span></div>
+                    <div className="flex items-center gap-2"><h3 className="truncate font-semibold transition-colors group-hover:text-violet-600">{a.name}</h3><StatusBadge status={a.status === "on" ? "on" : a.status === "off" ? "off" : "draft"} /></div>
+                    <div className="mt-3 flex items-center gap-2 text-xs text-ink-muted"><span className="flex -space-x-1 transition-transform duration-200 group-hover:scale-105">{sum.apps.slice(0, 4).map((slug) => <AppIcon key={slug} slug={slug} size="sm" className="ring-2 ring-elevated" />)}</span><span className="truncate">{sum.path || "Open editor"}</span></div>
                   </Link>
                   <WorkflowActions automation={a} menu={menu} setMenu={setMenu} action={action} onDelete={() => setPendingDelete(a)} />
                 </div>
-                <div className="mt-4 border-t border-line pt-3 text-xs text-ink-muted">Updated {a.updated_at ? new Date(a.updated_at).toLocaleDateString() : "recently"}</div>
+                <div className="mt-4 flex items-center justify-between border-t border-line pt-3 text-xs text-ink-muted">
+                  <span>Updated {a.updated_at ? new Date(a.updated_at).toLocaleDateString() : "recently"}</span>
+                  <span className="font-medium text-teal opacity-0 transition-opacity group-hover:opacity-100">Open editor →</span>
+                </div>
               </div>
             );
           })}
@@ -250,6 +279,12 @@ function WorkflowActions({
           >
             Duplicate
           </button>
+          <a
+            className="block rounded-lg px-3 py-2 text-sm hover:bg-muted"
+            href={`${API_URL}/automations/${automation.id}/export`}
+          >
+            Export
+          </a>
           <button
             className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-muted"
             disabled={action.isPending}

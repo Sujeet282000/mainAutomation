@@ -1,10 +1,12 @@
-﻿"use client";
+"use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Calendar, CheckCircle2, FileSpreadsheet, Mail, MessageSquare, Sparkles, Webhook, WandSparkles, Zap } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { generateCopilotDraft, persistCopilotSession } from "@/lib/copilot";
+import { persistCopilotSession, planCopilotWorkflow, type CopilotPlanResult } from "@/lib/copilot";
+import { PlanReviewModal } from "@/features/workflow-builder/plan-review-modal";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 
@@ -17,22 +19,82 @@ const examples = [
   { label: "WhatsApp notification", description: "Notify customers when an event happens", icon: MessageSquare, prompt: "When a qualifying event happens, send a WhatsApp notification to the customer." },
 ];
 
+// Single canonical Copilot flow (same backend as Dashboard and the editor):
+//   plan → review → approve → create. The /ai page is a client of the same
+//   Copilot service — no separate auto_build shortcut.
 export default function AiPage() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [msg, setMsg] = useState("");
   const [building, setBuilding] = useState(false);
-  const build = async (value = prompt) => {
-    if (!value.trim() || building) return;
-    setPrompt(value); setMsg(""); setBuilding(true);
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [planData, setPlanData] = useState<CopilotPlanResult | null>(null);
+  const activeRequestRef = useRef(0);
+
+  /** Step 1: analyze the request and show the plan for review. */
+  async function analyzeRequest(value = prompt) {
+    const next = value.trim();
+    if (!next || planLoading || building) return;
+    setPrompt(next);
+    setMsg("");
+    const thisRequest = ++activeRequestRef.current;
+    setPlanOpen(true);
+    setPlanLoading(true);
+    setPlanError(null);
+    setPlanData(null);
     try {
-      const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 45000);
-      const d = await generateCopilotDraft({ prompt: value, mode: "auto_build" }, undefined, controller.signal); clearTimeout(timeout);
-      const created = await api<{ automation: { id: string } }>("/automations", { method: "POST", body: JSON.stringify({ name: value.slice(0, 60) || "Copilot draft", graph: d.graph, origin: "copilot" }) });
-      persistCopilotSession(d.sessionId, created.automation.id).catch(() => undefined);
-      router.push(`/automations/${created.automation.id}/editor?idea=${encodeURIComponent(value)}`);
-    } catch (err) { setMsg(err instanceof DOMException && err.name === "AbortError" ? "Copilot took too long. Check your workflows before trying again." : err instanceof Error ? err.message : "Copilot unavailable"); } finally { setBuilding(false); }
-  };
+      const result = await planCopilotWorkflow({ prompt: next, requestId: `req_${thisRequest}_${Date.now()}` });
+      if (thisRequest === activeRequestRef.current) {
+        setPlanData(result);
+        toast.success("Analysis complete", { description: `Found ${result.preview?.steps?.length ?? 0} steps for your workflow` });
+      }
+    } catch (err) {
+      if (thisRequest === activeRequestRef.current) {
+        const errMsg = err instanceof Error ? err.message : "Could not analyze your request";
+        setPlanError(errMsg);
+      }
+    } finally {
+      if (thisRequest === activeRequestRef.current) setPlanLoading(false);
+    }
+  }
+
+  /** Step 2: build the workflow from the reviewed plan. */
+  async function buildFromPlan(text = prompt) {
+    const next = text.trim() || prompt.trim();
+    if (!next || building) return;
+    setBuilding(true);
+    setPlanOpen(false);
+    setMsg("");
+    try {
+      if (planData?.sessionId && planData?.graph) {
+        // Use the analyzed plan's graph — the full pipeline already ran.
+        const created = await api<{ automation: { id: string } }>("/automations", {
+          method: "POST",
+          body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft", graph: planData.graph, origin: "copilot" }),
+        });
+        const flowId = created.automation.id;
+        try {
+          await api<{ ok: boolean; graph?: unknown }>(`/copilot/sessions/${planData.sessionId}/approve`, {
+            method: "POST",
+            body: JSON.stringify({ flowId }),
+          });
+          persistCopilotSession(planData.sessionId, flowId).catch(() => undefined);
+        } catch { /* approval is best-effort */ }
+        toast.success("Workflow created!", { description: `${next.slice(0, 40)}… is ready in the editor` });
+        router.push(`/automations/${flowId}/editor?idea=${encodeURIComponent(next)}`);
+        return;
+      }
+      // No reviewed plan → refuse to auto-build. One Copilot flow: plan → review → create.
+      setMsg("No reviewed plan to build from. Please analyze your request first.");
+    } catch (err) {
+      setMsg(err instanceof DOMException && err.name === "AbortError" ? "Copilot took too long. Check your workflows before trying again." : err instanceof Error ? err.message : "Copilot unavailable");
+    } finally {
+      setBuilding(false);
+    }
+  }
+
   return <div className="mx-auto max-w-5xl pb-10">
     <PageHeader title="Copilot" description="Turn a plain-language goal into a workflow draft, then review it before anything runs." />
     <section className="relative mt-4 overflow-hidden rounded-3xl border border-line bg-elevated p-6 shadow-sm sm:p-8">
@@ -42,21 +104,22 @@ export default function AiPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-ink sm:text-4xl">What would you like to automate?</h1>
         <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted">Tell Copilot the outcome you want. It will turn your idea into a real workflow with triggers, actions, and mappings.</p>
       </div>
-      <form className="relative mt-7 rounded-2xl border border-line bg-muted/30 p-3 shadow-xl shadow-violet-500/5 transition-colors focus-within:border-violet-400 focus-within:bg-elevated" onSubmit={(e) => { e.preventDefault(); void build(); }}>
+      <form className="relative mt-7 rounded-2xl border border-line bg-muted/30 p-3 shadow-xl shadow-violet-500/5 transition-colors focus-within:border-violet-400 focus-within:bg-elevated" onSubmit={(e) => { e.preventDefault(); void analyzeRequest(); }}>
         <textarea className="min-h-[112px] w-full resize-y border-0 bg-transparent p-2 text-base text-ink outline-none placeholder:text-ink-muted/60" placeholder="Tell Copilot what result you want… e.g. “When I receive a new lead, qualify it with AI and notify sales.”" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-2 pt-3"><div className="flex items-center gap-2 text-xs text-ink-muted"><Zap className="h-3.5 w-3.5 text-violet-600" /> You review the draft before it runs.</div><Button type="submit" disabled={!prompt.trim() || building} className="bg-violet-600 text-white hover:bg-violet-700">{building ? <><Sparkles className="mr-1.5 h-3.5 w-3.5 animate-pulse" /> Building…</> : <>Build workflow <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></>}</Button></div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-2 pt-3"><div className="flex items-center gap-2 text-xs text-ink-muted"><Zap className="h-3.5 w-3.5 text-violet-600" /> You review the plan before anything is built.</div><Button type="submit" disabled={!prompt.trim() || planLoading || building} className="bg-violet-600 text-white hover:bg-violet-700">{planLoading || building ? <><Sparkles className="mr-1.5 h-3.5 w-3.5 animate-pulse" /> Analyzing…</> : <>Plan workflow <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></>}</Button></div>
       </form>
-      {building && <div className="relative mt-3 flex items-center gap-3 rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-3 text-xs text-violet-700 dark:text-violet-300"><span className="relative flex h-5 w-5 items-center justify-center"><span className="absolute h-5 w-5 animate-ping rounded-full bg-violet-400/30" /><Sparkles className="relative h-3.5 w-3.5" /></span><div><p className="font-semibold">Copilot is building your draft</p><p className="text-violet-700/70 dark:text-violet-300/70">Mapping apps, events, and fields…</p></div></div>}
+      {(planLoading || building) && <div className="relative mt-3 flex items-center gap-3 rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-3 text-xs text-violet-700 dark:text-violet-300"><span className="relative flex h-5 w-5 items-center justify-center"><span className="absolute h-5 w-5 animate-ping rounded-full bg-violet-400/30" /><Sparkles className="relative h-3.5 w-3.5" /></span><div><p className="font-semibold">{building ? "Copilot is building your draft" : "Copilot is analyzing your request"}</p><p className="text-violet-700/70 dark:text-violet-300/70">{building ? "Mapping apps, events, and fields…" : "Mapping apps, events, and connections…"}</p></div></div>}
       {msg && <p className="relative mt-3 text-sm text-danger">{msg}</p>}
     </section>
     <section className="mt-8 rounded-3xl border border-line bg-elevated p-5 sm:p-6">
       <div className="flex items-end justify-between gap-3"><div><div className="flex items-center gap-2"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-500/10 text-violet-600"><Sparkles className="h-4 w-4" /></span><h2 className="text-base font-semibold text-ink">Need a starting point?</h2></div><p className="mt-1 text-xs text-ink-muted">Pick a popular automation, then customize the idea in your own words.</p></div><span className="rounded-full bg-muted px-2.5 py-1 text-[10px] font-medium text-ink-muted">6 popular ideas</span></div>
       <div className="mt-5 grid gap-3 md:grid-cols-2">
-        {examples.map(({ label, description, icon: Icon, prompt: examplePrompt }) => <button key={label} type="button" disabled={building} onClick={() => { setPrompt(examplePrompt); void build(examplePrompt); }} className="group relative overflow-hidden rounded-2xl border border-line bg-muted/20 p-4 text-left transition-all duration-200 hover:-translate-y-1 hover:border-violet-400/60 hover:bg-violet-500/[0.06] hover:shadow-lg hover:shadow-violet-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:pointer-events-none disabled:opacity-60"><div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-line bg-elevated text-violet-600 shadow-sm transition-all group-hover:scale-105 group-hover:border-violet-400/50 group-hover:bg-violet-600 group-hover:text-white"><Icon className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-ink transition-colors group-hover:text-violet-700 dark:group-hover:text-violet-300">{label}</span><span className="mt-1 block text-xs leading-relaxed text-ink-muted">{description}</span></span><ArrowRight className="mt-1 h-4 w-4 shrink-0 text-ink-muted transition-all group-hover:translate-x-1 group-hover:text-violet-500" /></div></button>)}
+        {examples.map(({ label, description, icon: Icon, prompt: examplePrompt }) => <button key={label} type="button" disabled={planLoading || building} onClick={() => { setPrompt(examplePrompt); void analyzeRequest(examplePrompt); }} className="group relative overflow-hidden rounded-2xl border border-line bg-muted/20 p-4 text-left transition-all duration-200 hover:-translate-y-1 hover:border-violet-400/60 hover:bg-violet-500/[0.06] hover:shadow-lg hover:shadow-violet-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:pointer-events-none disabled:opacity-60"><div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-line bg-elevated text-violet-600 shadow-sm transition-all group-hover:scale-105 group-hover:border-violet-400/50 group-hover:bg-violet-600 group-hover:text-white"><Icon className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-ink transition-colors group-hover:text-violet-700 dark:group-hover:text-violet-300">{label}</span><span className="mt-1 block text-xs leading-relaxed text-ink-muted">{description}</span></span><ArrowRight className="mt-1 h-4 w-4 shrink-0 text-ink-muted transition-all group-hover:translate-x-1 group-hover:text-violet-500" /></div></button>)}
       </div>
     </section>
-    <section className="mt-6 grid gap-3 sm:grid-cols-3">
+    <section className="ws-stagger mt-6 grid gap-3 sm:grid-cols-3">
       {[{ icon: Sparkles, title: "Describe", body: "Start with the result you want. You don't need to know every technical field." }, { icon: CheckCircle2, title: "Review", body: "Check apps, triggers, actions, fields, and connections before building." }, { icon: WandSparkles, title: "Test", body: "Run a sample and verify the workflow before you put it live." }].map(({ icon: Icon, title, body }) => <div key={title} className="rounded-2xl border border-line bg-elevated p-4 transition-colors hover:border-violet-400/40 hover:bg-violet-500/[0.03]"><Icon className="h-4 w-4 text-violet-600" /><p className="mt-3 text-sm font-semibold text-ink">{title}</p><p className="mt-1 text-xs leading-relaxed text-ink-muted">{body}</p></div>)}
     </section>
+    <PlanReviewModal open={planOpen} plan={planData} loading={planLoading} error={planError} onConfirm={() => void buildFromPlan()} onCancel={() => { setPlanOpen(false); }} onEdit={() => { setPlanOpen(false); }} />
   </div>;
 }

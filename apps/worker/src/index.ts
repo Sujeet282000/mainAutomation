@@ -19,6 +19,12 @@ const executor = new Executor(engineDb, { flowStep: transitionQueue }, new Map([
 const flowWorker = new Worker(
   "flow-steps",
   async (job) => {
+    // Delayed resume jobs re-activate the paused run at its stored cursor;
+    // normal transition jobs continue an already-running run.
+    if (job.data.kind === "resume") {
+      await executor.resume(String(job.data.runId));
+      return;
+    }
     await executor.transition(
       String(job.data.runId),
       Number(job.data.cursor ?? 0),

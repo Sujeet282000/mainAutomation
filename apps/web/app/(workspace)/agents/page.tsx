@@ -24,7 +24,7 @@ const STATUS_CONFIG: Record<string, { color: string; bg: string; label: string }
 function AgentCard({ agent, onOpen, onDelete }: { agent: Agent; onOpen: () => void; onDelete: () => void }) {
   const st = STATUS_CONFIG[agent.status] ?? STATUS_CONFIG.draft;
   return (
-    <Card className="group cursor-pointer transition-all hover:shadow-md hover:border-violet-400/40" onClick={onOpen}>
+    <Card interactive className="group hover:border-violet-400/40" onClick={onOpen}>
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-blue-500">
@@ -149,7 +149,7 @@ export default function AgentsPage() {
         </Card>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {(q.data?.agents ?? []).map((a) => (
           <AgentCard key={a.id} agent={a} onOpen={() => setOpen(a)} onDelete={async () => {
             if (confirm(`Delete "${a.name}"?`)) { await api(`/agents/${a.id}`, { method: "DELETE" }); qc.invalidateQueries({ queryKey: ["agents"] }); }

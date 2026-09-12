@@ -1,4 +1,4 @@
-import { normalizeWorkflowGraph, type WorkflowGraph, type GraphNode } from "@algoverge/shared";
+import { normalizeWorkflowGraph, parseErrorPolicy, type WorkflowGraph, type GraphNode } from "@algoverge/shared";
 import { resolveValue } from "@algoverge/core";
 import { runAdapter } from "./adapters";
 import { getApp } from "./catalog/catalog";
@@ -210,6 +210,58 @@ async function maybeAutoPause(automationId: string, workspaceId: string) {
   return true;
 }
 
+/** Max subflow nesting depth — prevents recursive/cyclic workflow calls. */
+const SUBFLOW_MAX_DEPTH = 5;
+
+/**
+ * Run a subflow synchronously: create the child execution, execute it inline
+ * via runExecution, and return its id. Recursion is bounded by walking the
+ * parent chain (trigger context parentExecutionId) up to SUBFLOW_MAX_DEPTH.
+ * Workspace scope is enforced — the child must live in the same workspace.
+ */
+async function runSubflow(opts: {
+  parentExecutionId: string;
+  automationId: string;
+  workspaceId: string;
+  payload: Record<string, unknown>;
+  config: Record<string, unknown>;
+}): Promise<string> {
+  // Recursion protection: count ancestors by following parentExecutionId links.
+  type SubflowParentRow = { context: { trigger?: { parentExecutionId?: string } } };
+  let depth = 0;
+  let cursor: string | null = opts.parentExecutionId;
+  while (cursor && depth <= SUBFLOW_MAX_DEPTH) {
+    const parentRow: SubflowParentRow | null = await queryOne<SubflowParentRow>(
+      `select context from executions where id=$1`,
+      [cursor]
+    );
+    if (!parentRow) break;
+    depth += 1;
+    cursor = parentRow.context?.trigger?.parentExecutionId ?? null;
+  }
+  if (depth > SUBFLOW_MAX_DEPTH) {
+    throw new StepError(
+      `Subflow nesting exceeds the maximum depth of ${SUBFLOW_MAX_DEPTH} — possible recursive call.`,
+      { retryable: false, code: "subflow_depth_exceeded" }
+    );
+  }
+
+  const child = await createExecution({
+    automationId: opts.automationId,
+    triggerType: "subflow",
+    triggerData: {
+      ...opts.payload,
+      parentExecutionId: opts.parentExecutionId,
+      subflowDepth: depth,
+    },
+    enqueue: false,
+  });
+  // Execute inline — the caller (worker or API test path) is already inside a
+  // run context, so we reuse it rather than re-enqueueing.
+  await runExecution(child.id);
+  return child.id;
+}
+
 async function walk(
   graph: WorkflowGraph,
   node: GraphNode,
@@ -264,6 +316,14 @@ async function walk(
     }
     const auth = await loadAuth(node.connectionId, workspaceId);
     const input = isTrigger ? { ...resolved, ...ctx.trigger } : resolved;
+    // Fan-in nodes (aggregator) receive the live graph + step outputs so they
+    // can merge their incoming branches. Underscore-prefixed keys are engine
+    // context, never part of the user-visible config.
+    if (node.appSlug === "aggregator") {
+      input.__graph = { nodes: graph.nodes.map((n) => ({ id: n.id })), edges: graph.edges.map((e) => ({ source: e.source, target: e.target })) };
+      input.__nodeId = node.id;
+      input.__steps = ctx.steps;
+    }
     const result = await runAdapter({
       appSlug: node.appSlug,
       operation: node.operation,
@@ -349,11 +409,23 @@ async function walk(
       return "ok";
     }
     if (node.appSlug === "subflow" && resolved.automationId) {
-      await createExecution({
+      const childId = await runSubflow({
+        parentExecutionId: executionId,
         automationId: String(resolved.automationId),
-        triggerType: "subflow",
-        triggerData: (resolved.payload as Record<string, unknown>) ?? { parentExecutionId: executionId }
+        workspaceId,
+        payload: (resolved.payload as Record<string, unknown>) ?? {},
+        config: resolved as Record<string, unknown>,
       });
+      const childOutcome = await queryOne<{ status: string; context: { steps?: Record<string, Record<string, unknown>> } }>(
+        `select status, context from executions where id=$1`,
+        [childId]
+      );
+      if (childOutcome?.status === "failed") {
+        throw new StepError(`Subflow ${childId} failed`, { retryable: false, code: "subflow_failed" });
+      }
+      // Propagate the child's final step outputs so downstream steps can map
+      // {{steps.<childNodeId>...}} from the subflow's return values.
+      ctx.steps[node.id] = { subflowExecutionId: childId, status: childOutcome?.status ?? "unknown", output: childOutcome?.context?.steps ?? {} };
     }
     const nexts = children(graph, node.id);
     for (const n of nexts) {
@@ -375,6 +447,39 @@ async function walk(
        where id=$1 and status='running'`,
       [stepRow!.id, JSON.stringify({ message }), Date.now() - started]
     );
+
+    // Per-step error-handling policy (P1): the step config can opt out of the
+    // default fail-fast behavior. Auth failures always stop — a broken
+    // connection cannot be papered over with a fallback value.
+    const policy = parseErrorPolicy((node.config ?? {}).onError) ?? "stop";
+    if (!isAuthError(err) && policy !== "stop") {
+      const fallbackValue =
+        policy === "fallback"
+          ? resolveValue((node.config ?? {}).fallbackValue, {
+              trigger: ctx.trigger,
+              steps: ctx.steps,
+              vars: ctx.vars,
+              item: ctx.item
+            })
+          : { error: message };
+      ctx.steps[node.id] =
+        policy === "fallback" && typeof fallbackValue === "object" && fallbackValue !== null
+          ? (fallbackValue as Record<string, unknown>)
+          : { error: message };
+      await query(`insert into execution_logs (execution_id, step_id, level, message, data) values ($1,$2,'warn',$3,$4)`, [
+        executionId,
+        node.id,
+        `${node.label} failed but the run continues (onError: ${policy})`,
+        JSON.stringify({ message, policy })
+      ]);
+      const nexts = children(graph, node.id);
+      for (const n of nexts) {
+        const r = await walk(graph, n, ctx, executionId, workspaceId, organizationId, automationId, triggerType, false);
+        if (r === "wait" || r === "skip") return r;
+      }
+      return "ok";
+    }
+
     if (isAuthError(err)) {
       throw new StepError(message, { retryable: false, code: "auth" });
     }

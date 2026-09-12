@@ -45,7 +45,7 @@ import { normalizeGraph } from "@/lib/normalize-graph";
 import { AppPickerModal, type PickerTab } from "./app-picker-modal";
 import { canvasNodeTypes } from "./canvas-node-types";
 import { CopilotPanel, CopilotReasoning } from "./copilot-panel";
-import type { CopilotMode } from "./copilot-types";
+import type { CopilotMode, CopilotUIAction } from "./copilot-types";
 import { ConnectAccountModal } from "@/features/connections/connect-account-modal";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CopilotSuggestionsCard } from "./copilot-suggestions";
@@ -971,6 +971,86 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     setInjectPrompt(prompt);
   }
 
+  /** After the Copilot applies a graph, focus the first step that still needs
+   *  setup (app/action/connection) so the user lands on the next actionable item. */
+  function focusFirstUnconfiguredStep(nextNodes?: Node<StepData>[]) {
+    const unconfigured = (nextNodes ?? nodes).find((n) => {
+      if (!n.data.appSlug || !n.data.operation) return true;
+      const app = apps.find((a) => a.slug === n.data.appSlug);
+      if (app && needsConnection(app) && !n.data.connectionId) return true;
+      return false;
+    });
+    if (unconfigured) {
+      setSelected(unconfigured.id);
+      setInspectorTab("setup");
+    }
+  }
+
+  /** Execute a typed Copilot action directly on the builder — the Copilot can
+   *  drive real builder actions (select/configure/test steps, open the account
+   *  modal, add steps) instead of only suggesting chat prompts. */
+  function handleCopilotUiAction(action: CopilotUIAction) {
+    const stepId = action.stepId;
+    const nodeById = stepId ? nodes.find((n) => n.id === stepId) : undefined;
+    const nodeByIndex = stepId && /^\d+$/.test(stepId)
+      ? nodes[Number(stepId) - 1]
+      : undefined;
+    const node = nodeById ?? nodeByIndex;
+    switch (action.type) {
+      case "select_step": {
+        const target = node ?? (stepId ? undefined : selected);
+        if (target) {
+          setSelected(target.id);
+          const app = apps.find((a) => a.slug === target.data.appSlug);
+          const op = app?.operations.find((o) => opKey(o) === target.data.operation);
+          if (!setupComplete(target.data, app)) setInspectorTab("setup");
+          else if (!configureComplete(target.data, op)) setInspectorTab("configure");
+          else setInspectorTab("test");
+        }
+        break;
+      }
+      case "test_step": {
+        if (node) {
+          setSelected(node.id);
+          void testStep(node);
+        }
+        break;
+      }
+      case "test_workflow":
+        void testWorkflow();
+        break;
+      case "add_step":
+        openPicker("action", node?.id, undefined);
+        break;
+      case "remove_step":
+        if (node) removeNode(node.id);
+        break;
+      case "connect_account": {
+        if (node && node.data.appSlug) {
+          setSelected(node.id);
+          setConnectReplaceId(node.data.connectionId ?? null);
+          setConnectOpen(true);
+        } else if (selected?.data.appSlug) {
+          setConnectReplaceId(selected.data.connectionId ?? null);
+          setConnectOpen(true);
+        }
+        break;
+      }
+      case "choose_app":
+      case "choose_action":
+        if (node) {
+          setSelected(node.id);
+          openPicker(node.data.kind === "trigger" ? "trigger" : "action", node.id);
+        }
+        break;
+      default:
+        if (action.prompt) {
+          setCopilotOpen(true);
+          setInjectPrompt(action.prompt);
+        }
+    }
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-elevated px-3 shadow-sm">
@@ -1085,6 +1165,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                   const g = fromApi(result.graph);
                   hydrate(g.nodes, g.edges);
                   setGraph(g.nodes, g.edges);
+                  focusFirstUnconfiguredStep(g.nodes);
                   setMsg("Copilot changes validated and applied to the draft. Test before publishing.");
                   return;
                 }
@@ -1096,8 +1177,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             const g = fromApi(graph as GraphPayload);
             hydrate(g.nodes, g.edges);
             setGraph(g.nodes, g.edges);
+            focusFirstUnconfiguredStep(g.nodes);
             setMsg("Copilot change applied to the draft. Test before publishing.");
           }}
+          onUiAction={handleCopilotUiAction}
           onRevert={() => {
             if (!copilotCheckpoint.current) return;
             const g = fromApi(copilotCheckpoint.current);
@@ -1769,6 +1852,49 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                     {selected.data.kind === "trigger" && webhookPublicId && selected.data.appSlug === "webhook" && (
                       <p className="break-all text-xs text-ink-muted">Catch URL after publish: /api/v1/hooks/{webhookPublicId}</p>
                     )}
+                    {/* Error handling (P1 #12): per-step policy when this step fails at runtime */}
+                    {selected.data.kind !== "trigger" && (
+                      <div className="mb-3 rounded-lg border border-line p-2">
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">On error</div>
+                        <div className="flex gap-1">
+                          {([
+                            ["stop", "Stop run"],
+                            ["continue", "Continue"],
+                            ["fallback", "Use fallback"]
+                          ] as const).map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              className={cn(
+                                "flex-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition",
+                                String(selected.data.config.onError ?? "stop") === value
+                                  ? "bg-violet-600 text-white"
+                                  : "bg-muted text-ink-muted hover:text-ink"
+                              )}
+                              onClick={() => {
+                                const config = { ...selected.data.config };
+                                if (value === "stop") delete config.onError;
+                                else config.onError = value;
+                                updateNode(selected.id, { config });
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        {String(selected.data.config.onError ?? "stop") === "fallback" && (
+                          <Input
+                            className="mt-2"
+                            placeholder="Fallback value (text or JSON)"
+                            value={String(selected.data.config.fallbackValue ?? "")}
+                            onChange={(e) => updateNode(selected.id, { config: { ...selected.data.config, fallbackValue: e.target.value } })}
+                          />
+                        )}
+                        <p className="mt-1.5 text-[10px] text-ink-muted">
+                          Continue/fallback keep the run alive when this step fails. Connection errors always stop the run.
+                        </p>
+                      </div>
+                    )}
                   </>
                 )}
                 {inspectorTab === "test" && (
@@ -2020,8 +2146,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 const g = fromApi(graph as GraphPayload);
                 hydrate(g.nodes, g.edges);
                 setGraph(g.nodes, g.edges);
+                focusFirstUnconfiguredStep(g.nodes);
                 setMsg("Copilot change applied to the draft. Test before publishing.");
               }}
+              onUiAction={handleCopilotUiAction}
               onRevert={() => {
                 if (!copilotCheckpoint.current) return;
                 const g = fromApi(copilotCheckpoint.current);

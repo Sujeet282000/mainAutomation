@@ -1,9 +1,11 @@
-import { coerceWorkflowGraph, definitionHash, graphToFlowDefinition } from "@algoverge/core";
+import { coerceWorkflowGraph, definitionHash, graphToFlowDefinition, resolveValue } from "@algoverge/core";
+import { parseErrorPolicy } from "@algoverge/shared";
 import type { WorkflowGraph } from "@algoverge/shared";
 import { runAdapter } from "./adapters";
 import { getApp } from "./catalog/catalog";
 import { encryptJson, decryptJson, redact } from "./crypto";
 import { query, queryOne, withTransaction } from "./db";
+import { isAuthError } from "./runtime-guards";
 import { buildTriggerEnvelope } from "./trigger-envelope";
 
 export function persistBuilderDraft(graph: unknown) {
@@ -174,7 +176,7 @@ function children(graph: WorkflowGraph, nodeId: string) {
 
 async function executeNode(opts: {
   node: WorkflowGraph["nodes"][number];
-  ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>> };
+  ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown };
   orgId: string;
   runId: string;
 }) {
@@ -185,7 +187,22 @@ async function executeNode(opts: {
   const app = getApp(node.appSlug);
   const op = app?.operations.find((o) => o.key === node.operation);
   const auth = await loadConnectionSecret(node.connectionId, orgId);
-  const input = { ...(node.config ?? {}) };
+  // Resolve {{...}} mappings the same way the canonical engine does — raw
+  // templates must never reach a provider API (a literal "{{trigger.row[0]}}"
+  // used to be sent to Google Calendar and fail with an opaque 400).
+  const input = resolveValue({ ...(node.config ?? {}) }, {
+    trigger: ctx.trigger ?? {},
+    steps: ctx.steps,
+    vars: ctx.vars ?? {},
+    item: ctx.item,
+  }) as Record<string, unknown>;
+  // Fan-in nodes (aggregator) receive the live graph + step outputs so they
+  // can merge their incoming branches. Underscore-prefixed keys are engine
+  // context, never part of the user-visible config.
+  if (node.appSlug === "aggregator") {
+    input.__nodeId = node.id;
+    input.__steps = ctx.steps;
+  }
   try {
     const result = await runAdapter({
       appSlug: node.appSlug,
@@ -240,6 +257,8 @@ export async function createAndRunFlow(opts: {
   eventId?: string | null;
   idempotencyKey?: string | null;
   receivedAt?: string;
+  /** Replay-from-step: seed these step outputs into context so upstream steps never re-run. */
+  replaySteps?: Record<string, Record<string, unknown>>;
   onStepComplete?: (step: { stepId: string; status: string; output?: unknown; error?: string; durationMs?: number }) => void;
 }) {
   await ensureRunPartition();
@@ -330,7 +349,14 @@ export async function createAndRunFlow(opts: {
     [run.id],
   );
   const runCreatedAt = exact?.created_at ?? String(run.created_at);
-  const ctx = { trigger: triggerEnvelope.payload, steps: {} as Record<string, Record<string, unknown>> };
+  const ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars: Record<string, unknown>; item?: unknown } = { trigger: triggerEnvelope.payload, steps: {}, vars: {} };
+  // Replay-from-step: previously-succeeded step outputs are pre-seeded so the
+  // walk marks them done and only downstream steps actually execute.
+  if (opts.replaySteps) {
+    for (const [stepId, output] of Object.entries(opts.replaySteps)) {
+      ctx.steps[stepId] = output;
+    }
+  }
   const ordered: WorkflowGraph["nodes"] = [];
   const seen = new Set<string>();
   const walk = (node: WorkflowGraph["nodes"][number]) => {
@@ -347,6 +373,26 @@ export async function createAndRunFlow(opts: {
   for (const node of ordered) {
     seq += 1;
     const started = new Date();
+    // Replay-from-step: pre-seeded steps are recorded as succeeded without executing.
+    if (opts.replaySteps && node.id in opts.replaySteps) {
+      const seeded = ctx.steps[node.id];
+      await query(
+        `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, output_json, started_at, finished_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,now(),now())`,
+        [
+          run!.id,
+          runCreatedAt,
+          opts.orgId,
+          node.id,
+          stepTypeOf(node),
+          seq,
+          JSON.stringify(redact(node.config ?? {})),
+          JSON.stringify(seeded),
+        ],
+      );
+      opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: seeded, durationMs: 0 });
+      continue;
+    }
     try {
       const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: run!.id });
       ctx.steps[node.id] = result.output;
@@ -382,18 +428,43 @@ export async function createAndRunFlow(opts: {
         ],
       );
       opts.onStepComplete?.({ stepId: node.id, status: "failed", error: failed, durationMs: Date.now() - started.getTime() });
+      // Per-step error policy — mirrors the canonical engine: a step with
+      // onError continue/fallback records the failure but keeps the run going
+      // (auth failures always stop; a broken connection can't be papered over).
+      const policy = parseErrorPolicy((node.config ?? {}).onError) ?? "stop";
+      if (!isAuthError(err) && policy !== "stop") {
+        const fallbackValue = policy === "fallback"
+          ? resolveValue((node.config ?? {}).fallbackValue, { trigger: ctx.trigger, steps: ctx.steps, vars: ctx.vars ?? {}, item: ctx.item })
+          : { error: failed };
+        ctx.steps[node.id] = typeof fallbackValue === "object" && fallbackValue !== null
+          ? (fallbackValue as Record<string, unknown>)
+          : { error: failed };
+        failed = null; // the run itself is no longer failing
+        continue;
+      }
       break;
     }
   }
 
+  // The run-level error surfaces from the first failed step's error_json
+  // (see mapRunToExecution) — never a generic "Run failed".
+  const finalStatus = failed ? "failed" : "succeeded";
   await query(
     `UPDATE flow_runs SET status = $2, finished_at = now(), context = $3, steps_billable = $4 WHERE id = $1 AND org_id = $5`,
-    [run!.id, failed ? "failed" : "succeeded", JSON.stringify(ctx), Math.max(0, seq - 1), opts.orgId],
+    [run!.id, finalStatus, JSON.stringify(ctx), Math.max(0, seq - 1), opts.orgId],
   );
   return { id: run!.id };
 }
 
 export function mapRunToExecution(row: Record<string, unknown>, steps: Array<Record<string, unknown>> = []) {
+  // Surface the real first-failed-step message on the run — the legacy
+  // generic "Run failed" gave users nothing to act on.
+  const firstFailed = steps.find((s) => s.status === "failed");
+  const runError = typeof firstFailed?.error_json === "object" && firstFailed?.error_json
+    ? firstFailed.error_json
+    : firstFailed?.error_json
+      ? { message: String(firstFailed.error_json) }
+      : { message: "Run failed" };
   return {
     execution: {
       id: row.id,
@@ -403,7 +474,7 @@ export function mapRunToExecution(row: Record<string, unknown>, steps: Array<Rec
       trigger_type: row.trigger_kind,
       created_at: row.created_at,
       finished_at: row.finished_at,
-      error: row.status === "failed" ? { message: "Run failed" } : undefined,
+      error: row.status === "failed" ? runError : undefined,
     },
     steps: steps.map((s) => ({
       id: s.id,

@@ -12,6 +12,7 @@ import { runCopilotEngine } from "./copilot/copilot-engine";
 import { parseCopilotMode } from "./copilot/copilot-pipeline";
 import { diagnoseFromFailure } from "./diagnose";
 import { signedAiJson, probeAiService } from "./ai-service";
+import { requireRole } from "./auth";
 
 function catalogApps() {
   return listCatalogApps();
@@ -371,6 +372,53 @@ export function registerUiCompat(authed: Router) {
     res.json({ execution: { id: exec.id } });
   });
 
+  /**
+   * Replay-from-step (P1 #19): re-run only the failed step and everything
+   * after it. Steps before `fromStepId` are NOT re-executed — their outputs
+   * are copied from the original run into the new run's context, so side
+   * effects (emails sent, rows created) are never duplicated.
+   */
+  authed.post("/executions/:id/replay-from", requireRole("owner", "admin", "editor"), async (req, res) => {
+    const fromStepId = typeof (req.body ?? {}).fromStepId === "string" ? (req.body as { fromStepId: string }).fromStepId : "";
+    if (!fromStepId) return res.status(400).json({ error: "fromStepId_required" });
+
+    const run = await queryOne<{ flow_id: string; context: { trigger?: Record<string, unknown> } }>(
+      `SELECT flow_id, context FROM flow_runs WHERE id = $1 AND org_id = $2`,
+      [req.params.id, req.orgId],
+    );
+    if (!run) return res.status(404).json({ error: "not_found" });
+
+    // Every succeeded step BEFORE the replay point keeps its output.
+    const steps = await query<{ step_id: string; sequence_no: number; output_json: unknown }>(
+      `SELECT step_id, sequence_no, output_json FROM run_steps
+       WHERE run_id = $1 AND org_id = $2 AND status = 'succeeded' ORDER BY sequence_no ASC`,
+      [req.params.id, req.orgId],
+    );
+    const ordered = await query<{ step_id: string; sequence_no: number }>(
+      `SELECT step_id, sequence_no FROM run_steps WHERE run_id = $1 AND org_id = $2 ORDER BY sequence_no ASC`,
+      [req.params.id, req.orgId],
+    );
+    const fromSeq = ordered.find((s) => s.step_id === fromStepId)?.sequence_no;
+    if (!fromSeq) return res.status(400).json({ error: "unknown_step" });
+
+    const replaySteps: Record<string, Record<string, unknown>> = {};
+    for (const s of steps) {
+      if (s.sequence_no < fromSeq && s.output_json && typeof s.output_json === "object") {
+        replaySteps[s.step_id] = s.output_json as Record<string, unknown>;
+      }
+    }
+
+    const exec = await createAndRunFlow({
+      orgId: req.orgId!,
+      flowId: run.flow_id,
+      userId: req.user!.userId,
+      payload: run.context?.trigger,
+      triggerKind: "replay",
+      replaySteps,
+    });
+    res.json({ execution: { id: exec.id }, replayedFromStep: fromStepId, seededSteps: Object.keys(replaySteps).length });
+  });
+
   authed.post("/ai/copilot/generate", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -625,6 +673,10 @@ export function registerUiCompat(authed: Router) {
             })),
           },
           req.orgId!,
+          // LLM planning over the full catalog routinely takes 30-60s.
+          // The previous default (25s) timed out silently and degraded to
+          // the empty local planner — surfacing as "Copilot took too long".
+          90000,
         );
         if (planResult) {
           const rawOps = planResult.operations ?? [];

@@ -177,6 +177,8 @@ export type AppManifest = {
   icon: string;
   color: string;
   authType?: string;
+  /** Upstream vendor budget (P2 #28) — enforced by the rate limiter before adapter calls. */
+  rateLimit?: { maxPerMinute: number; scope: "app" | "connection" };
   operations: AppOperation[];
   [extra: string]: unknown;
 };
@@ -194,6 +196,26 @@ export const EXECUTION_STATUSES = [
 ] as const;
 
 export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
+
+/**
+ * Per-step error-handling policy (P1 #12).
+ *  - stop      (default): fail the run immediately
+ *  - continue  : record the error on the step and keep executing downstream
+ *  - fallback  : emit a configured static value as the step output and continue
+ */
+export const ERROR_POLICIES = ["stop", "continue", "fallback"] as const;
+export type ErrorPolicy = (typeof ERROR_POLICIES)[number];
+
+export function parseErrorPolicy(value: unknown): ErrorPolicy | undefined {
+  return typeof value === "string" && (ERROR_POLICIES as readonly string[]).includes(value)
+    ? (value as ErrorPolicy)
+    : undefined;
+}
+
+export type StepErrorHandling = {
+  onError?: ErrorPolicy;
+  fallbackValue?: unknown;
+};
 
 const PATH_HEAD_ALIASES: Record<string, string> = {
   Trigger: "trigger",

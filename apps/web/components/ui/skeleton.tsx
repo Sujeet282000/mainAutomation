@@ -1,8 +1,8 @@
 import { cn } from "@/lib/utils";
 
-/** Pulse skeleton rectangle — drop-in replacement for loading content blocks */
+/** Shimmer skeleton — a smooth light-sweep, softer than pulse */
 export function Skeleton({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("animate-pulse rounded-xl bg-muted", className)} {...props} />;
+  return <div className={cn("ws-shimmer rounded-xl", className)} {...props} />;
 }
 
 /** Skeleton card that mimics a data card (icon + text + meta) */

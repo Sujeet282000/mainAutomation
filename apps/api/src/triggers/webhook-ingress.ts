@@ -10,15 +10,18 @@
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import { query, queryOne } from "../db";
+import { consumeRateLimit, RATE_LIMITS } from "../rate-limit";
+import { cacheGet, cacheSet } from "../cache";
 
 export const webhookRouter = Router();
 
-// Rate limiting: per-token sliding window (in-memory; use Redis in production)
+// Rate limiting: Redis fixed-window primary, in-process sliding window as
+// fallback when Redis is unreachable (single-replica dev / degraded mode).
 const rateLimit = new Map<string, number[]>();
 const RATE_WINDOW_MS = 60_000;
-const RATE_MAX = 100;
+const RATE_MAX = RATE_LIMITS.webhookPerToken.limit;
 
-function checkRate(token: string): boolean {
+function checkRateMemory(token: string): boolean {
   const now = Date.now();
   const timestamps = rateLimit.get(token) ?? [];
   const recent = timestamps.filter((t) => now - t < RATE_WINDOW_MS);
@@ -28,11 +31,19 @@ function checkRate(token: string): boolean {
   return true;
 }
 
-// Track seen event IDs for dedup (in-memory; use Redis in production)
+async function checkRate(token: string): Promise<boolean> {
+  const result = await consumeRateLimit("ws", `webhook:${token}`, RATE_LIMITS.webhookPerToken.limit, RATE_LIMITS.webhookPerToken.windowSec);
+  // Redis answered (finite remaining ⇒ real answer) — trust it.
+  if (Number.isFinite(result.remaining)) return result.allowed;
+  return checkRateMemory(token);
+}
+
+// Track seen event IDs for dedup — Redis primary (survives restarts and is
+// shared across replicas), in-process TTL map as fallback.
 const seenEvents = new Map<string, number>();
 const SEEN_TTL_MS = 300_000;
 
-function isDuplicate(eventId: string): boolean {
+function isDuplicateMemory(eventId: string): boolean {
   const now = Date.now();
   // Cleanup old entries
   if (seenEvents.size > 10000) {
@@ -44,6 +55,18 @@ function isDuplicate(eventId: string): boolean {
   if (seenEvents.has(eventId)) return true;
   seenEvents.set(eventId, now);
   return false;
+}
+
+async function isDuplicate(eventId: string): Promise<boolean> {
+  const key = `webhook:seen:${eventId}`;
+  const existing = await cacheGet<number>(key);
+  if (existing) return true;
+  // Record the event in Redis (no-op when Redis is down) and in the
+  // in-process fallback map, then let the map decide for this call.
+  // A cross-replica race is resolved by the DB idempotency claim downstream
+  // (trigger_events ON CONFLICT DO NOTHING).
+  await cacheSet(key, Date.now(), Math.ceil(SEEN_TTL_MS / 1000));
+  return isDuplicateMemory(eventId);
 }
 
 // POST /v1/webhooks/inbound/:token
@@ -73,8 +96,8 @@ webhookRouter.post("/v1/webhooks/inbound/:token", async (req: Request, res: Resp
       return res.status(404).json({ error: "webhook_not_found" });
     }
 
-    // 2. Rate limit check
-    if (!checkRate(token)) {
+    // 2. Rate limit check (Redis primary, in-memory fallback)
+    if (!(await checkRate(token))) {
       return res.status(429).json({ error: "rate_limited" });
     }
 
@@ -104,7 +127,7 @@ webhookRouter.post("/v1/webhooks/inbound/:token", async (req: Request, res: Resp
       (req.headers["stripe-signature"] as string) ||
       null;
 
-    if (eventId && isDuplicate(eventId)) {
+    if (eventId && (await isDuplicate(eventId))) {
       // Already processed — return 200 to prevent retries
       return res.status(200).json({ ok: true, deduplicated: true });
     }

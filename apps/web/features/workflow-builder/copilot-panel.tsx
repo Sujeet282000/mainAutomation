@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { FormattedCopilotMessage } from "@/components/copilot/formatted-message";
 import type { CopilotMode, AgentState, AgentActivityItem, AgentActivityKind, CopilotUIAction } from "./copilot-types";
 import { WorkflowPreview, type WorkflowPreviewData } from "./workflow-preview";
 
@@ -443,7 +444,7 @@ function FieldMappingView({ card }: { card: FieldMappingCard }) {
 }
 
 /** Test result card — shows step test output */
-function TestResultView({ card, onSend }: { card: TestResultCard; onSend?: (prompt: string) => void }) {
+function TestResultView({ card, onSend, onUiAction }: { card: TestResultCard; onSend?: (prompt: string) => void; onUiAction?: (action: CopilotUIAction) => void }) {
   return (
     <div className={cn("rounded-xl border p-3 text-xs", card.success ? "border-ok/30 bg-ok/5" : "border-danger/30 bg-danger/5")}>
       <div className="flex items-center gap-2">
@@ -464,7 +465,7 @@ function TestResultView({ card, onSend }: { card: TestResultCard; onSend?: (prom
       {card.actions && card.actions.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {card.actions.map((action, i) => (
-            <button key={i} type="button" className="rounded-full border border-teal/30 bg-teal-soft/20 px-2 py-0.5 text-[10px] font-medium text-teal transition hover:bg-teal-soft/40 active:scale-95" onClick={() => onSend?.(action.prompt)}>
+            <button key={i} type="button" className="rounded-full border border-teal/30 bg-teal-soft/20 px-2 py-0.5 text-[10px] font-medium text-teal transition hover:bg-teal-soft/40 active:scale-95" onClick={() => { if (onUiAction) { const typed: CopilotUIAction = { type: "test_step", label: action.label, prompt: action.prompt, stepId: action.prompt?.match(/step (\S+)/i)?.[1] }; onUiAction(typed); } else { onSend?.(action.prompt); } }}>
               {action.label}
             </button>
           ))}
@@ -569,7 +570,7 @@ function AgentMessage({ text, onSend }: { text: string; onSend?: (prompt: string
   const displayText = textLines.join("\n").trim();
   return (
     <div className="space-y-2">
-      {displayText && (<div className="min-w-0 break-words rounded-2xl rounded-tl-md border border-line bg-muted/40 px-3 py-2.5 text-[13px] leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">{displayText}</div>)}
+      {displayText && (<FormattedCopilotMessage className="min-w-0 break-words rounded-2xl rounded-tl-md border border-line bg-muted/40 px-3 py-2.5 text-[13px] leading-relaxed [overflow-wrap:anywhere]" text={displayText} />)}
       {buttons.length > 0 && onSend && (<div className="flex flex-wrap gap-1.5 pl-1">{buttons.map((btn) => (<button key={btn.label} type="button" className="inline-flex items-center gap-1 rounded-full border border-teal/40 bg-teal-soft/30 px-2.5 py-1 text-[11px] font-medium text-teal transition-all hover:bg-teal-soft/50 active:scale-95" onClick={() => onSend(btn.prompt || btn.label)}>{btn.label}</button>))}</div>)}
     </div>
   );
@@ -721,6 +722,12 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
             if (Array.isArray(cr.warnings)) {
               setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant") return [...m.slice(0, -1), { ...last, warnings: cr.warnings as string[] }]; return m; });
             }
+            // Confirmation-gated operations: stage the proposal so the user can
+            // approve it — the approval goes through the server-authoritative
+            // /copilot/sessions/:id/approve endpoint (never the browser's copy).
+            if (Array.isArray(cr.needs_confirmation) && cr.needs_confirmation.length > 0 && cr.graph) {
+              setProposal(cr.graph); setProposalSessionId(typeof cr.sessionId === "string" ? cr.sessionId : undefined);
+            }
           }
         }, abortCtrl.signal);
         const hasSuggestion = Boolean(result.graph || result.preview);
@@ -735,6 +742,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         }
       } catch (err) { setAgentState("error"); setAgentTitle("Error"); addActivity("error", "Request failed", err instanceof Error ? "Check your AI provider keys and try again" : "Unknown error"); setMsgs((m) => [...m, { role: "assistant", text: err instanceof Error ? friendlyReply(err.message) : "Copilot is unavailable." }]); }
       finally { setSending(false); }
+    } else {
       try {
         const result = await onChat(prompt);
         const hasSuggestion = Boolean(result.graph || result.preview);
@@ -849,7 +857,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
                   {m.fieldMappings && m.fieldMappings.length > 0 && <div className="space-y-2">{m.fieldMappings.map((card, j) => <FieldMappingView key={j} card={card} />)}</div>}
 
                   {/* Test results */}
-                  {m.testResults && m.testResults.length > 0 && <div className="space-y-2">{m.testResults.map((card, j) => <TestResultView key={j} card={card} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}
+                  {m.testResults && m.testResults.length > 0 && <div className="space-y-2">{m.testResults.map((card, j) => <TestResultView key={j} card={card} onSend={(p) => { setInput(p); void send("chat", p); }} onUiAction={onUiAction} />)}</div>}
 
                   {/* Warnings */}
                   {m.warnings && m.warnings.length > 0 && (

@@ -8,6 +8,7 @@ import "./tools";
 import "./typeform";
 import "./hubspot-enhanced";
 import "./github-enhanced";
+import "./mcp-client";
 import { registerCatalogFallbacks } from "./generic";
 import { dispatchAdapter } from "./registry";
 import type { AdapterResult } from "./types";

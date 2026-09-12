@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpDown, Bot, Calculator, Database, Eye, Filter, Grid3X3, Link2, MoreHorizontal, Plus, Search, Settings2, Trash2, Zap } from "lucide-react";
+import { ArrowUpDown, Bot, Calculator, Database, Download, Eye, Filter, Grid3X3, Link2, MoreHorizontal, Plus, Search, Settings2, Trash2, Upload, Zap } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, getToken, getWorkspaceId, API_URL } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -36,7 +36,7 @@ type RecordRow = TableRecord;
 function TableCard({ table, onOpen, onDelete }: { table: Table; onOpen: () => void; onDelete: () => void }) {
   const fields = table.schema_json?.fields ?? [];
   return (
-    <Card className="group cursor-pointer transition-all hover:shadow-md hover:border-teal/40" onClick={onOpen}>
+    <Card interactive className="group hover:border-teal/40" onClick={onOpen}>
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-teal/10">
@@ -84,12 +84,20 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
   const [editingField, setEditingField] = useState<number | null>(null);
   const [editFieldConfig, setEditFieldConfig] = useState<Partial<TableField>>({});
   const [allTables, setAllTables] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   async function loadRecords() {
     setLoading(true);
+    setLoadError(null);
     try {
       const d = await api<{ records: RecordRow[] }>(`/tables/${table.id}/records`);
       setRecords(d.records ?? []);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Failed to load records");
     } finally { setLoading(false); }
   }
 
@@ -103,27 +111,81 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
 
   useEffect(() => { load(); }, []);
 
-  // AI field generation
+  // AI field generation (P0 fix: never invent fallback content — surface the error)
   async function handleAiGenerate(fieldKey: string, prompt: string, rowData: Record<string, unknown>) {
     setAiGenerating((p) => ({ ...p, [fieldKey]: true }));
     try {
       const resolved = prompt.replace(/\{(\w+)\}/g, (_, k) => String(rowData[k] ?? ""));
-      const result = await api<{ text: string }>("/ai/generate", { method: "POST", body: JSON.stringify({ prompt: resolved }) }).catch(() => null);
-      const text = result?.text ?? `Generated content for ${fieldKey}`;
-      setRecords((prev) => prev.map((r) => ({ ...r, data: { ...r.data, [fieldKey]: text } })));
+      const result = await api<{ text: string }>("/ai/generate", { method: "POST", body: JSON.stringify({ prompt: resolved }) });
+      if (!result?.text) throw new Error("The AI service returned no content for this field.");
+      setRecords((prev) => prev.map((r) => ({ ...r, data: { ...r.data, [fieldKey]: result.text } })));
+    } catch (err) {
+      toast.error(`AI generation failed for ${fieldKey}`, {
+        description: err instanceof Error ? err.message : "Try again or fill the field manually.",
+      });
     } finally {
       setAiGenerating((p) => ({ ...p, [fieldKey]: false }));
     }
   }
 
-  // Button workflow trigger
+  // Button workflow trigger (P0 fix: surface failures instead of swallowing them)
   async function handleButtonRun(workflowId: string, recordId: string) {
     const key = `${workflowId}-${recordId}`;
     setButtonRunning((p) => ({ ...p, [key]: true }));
     try {
-      await api(`/automations/${workflowId}/run`, { method: "POST", body: JSON.stringify({ recordId }) }).catch(() => {});
+      await api(`/automations/${workflowId}/run`, { method: "POST", body: JSON.stringify({ recordId }) });
+      toast.success("Workflow triggered");
+    } catch (err) {
+      toast.error("Workflow trigger failed", { description: err instanceof Error ? err.message : "Unknown error" });
     } finally {
       setButtonRunning((p) => ({ ...p, [key]: false }));
+    }
+  }
+
+  // CSV export (P4 #29): download the table as a file.
+  async function exportCsv() {
+    try {
+      const headers: Record<string, string> = {};
+      const token = getToken();
+      const workspaceId = getWorkspaceId();
+      if (token) headers.authorization = `Bearer ${token}`;
+      if (workspaceId) headers["x-workspace-id"] = workspaceId;
+      const res = await fetch(`${API_URL}/tables/${table.id}/export.csv`, { headers });
+      if (!res.ok) throw new Error(`Export failed (HTTP ${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${table.name.replace(/[^\w\-. ]/g, "") || "table"}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error("Export failed", { description: err instanceof Error ? err.message : "Unknown error" });
+    }
+  }
+
+  // CSV import (P4 #29): upload a CSV file with a header row.
+  async function importCsv(file: File) {
+    try {
+      const csv = await file.text();
+      const d = await api<{ imported: number }>(`/tables/${table.id}/import`, { method: "POST", body: JSON.stringify({ csv }) });
+      toast.success(`Imported ${d.imported} records`);
+      loadRecords();
+    } catch (err) {
+      toast.error("Import failed", { description: err instanceof Error ? err.message : "Unknown error" });
+    }
+  }
+
+  // Bulk delete (P4 #29)
+  async function bulkDelete() {
+    try {
+      const ids = [...selectedIds];
+      const d = await api<{ deleted: number }>(`/tables/${table.id}/records/bulk-delete`, { method: "POST", body: JSON.stringify({ ids }) });
+      toast.success(`Deleted ${d.deleted} records`);
+      setSelectedIds(new Set());
+      loadRecords();
+    } catch (err) {
+      toast.error("Bulk delete failed", { description: err instanceof Error ? err.message : "Unknown error" });
     }
   }
 
@@ -281,6 +343,31 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
             <button className={cn("rounded-md px-2.5 py-1 text-xs font-medium", view === "form" ? "bg-elevated text-ink shadow-sm" : "text-ink-muted")} onClick={() => setView("form")}><Eye className="mr-1 inline h-3 w-3" />Form</button>
           </div>
           <div className="flex-1" />
+          <div className="relative mr-1">
+            <Search className="pointer-events-none absolute left-2 top-1.5 h-3.5 w-3.5 text-ink-muted" />
+            <input
+              className="h-7 w-44 rounded-lg border border-line bg-elevated pl-7 pr-2 text-xs outline-none focus:border-teal"
+              placeholder="Search records…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-ink-muted">{selectedIds.size} selected</span>
+              <Button size="sm" variant="ghost" onClick={bulkDelete} className="h-7 text-[11px] text-danger"><Trash2 className="mr-1 h-3 w-3" />Delete</Button>
+              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())} className="h-7 text-[11px]">Clear</Button>
+            </div>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void importCsv(f); e.target.value = ""; }}
+          />
+          <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => fileInputRef.current?.click()}><Upload className="mr-1 h-3 w-3" />Import</Button>
+          <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={exportCsv}><Download className="mr-1 h-3 w-3" />Export</Button>
           <span className="text-xs text-ink-muted">{records.length} records</span>
         </div>
 
@@ -290,12 +377,25 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-line bg-muted/50">
-                    <th className="px-3 py-2 font-medium text-ink-muted">#</th>
+                    <th className="px-3 py-2 font-medium text-ink-muted">
+                      <input
+                        type="checkbox"
+                        checked={records.length > 0 && selectedIds.size === records.length}
+                        onChange={(e) => setSelectedIds(e.target.checked ? new Set(records.map((r) => r.id)) : new Set())}
+                        className="h-3 w-3"
+                      />
+                    </th>
                     {fields.map((f) => (
-                      <th key={f.key} className="px-3 py-2 font-medium text-ink-muted">
+                      <th
+                        key={f.key}
+                        className="group cursor-pointer select-none px-3 py-2 font-medium text-ink-muted hover:text-ink"
+                        onClick={() => setSort((s) => (s?.key === f.key ? (s.dir === "asc" ? { key: f.key, dir: "desc" } : null) : { key: f.key, dir: "asc" }))}
+                      >
                         <span className="flex items-center gap-1">
                           {f.label ?? f.key}
-                          <ArrowUpDown className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100" />
+                          {sort?.key === f.key
+                            ? <span className="text-teal">{sort.dir === "asc" ? "↑" : "↓"}</span>
+                            : <ArrowUpDown className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100" />}
                           <FieldTypeBadge type={f.type} />
                         </span>
                       </th>
@@ -304,9 +404,34 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                   </tr>
                 </thead>
                 <tbody>
-                  {records.map((r, i) => (
+                  {(() => {
+                    const q = search.trim().toLowerCase();
+                    let viewRows = q
+                      ? records.filter((r) => Object.values(r.data ?? {}).some((v) => typeof v === "string" && v.toLowerCase().includes(q)))
+                      : records;
+                    if (sort) {
+                      const dir = sort.dir === "asc" ? 1 : -1;
+                      viewRows = [...viewRows].sort((a, b) => {
+                        const av = a.data?.[sort.key]; const bv = b.data?.[sort.key];
+                        const an = Number(av); const bn = Number(bv);
+                        if (!Number.isNaN(an) && !Number.isNaN(bn) && av !== "" && bv !== "" && av !== undefined && bv !== undefined) return (an - bn) * dir;
+                        return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
+                      });
+                    }
+                    return viewRows.map((r) => (
                     <tr key={r.id} className="border-b border-line/50 hover:bg-muted/30">
-                      <td className="px-3 py-2 text-ink-muted">{i + 1}</td>
+                      <td className="px-3 py-2 text-ink-muted">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(r.id)}
+                          onChange={(e) => {
+                            const next = new Set(selectedIds);
+                            if (e.target.checked) next.add(r.id); else next.delete(r.id);
+                            setSelectedIds(next);
+                          }}
+                          className="h-3 w-3"
+                        />
+                      </td>
                       {fields.map((f) => (
                         <td key={f.key} className="px-3 py-2">
                           <TableCellRenderer
@@ -336,10 +461,25 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                         }}><Trash2 className="h-3 w-3" /></button>
                       </td>
                     </tr>
-                  ))}
+                  ));
+                  })()}
                 </tbody>
               </table>
-              {records.length === 0 && <p className="p-6 text-center text-sm text-ink-muted">No records yet. Add your first row below.</p>}
+              {records.length === 0 && !loadError && (
+                <p className="p-6 text-center text-sm text-ink-muted">No records yet. Add your first row below.</p>
+              )}
+              {records.length > 0 && (() => {
+                const q = search.trim().toLowerCase();
+                return q && !records.some((r) => Object.values(r.data ?? {}).some((v) => typeof v === "string" && v.toLowerCase().includes(q))) ? (
+                  <p className="p-6 text-center text-sm text-ink-muted">No records match “{search}”.</p>
+                ) : null;
+              })()}
+              {loadError && (
+                <div className="p-6 text-center">
+                  <p className="text-sm text-danger">{loadError}</p>
+                  <Button size="sm" variant="ghost" className="mt-2 text-xs" onClick={loadRecords}>Retry</Button>
+                </div>
+              )}
             </div>
           ) : (
             <Card className="space-y-3">
@@ -499,7 +639,7 @@ export default function TablesPage() {
         />
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {(list.data?.tables ?? []).map((t) => (
           <TableCard key={t.id} table={t} onOpen={() => setOpen(t)} onDelete={async () => {
             if (confirm(`Delete "${t.name}"? This cannot be undone.`)) {

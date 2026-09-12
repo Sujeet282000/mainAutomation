@@ -103,11 +103,11 @@ export default function ChatbotsPage() {
         </Card>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {(q.data?.chatbots ?? []).map((b) => {
           const publicUrl = `/c/${ws}/${b.slug}`;
           return (
-            <Card key={b.id} className="group cursor-pointer transition-all hover:shadow-md hover:border-cyan-400/40" onClick={() => setOpenChat(b)}>
+            <Card key={b.id} interactive className="group hover:border-cyan-400/40" onClick={() => setOpenChat(b)}>
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500/10">

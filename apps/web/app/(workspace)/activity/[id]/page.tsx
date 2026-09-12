@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { CheckCircle2, Circle, Loader2, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle2, Circle, Loader2, RotateCcw, Sparkles, XCircle } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 
 type Step = {
   id: string;
+  step_id?: string;
   name?: string;
   app_slug?: string;
   operation?: string;
@@ -48,6 +49,20 @@ export default function ActivityDetailPage() {
       if (d.execution?.id) router.push(`/activity/${d.execution.id}`);
       else q.refetch();
     }
+  });
+  const [replayError, setReplayError] = useState("");
+  const replayFrom = useMutation({
+    mutationFn: (fromStepId: string) =>
+      api<{ execution: { id: string }; seededSteps: number }>(`/executions/${id}/replay-from`, {
+        method: "POST",
+        body: JSON.stringify({ fromStepId })
+      }),
+    onSuccess: (d) => {
+      setReplayError("");
+      if (d.execution?.id) router.push(`/activity/${d.execution.id}`);
+      else q.refetch();
+    },
+    onError: (err) => setReplayError(err instanceof Error ? err.message : "Replay failed")
   });
   const [diagnosis, setDiagnosis] = useState<{
     cause: string;
@@ -91,6 +106,7 @@ export default function ActivityDetailPage() {
         }
       />
       {q.isError && <p className="mb-3 text-sm text-danger">{(q.error as Error).message}</p>}
+      {replayError && <p className="mb-3 text-sm text-danger">{replayError}</p>}
       {diagError && <p className="mb-3 text-sm text-danger">{diagError}</p>}
       {diagnosis && (
         <div className="mb-6 rounded-2xl border border-violet-200 bg-violet-50 p-4 text-sm text-violet-950">
@@ -131,6 +147,18 @@ export default function ActivityDetailPage() {
             </div>
             {s.error?.message && (
               <p className={cn("mt-2 rounded-lg bg-danger/10 px-2 py-1.5 text-sm text-danger")}>{s.error.message}</p>
+            )}
+            {/* Replay-from-step: re-run this step onward without repeating upstream side effects */}
+            {s.step_id && s.status === "failed" && (
+              <button
+                type="button"
+                className="mt-2 inline-flex items-center gap-1 rounded-full border border-teal/30 bg-teal-soft/20 px-2.5 py-1 text-[11px] font-medium text-teal transition hover:bg-teal-soft/40 active:scale-95"
+                disabled={replayFrom.isPending}
+                onClick={() => replayFrom.mutate(s.step_id!)}
+              >
+                {replayFrom.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                Replay from here
+              </button>
             )}
             {s.output != null && (
               <pre className="mt-3 max-h-48 overflow-auto rounded-xl bg-muted p-3 text-[11px] leading-relaxed">

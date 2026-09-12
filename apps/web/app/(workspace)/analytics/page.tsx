@@ -4,13 +4,12 @@ import { useMemo, useEffect, useState } from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, AlertTriangle, ArrowRight, CheckCircle2, Clock, Database,
+  Activity, ArrowRight, CheckCircle2, Clock,
   Download, Globe, Plug, RefreshCw, TrendingUp, TrendingDown, Workflow, XCircle, Zap, BarChart3, Timer, Target
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Card } from "@/components/ui/card";
-import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { SkeletonCardGrid, SkeletonStatGrid } from "@/components/ui/skeleton";
@@ -34,31 +33,108 @@ type AnalyticsSummary = {
   latency: { p50: number | null; p95: number | null; p99: number | null };
 };
 
-// ── Animated Bar Chart (with hover tooltip) ─────────────────────────────────
-function BarChart({ data }: { data: Array<{ label: string; value: number; color?: string; tooltip?: string }> }) {
-  const max = Math.max(...data.map((d) => d.value), 1);
+
+// ── Stacked Bar Chart (succeeded vs failed per day, with hover tooltip) ──────
+function StackedBarChart({ data, height = 150 }: { data: Array<{ label: string; succeeded: number; failed: number }>; height?: number }) {
+  const max = Math.max(...data.map((d) => d.succeeded + d.failed), 1);
   const [hover, setHover] = useState<number | null>(null);
   return (
     <div className="relative">
-      <div className="flex items-end gap-2" style={{ height: 140 }}>
-        {data.map((d, i) => (
-          <div key={i} className="group flex flex-1 cursor-default flex-col items-center gap-1.5" onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
-            <span className={cn("text-[10px] font-semibold transition-opacity", d.value > 0 ? "text-ink" : "text-ink-muted", hover !== null && hover !== i && "opacity-40")}>{d.value}</span>
-            <div
-              className={cn(
-                "w-full rounded-t-lg transition-all duration-700 ease-out group-hover:brightness-110",
-                d.value > 0 ? (d.color ?? "bg-gradient-to-t from-violet-600 to-violet-400") : "bg-muted"
-              )}
-              style={{ height: `${Math.max((d.value / max) * 90, d.value > 0 ? 6 : 2)}%` }}
-            />
-            <span className={cn("text-[10px] font-medium transition-colors", hover === i ? "text-ink" : "text-ink-muted")}>{d.label}</span>
-          </div>
-        ))}
+      <div className="flex items-end gap-2" style={{ height }}>
+        {data.map((d, i) => {
+          const total = d.succeeded + d.failed;
+          return (
+            <div key={i} className="group flex flex-1 cursor-default flex-col items-center gap-1.5" onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+              <span className={cn("text-[10px] font-semibold transition-opacity", total > 0 ? "text-ink" : "text-ink-muted", hover !== null && hover !== i && "opacity-40")}>{total}</span>
+              <div
+                className="flex w-full flex-col justify-end overflow-hidden rounded-t-lg"
+                style={{ height: `${total > 0 ? Math.max((total / max) * 88, 6) : 2}%` }}
+              >
+                {d.succeeded > 0 && (
+                  <div
+                    className="w-full bg-gradient-to-t from-emerald-600 to-emerald-400 transition-all duration-700 group-hover:brightness-110"
+                    style={{ height: `${(d.succeeded / total) * 100}%` }}
+                  />
+                )}
+                {d.failed > 0 && (
+                  <div
+                    className="w-full bg-gradient-to-t from-red-600 to-red-400 transition-all duration-700 group-hover:brightness-110"
+                    style={{ height: `${(d.failed / total) * 100}%` }}
+                  />
+                )}
+              </div>
+              <span className={cn("text-[10px] font-medium transition-colors", hover === i ? "text-ink" : "text-ink-muted")}>{d.label}</span>
+            </div>
+          );
+        })}
       </div>
-      {hover !== null && data[hover]?.tooltip && (
+      {hover !== null && data[hover] && data[hover].succeeded + data[hover].failed > 0 && (
         <div className="pointer-events-none absolute -top-2 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-line bg-elevated px-2.5 py-1.5 text-[11px] shadow-card">
           <span className="font-semibold">{data[hover].label}</span>
-          <span className="text-ink-muted"> — {data[hover].tooltip}</span>
+          <span className="text-ink-muted"> — </span>
+          <span className="font-medium text-ok">{data[hover].succeeded} ok</span>
+          {data[hover].failed > 0 && (
+            <>
+              <span className="text-ink-muted"> · </span>
+              <span className="font-medium text-danger">{data[hover].failed} failed</span>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Area Line Chart (SVG trend: total runs area + dashed failure line) ───────
+function AreaLineChart({ data, height = 200 }: { data: Array<{ label: string; runs: number; failed: number }>; height?: number }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 640, H = height, padL = 36, padR = 10, padT = 14, padB = 24;
+  const max = Math.max(...data.map((d) => d.runs), 4);
+  const x = (i: number) => padL + (i / Math.max(data.length - 1, 1)) * (W - padL - padR);
+  const y = (v: number) => padT + (1 - v / max) * (H - padT - padB);
+  const step = data.length > 1 ? (W - padL - padR) / (data.length - 1) : W;
+  const runsPts = data.map((d, i) => `${x(i)},${y(d.runs)}`).join(" ");
+  const areaPts = `${padL},${y(0)} ${runsPts} ${x(data.length - 1)},${y(0)}`;
+  const failPts = data.map((d, i) => `${x(i)},${y(d.failed)}`).join(" ");
+
+  return (
+    <div className="relative">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: height + 40 }}>
+        {[0, max / 2, max].map((t, i) => (
+          <g key={i}>
+            <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} stroke="currentColor" className="text-ink-muted opacity-25" strokeDasharray={t === 0 ? undefined : "3 4"} strokeWidth={1} />
+            <text x={padL - 6} y={y(t) + 3} textAnchor="end" fontSize={9} className="fill-current text-ink-muted">{Math.round(t)}</text>
+          </g>
+        ))}
+        <polygon points={areaPts} fill="#7c3aed" fillOpacity={0.12} className="transition-all duration-700" />
+        <polyline points={runsPts} fill="none" stroke="#7c3aed" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={failPts} fill="none" stroke="#dc2626" strokeWidth={1.5} strokeDasharray="4 3" strokeLinejoin="round" strokeLinecap="round" />
+        {data.map((d, i) => (
+          <circle key={i} cx={x(i)} cy={y(d.runs)} r={hover === i ? 4 : 2.5} fill="#7c3aed" className="transition-all" />
+        ))}
+        {data.map((d, i) =>
+          d.failed > 0 ? (
+            <circle key={`f${i}`} cx={x(i)} cy={y(d.failed)} r={hover === i ? 3.5 : 2} fill="#dc2626" className="transition-all" />
+          ) : null
+        )}
+        {data.map((_, i) => (
+          <rect key={`h${i}`} x={x(i) - step / 2} y={0} width={Math.max(step, 8)} height={H} fill="transparent" style={{ cursor: "default" }} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} />
+        ))}
+        {data.map((d, i) => (
+          (data.length <= 8 || i % 2 === 0) && (
+            <text key={`x${i}`} x={x(i)} y={H - 6} textAnchor="middle" fontSize={9} className={cn("fill-current", hover === i ? "text-ink" : "text-ink-muted")}>{d.label}</text>
+          )
+        ))}
+      </svg>
+      {hover !== null && data[hover] && (
+        <div
+          className="pointer-events-none absolute top-0 z-10 whitespace-nowrap rounded-lg border border-line bg-elevated px-2.5 py-1.5 text-[11px] shadow-card"
+          style={{ left: `${Math.min(Math.max((x(hover) / W) * 100, 6), 72)}%` }}
+        >
+          <span className="font-semibold">{data[hover].label}</span>
+          <span className="text-ink-muted"> — {data[hover].runs} run{data[hover].runs === 1 ? "" : "s"}</span>
+          <span className="font-medium text-ok"> · {data[hover].runs - data[hover].failed} ok</span>
+          {data[hover].failed > 0 && <span className="font-medium text-danger"> · {data[hover].failed} failed</span>}
         </div>
       )}
     </div>
@@ -310,7 +386,7 @@ export default function AnalyticsPage() {
   }, [qc]);
 
   const autosQ = useQuery({ queryKey: ["automations"], queryFn: () => api<{ automations: Automation[] }>("/automations") });
-  const runsQ = useQuery({ queryKey: ["executions"], queryFn: () => api<{ executions: Execution[] }>("/executions") });
+  const runsQ = useQuery({ queryKey: ["executions", { stats: true }], queryFn: () => api<{ executions: Execution[] }>("/executions?limit=50"), refetchInterval: 30_000 });
   const connsQ = useQuery({ queryKey: ["connections"], queryFn: () => api<{ connections: Connection[] }>("/connections") });
   const tablesQ = useQuery({ queryKey: ["tables"], queryFn: () => api<{ tables: Table[] }>("/tables") });
   const formsQ = useQuery({ queryKey: ["forms"], queryFn: () => api<{ forms: FormRow[] }>("/forms") });
@@ -325,20 +401,47 @@ export default function AnalyticsPage() {
 
   const stats = useMemo(() => computeStats(autosQ, runsQ, connsQ, tablesQ, formsQ, agentsQ), [autosQ.data, runsQ.data, connsQ.data, tablesQ.data, formsQ.data, agentsQ.data]);
 
-  // Server-computed daily series (14 days) — richer tooltips + real durations.
-  const weekBars = useMemo(() => {
+  // Headline run metrics come from the server aggregate (14d window), not from
+  // a recent-runs page slice — accurate regardless of run volume.
+  const summaryTotals = useMemo(() => {
+    const daily = summaryQ.data?.daily ?? [];
+    const runs = daily.reduce((a: number, d) => a + Number(d.runs ?? 0), 0);
+    const succeeded = daily.reduce((a: number, d) => a + Number(d.succeeded ?? 0), 0);
+    const failed = daily.reduce((a: number, d) => a + Number(d.failed ?? 0), 0);
+    const withAvg = daily.filter((d) => d.avg_ms);
+    const avgMs = withAvg.length ? Math.round(withAvg.reduce((a: number, d) => a + Number(d.avg_ms ?? 0), 0) / withAvg.length) : 0;
+    return {
+      runs,
+      succeeded,
+      failed,
+      inFlight: Math.max(runs - succeeded - failed, 0),
+      successRate: runs > 0 ? Math.round((succeeded / runs) * 100) : 0,
+      avgDurationStr: avgMs > 0 ? `${(avgMs / 1000).toFixed(1)}s` : "\u2014",
+    };
+  }, [summaryQ.data]);
+
+  // Server-computed daily series — stacked succeeded/failed per day.
+  const weekStack = useMemo(() => {
     const daily = summaryQ.data?.daily ?? [];
     if (daily.length === 0) {
-      return stats.runsPerDay.map((v, i) => ({ label: dayLabelsStatic[i], value: v, tooltip: `${v} run${v === 1 ? "" : "s"}` }));
+      return stats.runsPerDay.map((v, i) => ({ label: dayLabelsStatic[i], succeeded: v, failed: 0 }));
     }
     return daily.slice(-7).map((d) => ({
       label: new Date(d.day + "T00:00:00").toLocaleDateString(undefined, { weekday: "short" }),
-      value: d.runs,
-      tooltip: `${d.runs} run${d.runs === 1 ? "" : "s"} · ${d.succeeded} ok · ${d.failed} failed · ${d.avg_ms ? (d.avg_ms / 1000).toFixed(1) + "s avg" : "—"}`,
+      succeeded: d.succeeded,
+      failed: d.failed,
     }));
   }, [summaryQ.data, stats.runsPerDay]);
 
-  const failures = summaryQ.data?.failures ?? [];
+  // 14-day trend series for the activity chart (server aggregate).
+  const trend14 = useMemo(() => {
+    const daily = summaryQ.data?.daily ?? [];
+    return daily.map((d) => ({
+      label: new Date(d.day + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      runs: d.runs,
+      failed: d.failed,
+    }));
+  }, [summaryQ.data]);
 
   return (
     <div className="pb-10">
@@ -368,14 +471,14 @@ export default function AnalyticsPage() {
       ) : (
         <>
           {/* ═══ KPI CARDS ═══ */}
-          <div className="mb-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="ws-stagger mb-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
             {[
               { label: "Workflows", value: stats.totalAutomations, icon: Workflow, color: "bg-violet-600", textColor: "text-violet-600", sub: `${stats.onAutos} live` },
-              { label: "Total Runs", value: stats.totalRuns, icon: Activity, color: "bg-blue-600", textColor: "text-blue-600", sub: `${stats.successRate}% success`, trend: stats.weeklyTrend },
-              { label: "Succeeded", value: stats.succeeded, icon: CheckCircle2, color: "bg-ok", textColor: "text-ok", sub: `of ${stats.totalRuns} total` },
-              { label: "Failed", value: stats.failed, icon: XCircle, color: "bg-danger", textColor: "text-danger", sub: stats.totalRuns > 0 ? `${Math.round((stats.failed / stats.totalRuns) * 100)}% rate` : "0% rate" },
+              { label: "Runs (14d)", value: summaryTotals.runs, icon: Activity, color: "bg-blue-600", textColor: "text-blue-600", sub: `${summaryTotals.successRate}% success`, trend: stats.weeklyTrend },
+              { label: "Succeeded (14d)", value: summaryTotals.succeeded, icon: CheckCircle2, color: "bg-ok", textColor: "text-ok", sub: `of ${summaryTotals.runs} total` },
+              { label: "Failed (14d)", value: summaryTotals.failed, icon: XCircle, color: "bg-danger", textColor: "text-danger", sub: summaryTotals.runs > 0 ? `${Math.round((summaryTotals.failed / summaryTotals.runs) * 100)}% rate` : "0% rate" },
               { label: "Connections", value: stats.totalConnections, icon: Plug, color: "bg-teal", textColor: "text-teal", sub: `${stats.connected} active` },
-              { label: "Avg Duration", value: stats.avgDurationStr, icon: Timer, color: "bg-amber-500", textColor: "text-amber-600", sub: "per run", hideTrend: true },
+              { label: "Avg Duration", value: summaryTotals.avgDurationStr, icon: Timer, color: "bg-amber-500", textColor: "text-amber-600", sub: "server-computed", hideTrend: true },
             ].map((kpi) => (
               <Card key={kpi.label} className="group relative overflow-hidden transition-all hover:shadow-md hover:-translate-y-0.5">
                 <div className={cn("absolute -right-4 -top-4 h-16 w-16 rounded-full opacity-10 transition group-hover:opacity-20", kpi.color)} />
@@ -405,12 +508,11 @@ export default function AnalyticsPage() {
                 </div>
                 <Trend value={stats.weeklyTrend} label="vs last wk" />
               </div>
-              <BarChart
-                data={weekBars.map((d) => ({
-                  ...d,
-                  color: d.value > 0 ? "bg-gradient-to-t from-violet-600 to-violet-400" : undefined,
-                }))}
-              />
+              <StackedBarChart data={weekStack} />
+              <div className="mt-3 flex items-center gap-4 text-[10px] text-ink-muted">
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-emerald-500" /> Succeeded</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-red-500" /> Failed</span>
+              </div>
             </Card>
 
             {/* Donut chart — status distribution (narrower) */}
@@ -421,10 +523,10 @@ export default function AnalyticsPage() {
               </div>
               <DonutChart
                 segments={[
-                  { value: stats.succeeded, color: "#059669", label: "Succeeded" },
-                  { value: stats.failed, color: "#dc2626", label: "Failed" },
-                  { value: stats.running, color: "#2563eb", label: "In progress" },
-                  { value: Math.max(stats.totalRuns - stats.succeeded - stats.failed - stats.running, 0), color: "#cbd5e1", label: "Other" },
+                  { value: summaryTotals.succeeded, color: "#059669", label: "Succeeded" },
+                  { value: summaryTotals.failed, color: "#dc2626", label: "Failed" },
+                  { value: summaryTotals.inFlight, color: "#2563eb", label: "In progress" },
+                  { value: Math.max(summaryTotals.runs - summaryTotals.succeeded - summaryTotals.failed - summaryTotals.inFlight, 0), color: "#cbd5e1", label: "Other" },
                 ]}
                 size={130}
               />
@@ -544,33 +646,28 @@ export default function AnalyticsPage() {
             </Card>
           </div>
 
-          {/* ═══ RECENT ERRORS (server data — real step error messages) ═══ */}
-          {failures.length > 0 && (
-            <Card className="mb-6">
-              <div className="mb-4 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-danger/10"><AlertTriangle className="h-3.5 w-3.5 text-danger" /></div>
-                  <div>
-                    <p className="text-sm font-semibold">Recent Failures</p>
-                    <p className="text-[11px] text-ink-muted">{failures.length} recent error{failures.length > 1 ? "s" : ""}</p>
-                  </div>
+          {/* ═══ RUN ACTIVITY TREND (14 days, server aggregate) ═══ */}
+          <Card className="mb-6">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-600/10"><Activity className="h-3.5 w-3.5 text-violet-600" /></div>
+                <div>
+                  <p className="text-sm font-semibold">Run activity (14 days)</p>
+                  <p className="text-[11px] text-ink-muted">Daily execution volume with failure overlay</p>
                 </div>
-                <Link href="/activity?status=failed" className="text-[11px] font-medium text-danger hover:underline">View all →</Link>
               </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {failures.map((r) => (
-                  <Link key={r.id} href={`/activity/${r.id}`} className="group rounded-xl border border-danger/10 bg-danger/[0.03] p-3 transition hover:border-danger/30 hover:bg-danger/[0.06]">
-                    <div className="flex items-center justify-between">
-                      <span className="truncate text-xs font-medium group-hover:text-danger">{r.automation_name ?? "Run"}</span>
-                      <StatusBadge status="failed" />
-                    </div>
-                    <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-danger/80">{r.error?.message ?? "Run failed"}</p>
-                    <p className="mt-1 text-[10px] text-ink-muted">{new Date(r.created_at).toLocaleString()}</p>
-                  </Link>
-                ))}
+              <div className="flex items-center gap-4 text-[10px] text-ink-muted">
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-violet-500" /> Total runs</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-red-500" /> Failed</span>
+                <Link href="/activity" className="font-medium text-violet-600 hover:underline">All runs →</Link>
               </div>
-            </Card>
-          )}
+            </div>
+            {trend14.length === 0 ? (
+              <p className="py-10 text-center text-xs text-ink-muted">No run data in the last 14 days</p>
+            ) : (
+              <AreaLineChart data={trend14} />
+            )}
+          </Card>
 
           {/* ═══ LATENCY + TRIGGER MIX + SLOWEST STEPS ═══ */}
           <div className="mb-6 grid gap-4 lg:grid-cols-3">
@@ -618,14 +715,24 @@ export default function AnalyticsPage() {
               {(summaryQ.data?.triggers?.length ?? 0) === 0 ? (
                 <p className="py-6 text-center text-xs text-ink-muted">No runs in the last 30 days</p>
               ) : (
-                <DonutChart
-                  size={110}
-                  segments={(summaryQ.data?.triggers ?? []).slice(0, 5).map((t, i) => ({
-                    value: t.runs,
-                    label: t.trigger_kind.replace(/_/g, " "),
-                    color: ["#2563eb", "#7c3aed", "#059669", "#f59e0b", "#64748b"][i % 5],
-                  }))}
-                />
+                <div className="space-y-3">
+                  {(summaryQ.data?.triggers ?? []).slice(0, 5).map((t, i) => {
+                    const maxT = Math.max(...(summaryQ.data?.triggers ?? []).map((x) => x.runs), 1);
+                    const colors = ["bg-blue-600", "bg-violet-600", "bg-emerald-600", "bg-amber-500", "bg-slate-400"];
+                    return (
+                      <div key={t.trigger_kind} className="group">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="capitalize text-ink-muted">{t.trigger_kind.replace(/_/g, " ")}</span>
+                          <span className="font-bold tabular-nums">{t.runs}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                          <div className={cn("h-full rounded-full transition-all duration-700 group-hover:brightness-110", colors[i % 5])}
+                            style={{ width: `${(t.runs / maxT) * 100}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </Card>
 

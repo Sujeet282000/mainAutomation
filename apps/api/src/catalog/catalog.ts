@@ -260,6 +260,61 @@ export const APP_CATALOG: AppManifest[] = [
     ]
   },
   {
+    slug: "aggregator",
+    name: "Aggregator",
+    description: "Fan-in node: merge outputs of Router/Loop branches before continuing.",
+    category: "logic",
+    icon: "⇩",
+    color: "#0ea5e9",
+    authType: "none",
+    operations: [
+      {
+        key: "merge",
+        name: "Merge Branches",
+        type: "action",
+        inputFields: [
+          {
+            key: "strategy",
+            label: "Strategy",
+            type: "select",
+            options: [
+              { label: "Merge objects", value: "merge" },
+              { label: "Append to array", value: "append" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    slug: "mcp-server",
+    name: "MCP Server",
+    description: "Call tools on any external MCP server (Claude, Cursor, third-party MCP hosts).",
+    category: "developer",
+    icon: "🔌",
+    color: "#7c3aed",
+    authType: "api_key",
+    operations: [
+      {
+        key: "call_tool",
+        name: "Call Tool",
+        type: "action",
+        inputFields: [
+          { key: "tool", label: "Tool name", type: "string", required: true },
+          { key: "arguments", label: "Arguments (JSON)", type: "json" }
+        ],
+        outputSample: { tool: "", isError: false, result: {} }
+      },
+      {
+        key: "list_tools",
+        name: "List Tools",
+        type: "search",
+        inputFields: [],
+        outputSample: { tools: [] }
+      }
+    ]
+  },
+  {
     slug: "delay",
     name: "Delay",
     description: "Pause the run for a duration or until a time.",

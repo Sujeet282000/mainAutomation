@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowRight, Bot, CheckCircle2, CircleAlert, FileInput, Info, LayoutTemplate, Plug, Sparkles, Table2, Workflow, X, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { generateCopilotDraft, persistCopilotSession, planCopilotWorkflow, type CopilotPlanResult } from "@/lib/copilot";
+import { persistCopilotSession, planCopilotWorkflow, type CopilotPlanResult } from "@/lib/copilot";
 import { Card } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
@@ -122,20 +122,8 @@ export default function DashboardPage() {
         router.push(`/automations/${flowId}/editor?idea=${encodeURIComponent(next)}`);
         return;
       }
-      // Fallback: run the full SSE-based copilot pipeline
-      setBuildStage("analyzing");
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
-      const d = await generateCopilotDraft({ prompt: next, mode: "auto_build" }, undefined, controller.signal);
-      clearTimeout(timeout);
-      setBuildStage("creating");
-      const created = await api<{ automation: { id: string } }>("/automations", {
-        method: "POST",
-        body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft", graph: d.graph, origin: "copilot" }),
-      });
-      persistCopilotSession(d.sessionId, created.automation.id).catch(() => undefined);
-      toast.success("Workflow created!", { description: `Ready in the editor` });
-      router.push(`/automations/${created.automation.id}/editor?idea=${encodeURIComponent(next)}`);
+      // No reviewed plan → refuse to auto-build. One Copilot flow: plan → review → create.
+      setMsg("No reviewed plan to build from. Please analyze your request first.");
     } catch (err) {
       const errorMsg = err instanceof DOMException && err.name === "AbortError"
         ? "Copilot took too long. The AI service may be overloaded — try a simpler request."
@@ -291,7 +279,7 @@ export default function DashboardPage() {
             <div><p className="text-sm font-semibold">Workspace health</p><p className="mt-1 text-xs text-ink-muted">A quick read on what needs your attention.</p></div>
             <CheckCircle2 className="h-5 w-5 text-ok" />
           </div>
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+          <div className="ws-stagger mt-5 grid gap-3 sm:grid-cols-3">
             <div className="rounded-xl bg-muted p-3"><p className="text-xs text-ink-muted">Live workflows</p><p className="mt-1 text-xl font-semibold">{onCount}</p></div>
             <div className="rounded-xl bg-muted p-3"><p className="text-xs text-ink-muted">Drafts</p><p className="mt-1 text-xl font-semibold">{drafts.length}</p></div>
             <div className="rounded-xl bg-muted p-3"><p className="text-xs text-ink-muted">Failed runs</p><p className="mt-1 text-xl font-semibold text-danger">{failedRuns}</p></div>
@@ -319,7 +307,7 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-muted">Finish setup</h2>
             <Link href="/automations" className="text-xs text-violet-700">View all workflows</Link>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {drafts.slice(0, 3).map((a) => (
               <Link key={a.id} href={`/automations/${a.id}/editor`} className="group rounded-2xl border border-line bg-elevated p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-violet-300 hover:shadow-card">
                 <div className="flex items-start justify-between gap-3">
@@ -338,7 +326,7 @@ export default function DashboardPage() {
       {/* Latest activity */}
       <h2 className="mb-3 mt-8 text-sm font-semibold uppercase tracking-wide text-ink-muted">Latest activity</h2>
       {runs.isLoading && <SkeletonCardGrid count={3} />}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {(runs.data?.executions ?? []).slice(0, 8).map((r) => (
           <Link key={r.id} href={`/activity/${r.id}`} className="group rounded-2xl border border-line bg-elevated p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-violet-300 hover:shadow-card">
             <div className="flex items-start justify-between gap-3">

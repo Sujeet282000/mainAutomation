@@ -38,6 +38,17 @@ export function createEngineDb(db: Db) {
         );
         if (!result.rowCount) throw new Error("FLOW_RUN_PAUSE_CONFLICT");
       },
+      /** Atomically re-activate a paused run so the executor can resume it. */
+      async resumeClaim(runId: string) {
+        const result = await db.service.query(
+          `UPDATE flow_runs SET status = 'running', paused_reason = NULL, transition_epoch = transition_epoch + 1
+           WHERE id = $1 AND status = 'paused'
+           RETURNING id, created_at, org_id, project_id, flow_id, flow_version_id, trigger_kind, status, context, transition_epoch, cursor`,
+          [runId],
+        );
+        const row = result.rows[0];
+        return row ? mapRun(row) : null;
+      },
     },
     flowVersions: {
       async byId(versionId: string) {

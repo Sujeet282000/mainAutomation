@@ -105,6 +105,8 @@ export interface PieceDef {
     tokenUrl?: string;
     validate?: (auth: unknown) => Promise<boolean>;
   };
+  /** Upstream vendor budget (P2 #28) — the platform enforces this per connection/app. */
+  rateLimit?: { maxPerMinute: number; scope: "app" | "connection" };
   triggers: TriggerDef[];
   actions: ActionDef[];
 }

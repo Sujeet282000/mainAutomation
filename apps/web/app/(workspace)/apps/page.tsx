@@ -103,7 +103,7 @@ export default function AppsPage() {
         <EmptyState icon={<Plug className="h-10 w-10" />} title="No apps match" description="Try another search, or open Connections to add an account." />
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="ws-stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {filtered.map((a) => {
           const ops = a.operations ?? [];
           const connected = connectionCounts.get(a.slug) ?? 0;
@@ -111,25 +111,25 @@ export default function AppsPage() {
           const config = READINESS_CONFIG[readiness];
           const Icon = config.icon;
           return (
-            <Card key={a.slug} className="flex flex-col">
+            <Card key={a.slug} interactive className="group flex flex-col">
               <div className="flex items-start gap-3">
-                <AppIcon slug={a.slug} size="lg" />
+                <div className="transition-transform duration-200 group-hover:scale-110"><AppIcon slug={a.slug} size="lg" /></div>
                 <div className="min-w-0 flex-1">
                   <h3 className="text-[15px] font-medium">{a.name}</h3>
                   <p className="text-xs uppercase text-ink-muted">{a.category}</p>
                 </div>
-                <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium", config.bg, config.color)}>
+                <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors", config.bg, config.color)}>
                   <Icon className="h-2.5 w-2.5" />{config.label}
                 </span>
               </div>
               <p className="mt-3 flex-1 text-sm text-ink-muted">{a.description}</p>
               <div className="mt-3 flex items-center justify-between text-xs text-ink-muted">
                 <span>{ops.filter((o) => o.type === "trigger").length} triggers · {ops.filter((o) => o.type === "action").length} actions</span>
-                <span>{connected} {connected === 1 ? "account" : "accounts"}</span>
+                <span>{connected > 0 && <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-ok ws-live" />}{connected} {connected === 1 ? "account" : "accounts"}</span>
               </div>
-              <div className="mt-3 flex gap-2">
-                <Link href={`/apps/${a.slug}`} className="flex-1 text-sm text-teal">View app</Link>
-                {a.authType !== "none" && <Link href={`/connections?app=${encodeURIComponent(a.slug)}`} className="text-sm text-teal">Connect</Link>}
+              <div className="mt-3 flex items-center gap-2 border-t border-line pt-3 opacity-70 transition-opacity group-hover:opacity-100">
+                <Link href={`/apps/${a.slug}`} className="flex-1 text-sm font-medium text-teal">View app →</Link>
+                {a.authType !== "none" && <Link href={`/connections?app=${encodeURIComponent(a.slug)}`} className="text-sm text-ink-muted transition-colors hover:text-teal">Connect</Link>}
               </div>
             </Card>
           );

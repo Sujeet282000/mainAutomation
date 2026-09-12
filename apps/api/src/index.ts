@@ -14,6 +14,7 @@ import { ensureProductSchema } from "./ensure-schema";
 import { webhookRouter } from "./triggers/webhook-ingress";
 import { tickSchedules } from "./schedules";
 import { tickPolling } from "./poll";
+import { sweepPausedRuns } from "./paused-sweeper";
 import { copilotApprovalRouter } from "./copilot/copilot-approval";
 
 // Prevent unhandled promise rejections from crashing the process
@@ -69,8 +70,8 @@ app.post("/internal/scheduler/tick", async (req, res) => {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
-    const [scheduled, polled] = await Promise.all([tickSchedules(), tickPolling()]);
-    return res.json({ ok: true, scheduled, polled, at: new Date().toISOString() });
+    const [scheduled, polled, resumed] = await Promise.all([tickSchedules(), tickPolling(), sweepPausedRuns().catch(() => 0)]);
+    return res.json({ ok: true, scheduled, polled, resumed, at: new Date().toISOString() });
   } catch (error) {
     console.error("scheduler tick", error);
     return res.status(500).json({ error: "scheduler_tick_failed" });
@@ -87,5 +88,10 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 
 app.listen(env.port, () => {
   console.log(`API listening on ${env.port}`);
-  void ensureProductSchema().catch((err) => console.error("ensureProductSchema", err));
+  // Runtime schema creation is a development convenience only. Production must
+  // come up from migrations alone (npm run migrate) and fail loudly when the
+  // schema drifts — never silently patch itself at boot.
+  if (env.nodeEnv !== "production") {
+    void ensureProductSchema().catch((err) => console.error("ensureProductSchema", err));
+  }
 });

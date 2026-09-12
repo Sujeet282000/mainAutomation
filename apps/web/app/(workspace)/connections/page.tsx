@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LayoutGrid, List, MoreVertical, Plug, Search } from "lucide-react";
+import { HeartPulse, LayoutGrid, List, MoreVertical, Plug, Search } from "lucide-react";
 import { mergeCatalog, type CatalogApp } from "@/lib/catalog";
 import { api } from "@/lib/api";
 import { AppIcon } from "@/components/app-icon";
@@ -94,19 +94,43 @@ function ConnectionsInner() {
     }
   });
 
+  // Bulk connection health check (P2 #27) — runs real vendor probes on every connection.
+  const [healthChecking, setHealthChecking] = useState(false);
+  async function checkAllHealth() {
+    setHealthChecking(true);
+    try {
+      const report = await api<{ total: number; healthy: number; unhealthy: number; untested: number }>("/connections/health", { method: "POST" });
+      qc.invalidateQueries({ queryKey: ["connections"] });
+      if (report.unhealthy === 0 && report.untested === 0) {
+        setFlash(`All ${report.healthy} connections passed their health checks.`);
+      } else {
+        setFlash(`Health check: ${report.healthy} healthy, ${report.unhealthy} failing, ${report.untested} untested (no probe for that app).`);
+      }
+    } catch (err) {
+      setFlash(err instanceof Error ? err.message : "Health check failed.");
+    } finally {
+      setHealthChecking(false);
+    }
+  }
+
   return (
     <div>
       <PageHeader
         title="Connections"
         description="One app can have many accounts. Workflows store a connection id, never the secret."
         actions={
-          <Button onClick={() => setCreateOpen(true)}>
-            + Create connection
-          </Button>
+          <>
+            <Button variant="secondary" onClick={() => void checkAllHealth()} disabled={healthChecking || list.isLoading}>
+              <HeartPulse className="mr-1.5 h-4 w-4" />{healthChecking ? "Checking…" : "Check all health"}
+            </Button>
+            <Button onClick={() => setCreateOpen(true)}>
+              + Create connection
+            </Button>
+          </>
         }
       />
       {flash && <p className="mb-4 text-sm text-ok">{flash}</p>}
-      <div className="mb-5 grid gap-3 sm:grid-cols-3">
+      <div className="ws-stagger mb-5 grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Connected accounts</p><p className="mt-1 text-2xl font-semibold">{rows.length}</p></div>
         <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Ready to use</p><p className="mt-1 text-2xl font-semibold text-ok">{rows.filter((c) => c.status === "connected").length}</p></div>
         <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm"><p className="text-xs text-ink-muted">Need attention</p><p className="mt-1 text-2xl font-semibold text-danger">{rows.filter((c) => c.status !== "connected").length}</p></div>
@@ -153,7 +177,7 @@ function ConnectionsInner() {
                 <th className="px-4 py-3 font-medium">Name</th>
                 <th className="px-4 py-3 font-medium">App</th>
                 <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Zap workflows</th>
+                <th className="px-4 py-3 font-medium">Workflows</th>
                 <th className="px-4 py-3 font-medium" />
               </tr>
             </thead>
@@ -219,7 +243,7 @@ function ConnectionsInner() {
                       <div className="absolute right-4 z-10 mt-1 w-44 rounded-lg border border-line bg-elevated py-1 text-left shadow-card">
                         {returnTo && (
                           <button type="button" className="block w-full px-3 py-1.5 text-sm hover:bg-muted" onClick={() => finishConnection(c.id)}>
-                            Use in Zap
+                            Use in workflow
                           </button>
                         )}
                         <button
