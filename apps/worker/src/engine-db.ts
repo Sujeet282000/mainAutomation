@@ -1,4 +1,5 @@
 import type { Db } from "@algoverge/db";
+import { redact } from "../../api/src/crypto";
 
 /** Maps the SQL repository's snake_case rows to the engine's runtime contract. */
 export function createEngineDb(db: Db) {
@@ -30,11 +31,15 @@ export function createEngineDb(db: Db) {
           [runId, status, JSON.stringify(context), finishedAt],
         );
       },
-      async pause(runId: string, input: { expectedCursor: number; expectedEpoch: number; contextJson: Record<string, unknown>; reason: string; resumeAt: string | null }) {
+      async pause(runId: string, input: { expectedCursor: number; expectedEpoch: number; contextJson: Record<string, unknown>; reason: string; resumeAt: string | null; nextCursor?: number }) {
+        // Durable-cursor contract: pausing a delay/approval step also advances
+        // the stored cursor past it, so Executor.resume() continues AFTER the
+        // pause step instead of re-executing it forever.
+        const nextCursor = input.nextCursor ?? input.expectedCursor + 1;
         const result = await db.service.query(
-          `UPDATE flow_runs SET status = 'paused', paused_reason = $3, resume_at = $4, context = $5::jsonb
-           WHERE id = $1 AND cursor = $2 AND transition_epoch = $6`,
-          [runId, input.expectedCursor, input.reason, input.resumeAt, JSON.stringify(input.contextJson), input.expectedEpoch],
+          `UPDATE flow_runs SET status = 'paused', paused_reason = $3, resume_at = $4, context = $5::jsonb, cursor = $6
+           WHERE id = $1 AND cursor = $2 AND transition_epoch = $7`,
+          [runId, input.expectedCursor, input.reason, input.resumeAt, JSON.stringify(input.contextJson), nextCursor, input.expectedEpoch],
         );
         if (!result.rowCount) throw new Error("FLOW_RUN_PAUSE_CONFLICT");
       },
@@ -69,8 +74,7 @@ export function createEngineDb(db: Db) {
       async insert(input: any) {
         const result = await db.service.query(
           `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, output_json, error_class, error_code, error_json, attempt, duration_ms, finished_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,
-          [input.runId, input.runCreatedAt, input.orgId, input.stepId, input.stepType, input.operationId ?? null, input.effectKey ?? null, input.status, input.inputJson ? JSON.stringify(input.inputJson) : null, input.outputJson ? JSON.stringify(input.outputJson) : null, input.errorClass ?? null, input.errorCode ?? null, input.errorJson ? JSON.stringify(input.errorJson) : null, input.attempt ?? 1, input.durationMs ?? null],
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,           [input.runId, input.runCreatedAt, input.orgId, input.stepId, input.stepType, input.operationId ?? null, input.effectKey ?? null, input.status, input.inputJson ? JSON.stringify(redact(input.inputJson)) : null, input.outputJson ? JSON.stringify(redact(input.outputJson)) : null, input.errorClass ?? null, input.errorCode ?? null, input.errorJson ? JSON.stringify(redact(input.errorJson)) : null, input.attempt ?? 1, input.durationMs ?? null],
         );
         return result.rows[0];
       },

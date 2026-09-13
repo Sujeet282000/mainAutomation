@@ -612,7 +612,7 @@ function catalogForAi() {
  * draft compiler input, never an execution or publishing instruction. */
 export async function graphFromLanguageModel(prompt: string): Promise<{ graph: WorkflowGraph; source: string } | null> {
   const catalog = catalogForAi();
-  if (env.openai) {
+  if (env.openai && process.env.AA_DISABLE_AI !== "1") {
     try {
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",

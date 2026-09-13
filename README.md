@@ -7,7 +7,7 @@ Multi-tenant workflow automation platform with a Next.js UI, Node.js control-pla
 ```text
 apps/
   web/        Next.js frontend and existing product UI
-  api/        Node.js/Express control-plane API
+  api/        Node.js/Express control-plane API (Express is the actual framework — see PROJECT.md)
   worker/     BullMQ execution workers
   scheduler/  cron/poll trigger dispatcher
   ai/         Python/FastAPI AI service

@@ -15,6 +15,7 @@ import { SkeletonCardGrid, SkeletonStatGrid } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { PlanReviewModal } from "@/features/workflow-builder/plan-review-modal";
 import { DashboardIdeaModal } from "@/components/copilot/dashboard-idea-modal";
+import { Logo } from "@/features/shell/logo";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -105,19 +106,14 @@ export default function DashboardPage() {
     toast.info("Building workflow…", { description: "Creating your automation from the analyzed plan" });
     try {
       if (planData?.sessionId && planData?.graph) {
-        // Use the analyzed plan's graph — the full pipeline already ran
-        const created = await api<{ automation: { id: string } }>("/automations", {
-          method: "POST",
-          body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft", graph: planData.graph, origin: "copilot" }),
-        });
-        const flowId = created.automation.id;
-        try {
-          await api<{ ok: boolean; graph?: unknown }>(`/copilot/sessions/${planData.sessionId}/approve`, {
-            method: "POST",
-            body: JSON.stringify({ flowId }),
-          });
-          persistCopilotSession(planData.sessionId, flowId).catch(() => undefined);
-        } catch { /* approval is best-effort */ }
+        // Approve adopts the reviewed plan server-side and creates the
+        // workflow in one step — no client-side pre-creation double-apply.
+        const approved = await api<{ ok: boolean; flowId: string; graph?: unknown }>(
+          `/copilot/sessions/${planData.sessionId}/approve`,
+          { method: "POST", body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft" }) },
+        );
+        const flowId = approved.flowId;
+        persistCopilotSession(planData.sessionId, flowId).catch(() => undefined);
         toast.success("Workflow created!", { description: `${next.slice(0, 40)}… is ready in the editor` });
         router.push(`/automations/${flowId}/editor?idea=${encodeURIComponent(next)}`);
         return;
@@ -202,6 +198,24 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {/* Brand header — the workspace always opens with the FlowShip mark,
+          so the brand is never hidden behind the collapsed sidebar rail. */}
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-gradient-to-r from-violet-500/[0.07] via-transparent to-teal/[0.07] px-4 py-3 shadow-sm">
+        <div className="flex items-center gap-3">
+          <Logo />
+          <div className="hidden h-8 w-px bg-line sm:block" />
+          <div>
+            <p className="text-sm font-semibold">
+              {new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening"} 👋
+            </p>
+            <p className="text-[11px] text-ink-muted">Here's what your automations are doing today.</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 rounded-full border border-line bg-elevated px-3 py-1.5 text-[11px] text-ink-muted">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" /> All systems operational
+        </div>
+      </div>
+
       {/* Copilot hero */}
       <section className="mb-6 overflow-hidden rounded-3xl border border-line bg-elevated shadow-card">
         <div className="relative overflow-hidden px-6 pb-6 pt-5">
@@ -259,10 +273,11 @@ export default function DashboardPage() {
       </section>
 
       {/* Stats */}
+      <div className="mt-7" />
       {loading && <SkeletonStatGrid count={6} />}
       {failed && <p className="mb-4 text-sm text-danger">{(autos.error as Error)?.message ?? "Could not load workspace."}</p>}
       {!loading && (
-        <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="ws-stagger grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
           <Card><div className="flex items-center gap-2 text-ink-muted"><Workflow className="h-4 w-4 text-violet-600" /> Workflows</div><div className="mt-2 text-2xl font-semibold">{autos.data?.automations.length ?? 0}</div><p className="mt-1 text-[11px] text-ink-muted">{onCount} active</p></Card>
           <Card><div className="flex items-center gap-2 text-ink-muted"><Activity className="h-4 w-4 text-violet-600" /> Runs</div><div className="mt-2 text-2xl font-semibold">{runs.data?.executions.length ?? 0}</div><Link href="/activity" className="mt-1 inline-flex items-center gap-1 text-[11px] text-violet-700">View all <ArrowRight className="h-3 w-3" /></Link></Card>
           <Card><div className="flex items-center gap-2 text-ink-muted"><Table2 className="h-4 w-4 text-teal" /> Tables</div><div className="mt-2 text-2xl font-semibold">{tables.data?.tables.length ?? 0}</div><p className="mt-1 text-[11px] text-ink-muted">{totalRecords} records</p></Card>
@@ -273,7 +288,7 @@ export default function DashboardPage() {
       )}
 
       {/* Workspace health + quick start */}
-      <div className="mt-7 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+      <div className="mt-6 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
         <Card>
           <div className="flex items-center justify-between">
             <div><p className="text-sm font-semibold">Workspace health</p><p className="mt-1 text-xs text-ink-muted">A quick read on what needs your attention.</p></div>

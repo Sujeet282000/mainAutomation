@@ -100,18 +100,11 @@ registerAdapter("manager", "turn_off", async ({ input, workspaceId }) => {
   return { output: { automationId: input.automationId, status: "off" } };
 });
 
-registerAdapter("tables", "update_record", async ({ input, workspaceId }) => {
-  const row = await queryOne(
-    `update data_table_rows set data=$2, updated_at=now() where id=$1 and org_id=$3 returning *`,
-    [input.recordId, JSON.stringify(input.data ?? {}), workspaceId]
-  );
-  return { output: row ?? {} };
-});
-
-registerAdapter("tables", "delete_record", async ({ input, workspaceId }) => {
-  await query(`delete from data_table_rows where id=$1 and org_id=$2`, [input.recordId, workspaceId]);
-  return { output: { deleted: true, id: input.recordId } };
-});
+// tables:update_record / tables:delete_record are intentionally NOT
+// registered here. The canonical implementations live in core.ts and enforce
+// the ownedTable() tenant check (table_id + org_id). Duplicate registrations
+// here used to silently overwrite them via registerAdapter's Map semantics —
+// a tenant-isolation regression.
 
 registerAdapter("email-parser", "new_email", async ({ input }) => ({ output: input }));
 registerAdapter("email-parser", "parse", async ({ input }) => {

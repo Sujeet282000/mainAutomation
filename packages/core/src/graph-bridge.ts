@@ -158,6 +158,26 @@ function stepFromNode(graph: WorkflowGraph, node: GraphNode, visiting: Set<strin
       steps: childrenOf(graph, node.id).map((n) => stepFromNode(graph, n, visiting))
     } as any;
   }
+  if (node.appSlug === "aggregator") {
+    // The canonical engine merges the outputs of the aggregator's source
+    // steps. Derive them from incoming graph edges so bridge-built
+    // definitions are self-contained on the worker path; `strategy`
+    // (merge|append) is the catalog's user-facing contract, normalized to
+    // the engine's `mode`.
+    const strategy = String(props.strategy ?? props.mode ?? "merge");
+    const edgeSources = graph.edges.filter((e) => e.target === node.id).map((e) => e.source);
+    const configured = (props.sources as string[]) ?? [];
+    return {
+      id: node.id,
+      name: node.label,
+      type: "aggregator",
+      props: {
+        sources: [...new Set([...configured, ...edgeSources])],
+        mode: strategy === "append" || strategy === "collect" ? "collect" : "merge",
+        separator: props.separator !== undefined ? String(props.separator) : undefined,
+      }
+    } as any;
+  }
   if (node.appSlug === "delay") {
     return {
       id: node.id,
@@ -453,6 +473,19 @@ function stepToNode(step: Step, index: number): GraphNode {
       label: name,
       position: pos(index),
       config: {},
+      connectionId: null
+    };
+  }
+  if (step.type === "aggregator") {
+    const p = step.props as { sources?: string[]; mode?: string; separator?: string };
+    return {
+      id,
+      type: "logic",
+      appSlug: "aggregator",
+      operation: "merge",
+      label: name,
+      position: pos(index),
+      config: { strategy: p.mode === "collect" ? "append" : "merge", ...(p.separator !== undefined ? { separator: p.separator } : {}) },
       connectionId: null
     };
   }

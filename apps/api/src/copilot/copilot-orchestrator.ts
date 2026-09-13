@@ -125,7 +125,7 @@ export function inspectDraft(graph?: WorkflowGraph | null): DraftSnapshot {
     suggestions,
     youDoFirst,
     iCan,
-    outline: steps.map((s) => `${s.index}. ${s.label} (${s.appSlug || "no app"}) [${s.chapter}]`).join(" → ")
+    outline: steps.map((s) => `${s.index}. ${s.label} (${s.appSlug || "no app"}) · ${CHAPTER_LABEL[s.chapter]}`).join(" → ")
   };
 }
 
@@ -172,22 +172,33 @@ function copilotCapabilities(steps: StepSnapshot[], youDoFirst: string[]): strin
 }
 
 export function formatCopilotReply(snapshot: DraftSnapshot, extra?: string) {
+  // Replies are HTML in the frontend's trusted subset (b/i/code/ul/li/span.ok|warn|err|hl).
+  // renderMarkup() on the client parses this allowlist and escapes everything else,
+  // so these spans render as colored text, never raw markup.
   if (snapshot.empty) {
     return extra
-      ? `The canvas has no steps yet.\n\n${extra}`
+      ? `The canvas has no steps yet.<br><br>${extra}`
       : "The canvas has no steps yet. Describe a trigger and actions, or add them on the canvas.";
   }
-  const lines = [
-    `Inspected your ${snapshot.nodeCount}-step draft (kept as you built it):`,
-    ...snapshot.steps.map((s) => `${s.index}. ${s.label} · ${s.chapter}`)
+  const chapterSpan = (chapter: StepChapter) =>
+    chapter === "setup"
+      ? '<span class="warn">setup</span>'
+      : chapter === "configure"
+        ? '<span class="hl">configure</span>'
+        : '<span class="ok">test</span>';
+  const lines: string[] = [
+    `Inspected your <b>${snapshot.nodeCount}-step draft</b> (kept as you built it):`,
+    "<ul>",
+    ...snapshot.steps.map((s) => `<li><b>${s.index}. ${s.label}</b> · ${chapterSpan(s.chapter)}</li>`),
+    "</ul>",
   ];
   const you = snapshot.youDoFirst?.length ? snapshot.youDoFirst : humanTasksFromSteps(snapshot.steps);
   if (you.length) {
-    lines.push("", "Do this first (I cannot):", ...you.map((t) => `• ${t}`));
+    lines.push("", "<b>Do this first (I cannot):</b>", "<ul>", ...you.map((t) => `<li>${t}</li>`), "</ul>");
   }
   const can = snapshot.iCan?.length ? snapshot.iCan : copilotCapabilities(snapshot.steps, you);
   if (can.length) {
-    lines.push("", "I can help next:", ...can.map((t) => `• ${t}`));
+    lines.push("", "<b>I can help next:</b>", "<ul>", ...can.map((t) => `<li>${t}</li>`), "</ul>");
   }
   if (extra) lines.push("", extra);
   return lines.join("\n");
@@ -196,6 +207,13 @@ export function formatCopilotReply(snapshot: DraftSnapshot, extra?: string) {
 export function describeDraft(snapshot: DraftSnapshot) {
   return formatCopilotReply(snapshot);
 }
+
+/** User-facing chapter labels for outlines and summaries — never debug brackets. */
+export const CHAPTER_LABEL: Record<StepChapter, string> = {
+  setup: "needs setup",
+  configure: "configure",
+  test: "ready to test",
+};
 
 function quotedName(prompt: string) {
   const m = prompt.match(/step\s+['"]([^'"]+)['"]/i) ?? prompt.match(/['"](\d+\.\s+[^'"]+)['"]/);

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+// Keep this suite deterministic: never call live model providers.
+process.env.AA_DISABLE_AI = "1";
+
 import { copilotChat, explainLastTest, isCatalogGraph, refineGraph } from "./copilot";
 import { copilotShouldPersist, parseCopilotMode } from "./copilot-pipeline";
 import { diagnoseFromFailure } from "../diagnose";

@@ -13,7 +13,7 @@
 // =============================================================================
 
 import { query } from "./db";
-import { enqueueExecution } from "./queue";
+import { enqueueFlowResume } from "./queue";
 
 export async function sweepPausedRuns(): Promise<number> {
   // 1. Due delayed runs: resume_at has passed and they're still paused.
@@ -22,18 +22,14 @@ export async function sweepPausedRuns(): Promise<number> {
      FROM flow_runs
      WHERE status = 'paused' AND paused_reason = 'delay' AND resume_at IS NOT NULL AND resume_at <= now()
      LIMIT 200`,
-  );
-
-  let resumed = 0;
+  );  let resumed = 0;
   for (const run of due) {
-    const updated = await query(
-      `UPDATE flow_runs SET status = 'running', paused_reason = NULL, transition_epoch = transition_epoch + 1
-       WHERE id = $1 AND status = 'paused' AND paused_reason = 'delay'`,
-      [run.id],
-    );
-    if (!updated.length) continue; // another sweeper/worker won the race
+    // Canonical resume: atomic paused→running claim + "flow-steps" enqueue.
+    // The old path resumed flow_runs through the legacy "executions" queue,
+    // whose handler looks runs up in the wrong table (missing execution).
+    const ok = await enqueueFlowResume(run.id, run.org_id).catch(() => false);
+    if (!ok) continue; // another sweeper/worker won the race
     resumed += 1;
-    await enqueueExecution({ executionId: run.id, workspaceId: run.workspace_id, orgId: run.org_id }).catch(() => undefined);
   }
 
   // 2. Approval timeouts: pending todos past their deadline get resolved by
@@ -58,12 +54,7 @@ export async function sweepPausedRuns(): Promise<number> {
     if (!resolved.length) continue;
 
     if (onTimeout === "approve") {
-      await query(
-        `UPDATE flow_runs SET status = 'running', paused_reason = NULL, transition_epoch = transition_epoch + 1
-         WHERE id = $1 AND status = 'paused'`,
-        [todo.run_id],
-      );
-      await enqueueExecution({ executionId: todo.run_id, workspaceId: todo.workspace_id, orgId: todo.org_id }).catch(() => undefined);
+      await enqueueFlowResume(todo.run_id, todo.org_id).catch(() => undefined);
     } else {
       await query(
         `UPDATE flow_runs SET status = 'failed', paused_reason = NULL, finished_at = now()

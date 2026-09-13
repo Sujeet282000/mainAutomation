@@ -45,6 +45,10 @@ export async function completeAi(opts: {
   json?: boolean;
   piiFilter?: boolean;
 }) {
+  // Test escape hatch: unit tests set AA_DISABLE_AI=1 so suites exercise the
+  // deterministic code paths instead of waiting through the live provider
+  // failover cascade (a Groq 429 once stalled copilot tests for 3+ minutes).
+  if (process.env.AA_DISABLE_AI === "1") return { text: "", source: "none" as const };
   const prompt = opts.piiFilter === false ? opts.prompt : redactPii(opts.prompt);
   const system = opts.system ?? "You are the automation platform AI layer. Be concise and factual.";
 

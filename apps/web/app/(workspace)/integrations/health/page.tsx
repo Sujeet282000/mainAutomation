@@ -169,11 +169,13 @@ export default function IntegrationHealthPage() {
 
   const stats = useMemo(() => {
     const total = readinessData.length;
-    const productionReady = readinessData.filter((d) => d.readiness.readinessScore >= 80).length;
+    // Readiness ≠ health: a high readiness score means the platform
+    // implements the app — only a passed vendor probe proves it works.
+    const fullyReady = readinessData.filter((d) => d.readiness.readinessScore >= 80).length;
     const partial = readinessData.filter((d) => d.readiness.readinessScore >= 40 && d.readiness.readinessScore < 80).length;
     const manifestOnly = readinessData.filter((d) => d.readiness.readinessScore < 40).length;
     const withConnections = readinessData.filter((d) => d.readiness.connectedCount > 0).length;
-    return { total, productionReady, partial, manifestOnly, withConnections };
+    return { total, fullyReady, partial, manifestOnly, withConnections };
   }, [readinessData]);
 
   async function runHealthCheck() {
@@ -223,9 +225,9 @@ export default function IntegrationHealthPage() {
             <Card className="p-3">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-ok" />
-                <span className="text-[11px] text-ink-muted">Production Ready</span>
+                <span className="text-[11px] text-ink-muted">Fully Ready</span>
               </div>
-              <p className="mt-1 text-2xl font-bold text-ok">{stats.productionReady}</p>
+              <p className="mt-1 text-2xl font-bold text-ok">{stats.fullyReady}</p>
             </Card>
             <Card className="p-3">
               <div className="flex items-center gap-2">

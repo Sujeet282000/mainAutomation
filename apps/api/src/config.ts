@@ -64,4 +64,24 @@ export const env = {
   seedAdminPassword: process.env.SEED_ADMIN_PASSWORD ?? "ChangeMe123!",
   serviceToken: process.env.SERVICE_TOKEN ?? "dev-service-token-change-me-32ch",
   serviceTokenMaxAgeSeconds: Number(process.env.SERVICE_TOKEN_MAX_AGE_SECONDS ?? 300),
+  rateLimits: {
+    chatPerMinute: Number(process.env.RATE_LIMIT_CHAT_PER_MIN ?? 30),
+    publicChatPerMinute: Number(process.env.RATE_LIMIT_PUBLIC_CHAT_PER_MIN ?? 20),
+  },
 };
+
+/**
+ * Canonical model options for the Agents / Chatbots model picker. Mirrors the
+ * provider defaults and readiness probes in agent/model-router.ts so the UI can
+ * only ever offer models the runtime can actually route to.
+ */
+export function modelOptions() {
+  return [
+    { value: "auto", label: "Auto (best available)", provider: "auto", available: true },
+    { value: "openai:gpt-4o-mini", label: "OpenAI · GPT-4o mini", provider: "openai", available: Boolean(env.openai) },
+    { value: "anthropic:claude-3-5-sonnet-20241022", label: "Anthropic · Claude 3.5 Sonnet", provider: "anthropic", available: Boolean(env.anthropic) },
+    { value: "gemini:gemini-3.6-flash", label: "Google · Gemini Flash", provider: "gemini", available: Boolean(env.gemini) },
+    { value: "groq:openai/gpt-oss-120b", label: "Groq · GPT-OSS 120B", provider: "groq", available: Boolean(env.groq) },
+    { value: "local:qwen2.5:3b-instruct", label: "Local · Qwen 2.5 3B (Ollama)", provider: "local", available: Boolean(env.localLlmUrl) },
+  ];
+}

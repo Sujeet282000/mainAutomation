@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseFlowDefinition } from "@algoverge/core";
-import { Executor, type StepHandler } from "./executor";
+import { EngineError, Executor, type StepHandler } from "./executor";
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
@@ -316,6 +316,71 @@ test("subflow self-reference fails fast with SUBFLOW_RECURSION (golden G8 guard)
   assert.equal(state.status, "failed", "self-referential subflow must fail, not loop forever");
 });
 
+test("aggregator merges branch outputs into one step output (fan_in)", async () => {
+  const def = parseFlowDefinition({
+    schemaVersion: 1,
+    trigger: { id: "trigger", type: "manual", props: {} },
+    steps: [
+      { id: "a", type: "http", props: { method: "GET", url: "https://example.com/a" } },
+      { id: "b", type: "http", props: { method: "GET", url: "https://example.com/b" } },
+      {
+        id: "fan_in",
+        type: "aggregator",
+        props: { sources: ["a", "b"], mode: "merge" },
+      },
+      { id: "after", type: "http", props: { method: "GET", url: "https://example.com/after" } },
+    ],
+    settings: { timezone: "UTC" },
+  });
+  const { state, db, queues } = createMockDb(def);
+  let afterContext: Record<string, unknown> = {};
+  const handlers = new Map<string, StepHandler>([
+    ["http", { execute: async (ctx) => { afterContext = { ...ctx.context }; return { kind: "ok" as const, output: { ran: true } }; } }],
+  ]);
+  const ex = new Executor(db, queues, handlers);
+  // Drive the sequential cursors manually (mock queue does not re-enter).
+  await ex.transition("run1", 0, 1); // a
+  await ex.transition("run1", 1, 2); // b
+  await ex.transition("run1", 2, 3); // aggregator
+  await ex.transition("run1", 3, 4); // after
+  assert.equal(state.status, "succeeded");
+  // The step after the aggregator sees merged outputs + bookkeeping keys.
+  const agg = afterContext["fan_in"] as Record<string, unknown>;
+  assert.ok(agg, "aggregator output present in downstream context");
+  assert.deepEqual(agg.missing, [], "no missing sources when both branches ran");
+  assert.deepEqual((agg.sources as Record<string, unknown>)["a"], { ran: true });
+});
+
+test("aggregator collect mode gathers items and reports missing sources", async () => {
+  const def = parseFlowDefinition({
+    schemaVersion: 1,
+    trigger: { id: "trigger", type: "manual", props: {} },
+    steps: [
+      { id: "only", type: "http", props: { method: "GET", url: "https://example.com" } },
+      {
+        id: "fan_in",
+        type: "aggregator",
+        props: { sources: ["only", "never-ran"], mode: "collect", separator: ", " },
+      },
+    ],
+    settings: { timezone: "UTC" },
+  });
+  const { state, db, queues } = createMockDb(def);
+  const handlers = new Map<string, StepHandler>([
+    ["http", { execute: async () => ({ kind: "ok" as const, output: { id: 7 } }) }],
+  ]);
+  const ex = new Executor(db, queues, handlers);
+  await ex.transition("run1", 0, 1);
+  await ex.transition("run1", 1, 2);
+  assert.equal(state.status, "succeeded");
+  const ctx = state.context as Record<string, Record<string, unknown>>;
+  const agg = ctx["fan_in"];
+  assert.equal(agg.count, 1);
+  assert.deepEqual(agg.items, [{ id: 7 }]);
+  assert.equal(agg.text, JSON.stringify({ id: 7 }));
+  assert.deepEqual(agg.missing, ["never-ran"]);
+});
+
 test("transient handler errors retry then succeed", async () => {
   const def = parseFlowDefinition({
     schemaVersion: 1,
@@ -345,4 +410,138 @@ test("transient handler errors retry then succeed", async () => {
   await ex.transition("run1", 0, 1);
   assert.equal(state.status, "succeeded");
   assert.equal(n, 2);
+});
+
+// ── Golden G7: durable delay → resume completes the run AFTER the delay ────
+test("golden G7: delay resumes once and completes downstream steps (no re-pause loop)", async () => {
+  const def = parseFlowDefinition({
+    schemaVersion: 1,
+    trigger: { id: "trigger", type: "manual", props: {} },
+    steps: [
+      { id: "a", type: "http", props: { method: "GET", url: "https://example.com/a" } },
+      { id: "wait", type: "delay", props: { mode: "duration", seconds: 30 } as any },
+      { id: "b", type: "http", props: { method: "GET", url: "https://example.com/b" } },
+    ],
+    settings: { timezone: "UTC" },
+  });
+  const { state, db, queues } = createMockDb(def);
+  // Cursor is engine-managed in this mock: pause() persists nextCursor,
+  // resumeClaim() flips paused→running and returns the stored cursor, and
+  // claimTransition is permissive about epoch (real dedupe is modeled by the
+  // paused flag in resumeClaim — the actual first-claimer-wins mechanism).
+  let storedCursor = 0;
+  db.flowRuns.claimTransition = async (_runId: string, _expectedCursor: number, expectedEpoch: number) => ({
+    id: "run1", orgId: "org1", flowVersionId: "v1", contextJson: state.context,
+    transitionEpoch: expectedEpoch, createdAt: new Date().toISOString(),
+  });
+  db.flowRuns.pause = async (_runId: string, input: any) => { storedCursor = input.nextCursor ?? input.expectedCursor + 1; (state as any).paused = true; };
+  db.flowRuns.resumeClaim = async () => {
+    if ((state as any).paused !== true) return null;
+    (state as any).paused = false;
+    return { id: "run1", orgId: "org1", flowVersionId: "v1", contextJson: state.context, transitionEpoch: 9, createdAt: new Date().toISOString(), cursor: storedCursor };
+  };
+  const executed: string[] = [];
+  const handlers = new Map<string, StepHandler>([
+    ["http", { execute: async ({ step }) => { executed.push(step.id); return { kind: "ok" as const, output: { ran: step.id } }; } }],
+  ]);
+  const ex = new Executor(db, queues, handlers);
+  await ex.transition("run1", 0, 1); // a
+  await ex.transition("run1", 1, 2); // wait → pause
+  assert.equal((state as any).paused, true);
+  await ex.resume("run1"); // continues AFTER the delay
+  assert.equal(state.status, "succeeded");
+  assert.deepEqual(executed, ["a", "b"], "delay must not re-execute on resume");
+});
+
+// ── Golden G8: approval resume continues after the step, exactly once ──────
+test("golden G8: approval resume continues after the step and duplicate resumes are no-ops", async () => {
+  const def = parseFlowDefinition({
+    schemaVersion: 1,
+    trigger: { id: "trigger", type: "manual", props: {} },
+    steps: [
+      { id: "ask", type: "approval", props: { title: "Sign off", timeoutHours: 24 } },
+      { id: "after", type: "http", props: { method: "GET", url: "https://example.com/after" } },
+    ],
+    settings: { timezone: "UTC" },
+  });
+  const { state, db, queues } = createMockDb(def);
+  const todos: any[] = [];
+  db.todos.create = async (...args: any[]) => { todos.push(args); return { id: "todo1" }; };
+  let storedCursor = 0;
+  db.flowRuns.claimTransition = async (_runId: string, _expectedCursor: number, expectedEpoch: number) => ({
+    id: "run1", orgId: "org1", flowVersionId: "v1", contextJson: state.context,
+    transitionEpoch: expectedEpoch, createdAt: new Date().toISOString(),
+  });
+  db.flowRuns.pause = async (_runId: string, input: any) => { storedCursor = input.nextCursor ?? input.expectedCursor + 1; (state as any).paused = true; };
+  db.flowRuns.resumeClaim = async () => {
+    if ((state as any).paused !== true) return null; // first claimer wins
+    (state as any).paused = false;
+    return { id: "run1", orgId: "org1", flowVersionId: "v1", contextJson: state.context, transitionEpoch: 9, createdAt: new Date().toISOString(), cursor: storedCursor };
+  };
+  let afterRuns = 0;
+  const handlers = new Map<string, StepHandler>([
+    ["http", { execute: async () => { afterRuns += 1; return { kind: "ok" as const, output: {} }; } }],
+  ]);
+  const ex = new Executor(db, queues, handlers);
+  await ex.transition("run1", 0, 1); // approval pauses (todo created once)
+  assert.equal((state as any).paused, true);
+  assert.equal(todos.length, 1, "exactly one approval todo on pause");
+  // Two resume attempts race (user approval + sweeper) — only one may win.
+  await Promise.all([ex.resume("run1"), ex.resume("run1")]);
+  await ex.resume("run1"); // a late third resume after completion
+  assert.equal(state.status, "succeeded");
+  assert.equal(afterRuns, 1, "downstream step must run exactly once");
+  assert.equal(todos.length, 1, "resume must not re-create the approval todo");
+});
+
+// ── Golden G6: onError = fallbackValue keeps the run green ─────────────────
+test("golden G6: step failure with fallbackValue yields the fallback output and completes", async () => {
+  const def = parseFlowDefinition({
+    schemaVersion: 1,
+    trigger: { id: "trigger", type: "manual", props: {} },
+    steps: [
+      { id: "flaky", type: "http", onError: "fallback", fallbackValue: { degraded: true }, props: { method: "GET", url: "https://example.com" } },
+      { id: "next", type: "http", props: { method: "GET", url: "https://example.com/next" } },
+    ],
+    settings: { timezone: "UTC" },
+  } as any);
+  const { state, db, queues } = createMockDb(def);
+  let nextContext: Record<string, unknown> = {};
+  const handlers = new Map<string, StepHandler>([
+    ["http", { execute: async (ctx) => ctx.step.id === "flaky" ? { kind: "error" as const, error: new EngineError("transient", "RATE_LIMITED", "429") } : { kind: "ok" as const, output: {} } }],
+  ]);
+  // Capture the downstream context by observing the final run context.
+  const ex = new Executor(db, queues, handlers);
+  await ex.transition("run1", 0, 1);
+  await ex.transition("run1", 1, 2);
+  assert.equal(state.status, "succeeded", "fallback policy must not fail the run");
+  const flaky = (state.context as Record<string, any>)["flaky"];
+  assert.deepEqual(flaky, { degraded: true }, "step output must be the configured fallbackValue");
+});
+
+// ── Full sequential certification: trigger → action → action → done ────────
+test("golden: full sequential run persists every step and finishes succeeded", async () => {
+  const def = parseFlowDefinition({
+    schemaVersion: 1,
+    trigger: { id: "trigger", type: "manual", props: {} },
+    steps: [
+      { id: "s1", type: "http", props: { method: "GET", url: "https://example.com/1" } },
+      { id: "s2", type: "http", props: { method: "GET", url: "https://example.com/2" } },
+    ],
+    settings: { timezone: "UTC" },
+  });
+  const { state, db, queues } = createMockDb(def);
+  const recorded: Array<{ stepId: string; status: string }> = [];
+  db.runSteps.insert = async (input: any) => { recorded.push({ stepId: input.stepId, status: input.status }); };
+  const handlers = new Map<string, StepHandler>([
+    ["http", { execute: async ({ step }) => ({ kind: "ok" as const, output: { n: step.id } }) }],
+  ]);
+  const ex = new Executor(db, queues, handlers);
+  await ex.transition("run1", 0, 1);
+  await ex.transition("run1", 1, 2);
+  assert.equal(state.status, "succeeded");
+  assert.deepEqual(recorded, [
+    { stepId: "s1", status: "succeeded" },
+    { stepId: "s2", status: "succeeded" },
+  ], "every step outcome must be persisted in order");
 });

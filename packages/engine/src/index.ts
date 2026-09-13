@@ -1,4 +1,4 @@
-export { Executor, type StepHandler, type ErrorClass, EngineError } from "./executor";
+export { Executor, type StepHandler, type ErrorClass, EngineError, aggregateOutput } from "./executor";
 export {
   interpolate,
   resolveExpression,

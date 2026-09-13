@@ -725,29 +725,27 @@ export function registerUiCompat(authed: Router) {
           );
 
           // Create a session and store pending operations so the approve
-          // endpoint can re-validate them at approval time.
-          let sessionId: string | undefined;
-          if (body.automationId) {
-            const { ensureProjectId } = await import("./copilot/copilot-http");
-            const projectId = await ensureProjectId(req.orgId!);
-            const created = await queryOne<{ id: string }>(
-              `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
-               VALUES ($1, $2, $3, $4, 'ask_as_you_build') RETURNING id`,
-              [req.orgId, projectId, req.user!.userId, body.automationId],
-            );
-            sessionId = created!.id;
-            // Store grounded operations + proposed graph for the approve endpoint
-            const { persistBuilderDraft } = await import("./flow-runtime");
-            await query(
-              `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
-               WHERE id = $1`,
-              [
-                sessionId,
-                JSON.stringify(groundedOperations),
-                JSON.stringify(persistBuilderDraft(groundedGraph)),
-              ],
-            );
-          }
+          // endpoint can re-validate them at approval time. Sessions without
+          // an existing flow get flow_id = NULL — approve adopts the reviewed
+          // proposal and creates the workflow server-side (plan → review → build).
+          const { ensureProjectId } = await import("./copilot/copilot-http");
+          const projectId = await ensureProjectId(req.orgId!);
+          const created = await queryOne<{ id: string }>(
+            `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [req.orgId, projectId, req.user!.userId, body.automationId ?? null, body.automationId ? "ask_as_you_build" : "auto_build"],
+          );
+          const sessionId: string | undefined = created!.id;
+          // Store grounded operations + proposed graph for the approve endpoint
+          await query(
+            `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
+             WHERE id = $1`,
+            [
+              sessionId,
+              JSON.stringify(groundedOperations),
+              JSON.stringify(persistBuilderDraft(groundedGraph)),
+            ],
+          );
 
           // Build structured clarification questions from needs_input +
           // missing_connections. These become interactive questions in
@@ -789,14 +787,86 @@ export function registerUiCompat(authed: Router) {
       }
     }
 
-    // Local heuristic planning fallback
+    // Local heuristic planning fallback. Same contract as the AI path: a
+    // session with a grounded, buildable graph so plan → review → build works
+    // even without the Python AI service.
     const preview = _buildPlanPreview(body.prompt, [], []);
+    const { applyAgentOperations } = await import("./agent-operation-applier");
+
+    // Emit add_node operations from the detected apps — same catalog the
+    // preview describes, so the grounded graph matches the shown plan.
+    const heuristicOps: Array<{ kind: "add_node"; arguments: Record<string, unknown> }> = [];
+    const detectedApps = (preview.apps_used ?? [])
+      .map(({ slug }) => APP_CATALOG.find((a) => a.slug === slug))
+      .filter((a): a is NonNullable<typeof a> => Boolean(a));
+    const triggerApp = detectedApps.find((a) => a.operations.some((o) => o.type === "trigger"))
+      ?? APP_CATALOG.find((a) => a.slug === "schedule");
+    if (triggerApp) {
+      const triggerOp = triggerApp.operations.find((o) => o.type === "trigger");
+      if (triggerOp) {
+        heuristicOps.push({ kind: "add_node", arguments: { appSlug: triggerApp.slug, operation: triggerOp.key, label: triggerOp.name } });
+      }
+    }
+    for (const app of detectedApps) {
+      if (app.slug === triggerApp?.slug) continue;
+      const actionOp = app.operations.find((o) => o.type !== "trigger");
+      if (actionOp) {
+        heuristicOps.push({ kind: "add_node", arguments: { appSlug: app.slug, operation: actionOp.key, label: actionOp.name } });
+      }
+    }
+    if (heuristicOps.length === 0) {
+      const httpApp = APP_CATALOG.find((a) => a.slug === "http");
+      const httpOp = httpApp?.operations.find((o) => o.type !== "trigger");
+      if (httpApp && httpOp) heuristicOps.push({ kind: "add_node", arguments: { appSlug: httpApp.slug, operation: httpOp.key, label: httpOp.name } });
+    }
+
+    let groundedGraph: unknown = { nodes: [], edges: [] };
+    let groundedApplied: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
+    try {
+      const result = await applyAgentOperations({
+        graph: { nodes: [], edges: [] },
+        operations: heuristicOps,
+        workspaceId: req.orgId!,
+        organizationId: req.orgId!,
+        allowDestructive: false,
+      });
+      groundedGraph = result.graph;
+      groundedApplied = result.applied;
+    } catch {
+      /* grounding failed — still return a session with the preview */
+    }
+
+    const { ensureProjectId } = await import("./copilot/copilot-http");
+    const projectId = await ensureProjectId(req.orgId!);
+    const sessionCreated = await queryOne<{ id: string }>(
+      `INSERT INTO copilot_sessions (org_id, project_id, user_id, flow_id, mode)
+       VALUES ($1, $2, $3, NULL, 'auto_build') RETURNING id`,
+      [req.orgId, projectId, req.user!.userId],
+    );
+    await query(
+      `UPDATE copilot_sessions SET pending_operations = $2, proposed_definition = $3, stage = 'persist'
+       WHERE id = $1`,
+      [
+        sessionCreated!.id,
+        JSON.stringify(groundedApplied),
+        JSON.stringify(persistBuilderDraft(groundedGraph)),
+      ],
+    );
+
     res.json({
       requestId,
+      sessionId: sessionCreated!.id,
       reply: preview.summary,
       preview,
-      operations: [],
+      graph: groundedGraph,
+      operations: groundedApplied,
+      applied_operations: groundedApplied,
+      rejected_operations: [],
+      needs_confirmation: [],
+      issues: [],
       needs_input: [],
+      clarificationQuestions: (preview.missing_connections ?? []).map((conn) => ({ question: conn, required: true })),
+      confidence: preview.confidence ?? 0.5,
     });
   });
 

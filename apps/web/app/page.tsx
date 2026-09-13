@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowRight, BarChart3, Bot, Check, FileInput, Globe, LayoutTemplate,
-  Moon, Shield, Sparkles, Sun, Table2, Workflow, Zap, Mail, MessageSquare,
-  Calendar, CreditCard, Database, GitBranch, Layers, Clock,
+  ArrowRight, BarChart3, Bot, Check, CheckCircle2, FileInput, Globe, LayoutTemplate,
+  Shield, Sparkles, Table2, Workflow, Zap, Mail, MessageSquare,
+  Calendar, CreditCard, Database, GitBranch, Layers, Clock, Wrench, X,
 } from "lucide-react";
 import { Logo } from "@/features/shell/logo";
 import { Button } from "@/components/ui/button";
@@ -24,29 +24,31 @@ const APPS = [
   { name: "Discord", color: "5865F2", icon: MessageSquare },
   { name: "Airtable", color: "FCBF49", icon: Layers },
   { name: "Calendar", color: "4285F4", icon: Calendar },
-  { name: "Zapier", color: "FF4F00", icon: Zap },
+  { name: "Webhooks", color: "7C3AED", icon: Zap },
 ];
 
 const TEMPLATES = [
-  { title: "Gmail → Slack", body: "Post a channel message when a labeled email arrives.", from: "Gmail", to: "Slack", color: "from-red-500 to-purple-600" },
-  { title: "Form → Sheets", body: "Log every form response as a new spreadsheet row.", from: "Forms", to: "Sheets", color: "from-blue-500 to-green-500" },
-  { title: "Stripe → CRM", body: "Create or update a contact when a payment succeeds.", from: "Stripe", to: "HubSpot", color: "from-indigo-500 to-orange-400" },
-  { title: "Schedule → AI → Email", body: "Summarize yesterday's runs and email the team each morning.", from: "Schedule", to: "Gmail", color: "from-amber-500 to-red-400" },
+  { title: "Gmail → Slack", body: "Post a channel message when a labeled email arrives.", from: "Gmail", to: "Slack", color: "from-red-500 to-purple-600", apps: ["✉️", "💬"] },
+  { title: "Form → Sheets", body: "Log every form response as a new spreadsheet row.", from: "Forms", to: "Sheets", color: "from-blue-500 to-green-500", apps: ["📝", "📊"] },
+  { title: "Stripe → CRM", body: "Create or update a contact when a payment succeeds.", from: "Stripe", to: "HubSpot", color: "from-indigo-500 to-orange-400", apps: ["💳", "🧲"] },
+  { title: "Schedule → AI → Email", body: "Summarize yesterday's runs and email the team each morning.", from: "Schedule", to: "Gmail", color: "from-amber-500 to-red-400", apps: ["⏰", "✦", "✉️"] },
+  { title: "Sheets → Calendar", body: "Turn new spreadsheet rows into calendar events instantly.", from: "Sheets", to: "Calendar", color: "from-green-500 to-blue-500", apps: ["📊", "📅"] },
+  { title: "Webhook → AI → Report", body: "Enrich incoming webhooks with AI and file a daily report.", from: "Webhook", to: "Notion", color: "from-violet-500 to-pink-500", apps: ["⚡", "✦", "📚"] },
 ];
 
 const STEPS = [
-  { n: "1", title: "Pick a trigger", body: "Choose the event that starts the workflow — a new email, form submission, webhook, or schedule.", icon: Zap, color: "bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300" },
-  { n: "2", title: "Add actions", body: "Connect Slack, Sheets, CRM, HTTP, or AI. Map fields with data from prior steps.", icon: Workflow, color: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300" },
-  { n: "3", title: "Test & publish", body: "Run a sample through every node, watch status icons, then turn it on.", icon: Sparkles, color: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300" },
+  { n: "1", title: "Pick a trigger", body: "Choose the event that starts the workflow — a new email, form submission, webhook, or schedule.", icon: Zap, color: "bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300", mock: ["✉️ Gmail", "⚡ Webhook", "⏰ Schedule", "📝 Form"] },
+  { n: "2", title: "Add actions", body: "Connect Slack, Sheets, CRM, HTTP, or AI. Map fields with data from prior steps.", icon: Workflow, color: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300", mock: ["💬 Slack", "📊 Sheets", "✦ AI step", "🔀 Paths"] },
+  { n: "3", title: "Test & publish", body: "Run a sample through every node, watch status icons, then turn it on.", icon: Sparkles, color: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300", mock: ["✓ Step 1 ok", "✓ Step 2 ok", "✓ Step 3 ok", "🚀 Publish"] },
 ];
 
 const FEATURES = [
-  { icon: Workflow, title: "Visual builder", body: "Paths, delays, filters, and drag-and-drop between steps.", color: "text-violet-600" },
-  { icon: Sparkles, title: "AI Copilot", body: "Describe the outcome in plain language. It proposes apps, events, and mappings.", color: "text-amber-500" },
-  { icon: Bot, title: "AI steps", body: "Extract, summarize, classify, write, and translate in-line.", color: "text-blue-600" },
-  { icon: Table2, title: "Tables & forms", body: "Native records and public forms that start automations.", color: "text-teal" },
-  { icon: BarChart3, title: "Analytics", body: "Real-time dashboards with per-workflow performance and CSV/PDF export.", color: "text-pink-500" },
-  { icon: Globe, title: "50+ integrations", body: "Gmail, Slack, Sheets, Stripe, HubSpot, Notion, and more.", color: "text-emerald-600" },
+  { icon: Workflow, title: "Visual builder", body: "Paths, loops, delays, filters, and drag-and-drop between steps — every node tests individually.", color: "text-violet-600", span: "lg:col-span-2", gradient: "from-violet-500/10 to-transparent" },
+  { icon: Sparkles, title: "AI Copilot", body: "Describe the outcome in plain language. It proposes apps, events, and mappings for review.", color: "text-amber-500", span: "", gradient: "from-amber-500/10 to-transparent" },
+  { icon: Bot, title: "AI steps & agents", body: "Extract, summarize, classify, and write in-line — or hand the job to a tool-using agent with approvals.", color: "text-blue-600", span: "", gradient: "from-blue-500/10 to-transparent" },
+  { icon: Table2, title: "Tables & forms", body: "Native records, public forms, and submissions that start automations automatically.", color: "text-teal", span: "", gradient: "from-teal/10 to-transparent" },
+  { icon: BarChart3, title: "Analytics", body: "Run volume, success rate, P95 latency, and top errors — computed in the database, not faked.", color: "text-pink-500", span: "", gradient: "from-pink-500/10 to-transparent" },
+  { icon: Globe, title: "50+ integrations", body: "Gmail, Slack, Sheets, Stripe, HubSpot, Notion, plus a first-class HTTP connector for anything else.", color: "text-emerald-600", span: "lg:col-span-2", gradient: "from-emerald-500/10 to-transparent" },
 ];
 
 const PLANS = [
@@ -86,21 +88,21 @@ function useStaggeredReveal(count: number, baseDelay = 80) {
     obs.observe(el);
     return () => obs.disconnect();
   }, []);
-  return { ref, visible, staggerDelay: (i: number) => ({ animationDelay: `${i * baseDelay}ms` }) };
+  return {
+    ref,
+    visible,
+    staggerDelay: (i: number) => ({ animationDelay: `${baseDelay + i * baseDelay}ms` }),
+  };
 }
 
-/* ── Animated sub-components ───────────────────────────────────────────── */
-
-/** Deterministic pseudo-random number generator seeded by index.
- *  Ensures server and client produce identical particle positions,
- *  eliminating the Next.js hydration mismatch. */
+/** Deterministic pseudo-random for SSR-stable particles. */
 function seededRandom(seed: number) {
   let s = seed + 1;
   return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
 }
 
-function FloatingParticles() {
-  const particles = Array.from({ length: 20 }, (_, i) => {
+function FloatingParticles({ count = 20 }: { count?: number }) {
+  const particles = Array.from({ length: count }, (_, i) => {
     const rand = seededRandom(i * 7 + 42);
     return {
       id: i,
@@ -131,6 +133,8 @@ function FloatingParticles() {
     </div>
   );
 }
+
+/* ── Mockup components (product-true "images") ─────────────────────────── */
 
 function AnimatedWorkflow() {
   const nodes = [
@@ -167,6 +171,187 @@ function AnimatedWorkflow() {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Full editor mockup — sidebar, canvas with animated success sweep,
+ * inspector panel, and bottom test bar. This is the hero "screenshot".
+ */
+function EditorMockup() {
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setStage((s) => (s + 1) % 6), 1400);
+    return () => clearInterval(t);
+  }, []);
+  const lanes = ["Gmail · New email", "AI · Classify intent", "Sheets · Add row", "Slack · Notify #ops"];
+  const nodeStates = lanes.map((_, i) => (stage > i ? "ok" : stage === i ? "running" : "idle"));
+
+  return (
+    <div className="animate-float-slow rounded-3xl border border-line bg-elevated p-1 shadow-2xl ring-1 ring-black/5">
+      <div className="overflow-hidden rounded-2xl bg-muted/30">
+        {/* Window chrome */}
+        <div className="flex items-center gap-1.5 border-b border-line/60 px-4 py-2.5">
+          <div className="h-2.5 w-2.5 rounded-full bg-red-400" />
+          <div className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+          <div className="h-2.5 w-2.5 rounded-full bg-green-400" />
+          <div className="ml-3 flex-1 truncate rounded-md bg-bg px-3 py-1 text-[10px] text-ink-muted">flowship.app/automations/lead-router/editor</div>
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">Draft</span>
+        </div>
+
+        <div className="grid grid-cols-[52px_1fr_92px] sm:grid-cols-[64px_1fr_110px]">
+          {/* Step library rail */}
+          <div className="flex flex-col items-center gap-2.5 border-r border-line/60 px-2 py-3">
+            {[Zap, Workflow, Sparkles, Table2, Clock, Bot].map((Icon, i) => (
+              <span key={i} className="flex h-7 w-7 items-center justify-center rounded-lg bg-elevated text-ink-muted shadow-sm transition hover:scale-110 hover:text-violet-600">
+                <Icon className="h-3.5 w-3.5" />
+              </span>
+            ))}
+          </div>
+
+          {/* Canvas */}
+          <div className="space-y-1.5 px-3 py-3.5 sm:px-5">
+            {lanes.map((label, i) => {
+              const st = nodeStates[i];
+              return (
+                <div key={label}>
+                  <div
+                    className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 text-[10px] sm:text-[11px] transition-all duration-500 ${
+                      st === "ok" ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+                      : st === "running" ? "border-violet-400 bg-violet-50 text-violet-800 shadow-md shadow-violet-500/10 dark:border-violet-600 dark:bg-violet-950/40 dark:text-violet-200"
+                      : "border-line bg-elevated text-ink-muted"
+                    }`}
+                    style={{ animation: st === "running" ? "none" : `float 4s ease-in-out ${i * 0.5}s infinite` }}
+                  >
+                    <span className={`flex h-4 w-4 items-center justify-center rounded-full text-[8px] font-bold text-white ${st === "ok" ? "bg-emerald-500" : st === "running" ? "bg-violet-500 animate-pulse" : "bg-slate-300 dark:bg-slate-600"}`}>
+                      {st === "ok" ? "✓" : st === "running" ? "•" : i + 1}
+                    </span>
+                    <span className="truncate font-medium">{label}</span>
+                    {st === "ok" && <span className="ml-auto text-[9px] text-emerald-600 dark:text-emerald-300">0.{3 + i}s</span>}
+                  </div>
+                  {i < lanes.length - 1 && <div className="ml-4 h-2.5 w-px bg-line" />}
+                </div>
+              );
+            })}
+            <div className="pt-1 text-center">
+              <span className="rounded-full bg-violet-100 px-2.5 py-0.5 text-[9px] font-semibold text-violet-700 dark:bg-violet-900/50 dark:text-violet-300">
+                {stage >= 4 ? "✓ Test passed · 4 steps · 2.1s" : "Running test…"}
+              </span>
+            </div>
+          </div>
+
+          {/* Inspector */}
+          <div className="hidden flex-col gap-1.5 border-l border-line/60 px-2 py-3 sm:flex">
+            <p className="text-[8px] font-bold uppercase tracking-wider text-ink-muted">Inspector</p>
+            {["Account", "Channel", "Message", "Test"].map((f, i) => (
+              <div key={f} className={`rounded-md border px-1.5 py-1 text-[8px] ${i === 1 ? "border-violet-300 bg-violet-50 font-semibold text-violet-700 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300" : "border-line bg-elevated text-ink-muted"}`}>
+                {f}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Bottom bar */}
+        <div className="flex items-center justify-between border-t border-line/60 bg-elevated px-4 py-2 text-[9px]">
+          <span className="flex items-center gap-1.5 font-medium text-ok">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" /> {stage >= 4 ? "All steps tested" : "Test running"}
+          </span>
+          <span className="hidden text-ink-muted sm:block">4 nodes · 3 connections</span>
+          <span className="rounded-full bg-violet-100 px-2 py-0.5 font-semibold text-violet-700 dark:bg-violet-900 dark:text-violet-300">Publish →</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Copilot conversation mockup — plan → review → build. */
+function CopilotMockup() {
+  return (
+    <div className="rounded-3xl border border-line bg-elevated p-1 shadow-xl">
+      <div className="space-y-2.5 rounded-2xl bg-muted/30 p-4 text-[11px]">
+        <div className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-md bg-violet-600 px-3 py-2 text-white shadow-sm">
+          When a new Gmail arrives, summarize it with AI and post to Slack
+        </div>
+        <div className="max-w-[90%] space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wider text-violet-600">
+            <Sparkles className="h-3 w-3" /> Copilot plan
+          </div>
+          <div className="space-y-1 rounded-2xl rounded-bl-md border border-line bg-elevated p-2.5 shadow-sm">
+            {["Trigger — Gmail · new email", "Action — AI · summarize", "Action — Slack · post message"].map((s, i) => (
+              <div key={s} className="flex items-center gap-1.5 text-ink" style={{ animation: `reveal-up 0.5s ease both ${i * 160}ms` }}>
+                <CheckCircle2 className="h-3 w-3 shrink-0 text-ok" /> {s}
+              </div>
+            ))}
+            <div className="flex items-center gap-1.5 pt-0.5 text-[9px] text-ink-muted">
+              <Shield className="h-3 w-3 shrink-0 text-amber-500" /> 1 connection needed: Slack
+            </div>
+          </div>
+          <div className="flex gap-1.5 pl-1">
+            <span className="rounded-full bg-violet-600 px-2.5 py-1 text-[9px] font-semibold text-white">Review & build</span>
+            <span className="rounded-full border border-line bg-elevated px-2.5 py-1 text-[9px] text-ink-muted">Ask a question</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Agent run trace mockup — tool calls with observations. */
+function AgentMockup() {
+  const rows = [
+    { icon: Wrench, label: "sheets__read_rows", state: "ok", detail: "12 rows" },
+    { icon: Sparkles, label: "analyze · gpt-4o-mini", state: "ok", detail: "3 insights" },
+    { icon: Shield, label: "request_tool_approval", state: "wait", detail: "awaiting you" },
+    { icon: Check, label: "slack__post_message", state: "pending", detail: "—" },
+  ];
+  return (
+    <div className="rounded-3xl border border-line bg-elevated p-1 shadow-xl">
+      <div className="rounded-2xl bg-muted/30 p-4">
+        <div className="mb-2.5 flex items-center gap-2">
+          <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 text-white"><Bot className="h-3.5 w-3.5" /></span>
+          <p className="text-[11px] font-semibold text-ink">Ops agent · run #4821</p>
+          <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">Approval pause</span>
+        </div>
+        <div className="space-y-1.5">
+          {rows.map((r, i) => (
+            <div key={r.label} className="flex items-center gap-2 rounded-lg border border-line bg-elevated px-2.5 py-1.5 text-[10px]" style={{ animation: `reveal-up 0.5s ease both ${i * 140}ms` }}>
+              <r.icon className={`h-3 w-3 shrink-0 ${r.state === "ok" ? "text-ok" : r.state === "wait" ? "text-amber-500" : "text-ink-muted"}`} />
+              <span className="font-mono text-ink">{r.label}</span>
+              <span className="ml-auto text-ink-muted">{r.detail}</span>
+            </div>
+          ))}
+        </div>
+        <p className="mt-2.5 text-[9px] leading-relaxed text-ink-muted">Every decision and tool call is recorded — auditable run traces, human approvals before risky actions.</p>
+      </div>
+    </div>
+  );
+}
+
+/** Dashboard stats mockup. */
+function AnalyticsMockup() {
+  const bars = [42, 68, 35, 80, 55, 92, 61];
+  return (
+    <div className="rounded-3xl border border-line bg-elevated p-1 shadow-xl">
+      <div className="rounded-2xl bg-muted/30 p-4">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-semibold text-ink">Runs this week</p>
+          <span className="rounded-full bg-ok/10 px-2 py-0.5 text-[9px] font-semibold text-ok">98.2% success</span>
+        </div>
+        <div className="mt-3 flex h-20 items-end gap-1.5">
+          {bars.map((h, i) => (
+            <div key={i} className="flex-1 rounded-t-md bg-gradient-to-t from-violet-500/70 to-violet-400 transition-all duration-300 hover:from-violet-600 hover:to-violet-500" style={{ height: `${h}%`, animation: `reveal-up 0.6s ease both ${i * 80}ms` }} />
+          ))}
+        </div>
+        <div className="mt-2 grid grid-cols-3 gap-1.5 text-center">
+          {[["4,823", "runs"], ["1.1s", "p50"], ["3.4s", "p95"]].map(([v, l]) => (
+            <div key={l} className="rounded-lg border border-line bg-elevated px-1 py-1.5">
+              <p className="text-[11px] font-bold text-ink">{v}</p>
+              <p className="text-[8px] text-ink-muted">{l}</p>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -214,8 +399,10 @@ function MarqueeIntegrations() {
       <div className="pointer-events-none absolute right-0 top-0 z-10 h-full w-20 bg-gradient-to-l from-elevated to-transparent" />
       <div className="flex animate-marquee gap-8">
         {doubled.map((a, i) => (
-          <div key={`${a.name}-${i}`} className="flex shrink-0 items-center gap-2 text-sm font-medium text-ink-muted opacity-60 transition hover:opacity-100">
-            <div className="h-5 w-5 rounded" style={{ backgroundColor: `#${a.color}` }} />
+          <div key={`${a.name}-${i}`} className="flex shrink-0 cursor-default items-center gap-2 text-sm font-medium text-ink-muted opacity-60 transition hover:opacity-100">
+            <div className="flex h-6 w-6 items-center justify-center rounded-md shadow-sm" style={{ backgroundColor: `#${a.color}` }}>
+              <a.icon className="h-3.5 w-3.5 text-white" />
+            </div>
             {a.name}
           </div>
         ))}
@@ -228,7 +415,10 @@ function AnimatedCounter({ value, suffix = "" }: { value: string; suffix?: strin
   const ref = useRef<HTMLSpanElement>(null);
   const [count, setCount] = useState(0);
   const [started, setStarted] = useState(false);
-  const numericPart = parseInt(value.replace(/[^0-9]/g, ""), 10);
+  // Values without digits (e.g. "Copilot", "Templates") render verbatim — no NaN.
+  const digits = value.replace(/[^0-9]/g, "");
+  const numericPart = digits ? parseInt(digits, 10) : 0;
+  const hasNumeric = digits.length > 0;
   const textPart = value.replace(/[0-9]/g, "");
 
   useEffect(() => {
@@ -240,7 +430,7 @@ function AnimatedCounter({ value, suffix = "" }: { value: string; suffix?: strin
   }, []);
 
   useEffect(() => {
-    if (!started || numericPart === 0) { setCount(numericPart); return; }
+    if (!started || !hasNumeric || numericPart === 0) { setCount(numericPart); return; }
     let start = 0;
     const duration = 1200;
     const step = (ts: number) => {
@@ -253,7 +443,7 @@ function AnimatedCounter({ value, suffix = "" }: { value: string; suffix?: strin
     requestAnimationFrame(step);
   }, [started, numericPart]);
 
-  return <span ref={ref}>{textPart}{count}{suffix}</span>;
+  return <span ref={ref}>{hasNumeric ? `${textPart}${count}${suffix}` : value}</span>;
 }
 
 /* ── Main Page ─────────────────────────────────────────────────────────── */
@@ -261,7 +451,10 @@ function AnimatedCounter({ value, suffix = "" }: { value: string; suffix?: strin
 export default function HomePage() {
   const heroInView = useInView(0.1);
   const howItWorks = useInView();
+  const copilotSection = useInView();
+  const agentSection = useInView();
   const featureGrid = useStaggeredReveal(FEATURES.length);
+  const dataSection = useInView();
   const templateGrid = useStaggeredReveal(TEMPLATES.length);
   const testimonials = useStaggeredReveal(TESTIMONIALS.length);
   const pricing = useStaggeredReveal(PLANS.length);
@@ -271,9 +464,11 @@ export default function HomePage() {
       {/* ═══ Header ═══ */}
       <header className="sticky top-0 z-30 border-b border-line/80 bg-elevated/90 backdrop-blur supports-[backdrop-filter]:bg-elevated/70">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
-          <Logo />
+          <Logo href="/" />
           <nav className="hidden items-center gap-6 text-sm text-ink-muted md:flex">
             <a href="#product" className="transition hover:text-ink">Product</a>
+            <a href="#copilot" className="transition hover:text-ink">Copilot</a>
+            <a href="#agents" className="transition hover:text-ink">Agents</a>
             <a href="#templates" className="transition hover:text-ink">Templates</a>
             <a href="#pricing" className="transition hover:text-ink">Pricing</a>
           </nav>
@@ -296,7 +491,7 @@ export default function HomePage() {
 
         <div className="relative mx-auto grid max-w-6xl items-center gap-12 px-6 pb-16 pt-14 lg:grid-cols-2 lg:pt-20">
           <div className={heroInView.visible ? "animate-fade-in-up" : "opacity-0"}>
-            <p className="mb-4 inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-medium text-violet-800 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300">
+            <p className="mb-4 inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-medium text-violet-800 transition hover:scale-[1.02] dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300">
               <Sparkles className="h-3.5 w-3.5" /> Copilot can build the workflow for you
             </p>
             <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
@@ -317,29 +512,7 @@ export default function HomePage() {
           </div>
 
           <div className={`relative ${heroInView.visible ? "animate-fade-in-right" : "opacity-0"}`}>
-            {/* Editor mock */}
-            <div className="animate-float-slow rounded-3xl border border-line bg-elevated p-1 shadow-2xl ring-1 ring-black/5">
-              <div className="rounded-2xl bg-muted/30 p-4">
-                {/* Window chrome */}
-                <div className="mb-3 flex items-center gap-1.5">
-                  <div className="h-2.5 w-2.5 rounded-full bg-red-400" />
-                  <div className="h-2.5 w-2.5 rounded-full bg-amber-400" />
-                  <div className="h-2.5 w-2.5 rounded-full bg-green-400" />
-                  <div className="ml-3 flex-1 rounded-md bg-bg px-3 py-1 text-[10px] text-ink-muted">FlowShip Editor</div>
-                </div>
-                {/* Mini workflow canvas */}
-                <AnimatedWorkflow />
-                {/* Status bar */}
-                <div className="mt-3 flex items-center justify-between rounded-lg bg-bg px-3 py-2 text-[10px]">
-                  <span className="flex items-center gap-1.5 text-ok">
-                    <span className="h-1.5 w-1.5 rounded-full bg-ok animate-pulse" /> All steps tested
-                  </span>
-                  <span className="text-ink-muted">4 nodes · 3 connections</span>
-                  <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[9px] font-medium text-violet-700 dark:bg-violet-900 dark:text-violet-300">Ready to publish</span>
-                </div>
-              </div>
-            </div>
-
+            <EditorMockup />
             {/* Floating badges */}
             <div className="animate-float absolute -left-4 top-8 rounded-xl border border-line bg-elevated px-3 py-2 shadow-lg">
               <p className="text-[10px] font-semibold text-violet-600">Copilot</p>
@@ -373,7 +546,7 @@ export default function HomePage() {
             { k: "Copilot", v: "drafts workflows from plain language", icon: Sparkles },
             { k: "Templates", v: "clone a proven flow in one click", icon: LayoutTemplate },
           ].map((s) => (
-            <div key={s.v} className="group flex items-center gap-4 rounded-2xl border border-line bg-elevated px-5 py-4 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:border-violet-300/30">
+            <div key={s.v} className="group flex items-center gap-4 rounded-2xl border border-line bg-elevated px-5 py-4 transition-all duration-300 hover:-translate-y-0.5 hover:border-violet-300/30 hover:shadow-md">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 transition-colors group-hover:bg-violet-100 dark:bg-violet-950/50 dark:group-hover:bg-violet-900/50">
                 <s.icon className="h-5 w-5 shrink-0 text-violet-600" />
               </div>
@@ -398,7 +571,7 @@ export default function HomePage() {
             {STEPS.map((s, i) => (
               <div
                 key={s.n}
-                className={`group rounded-2xl border border-line bg-elevated p-6 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-md hover:border-violet-300/40 ${howItWorks.visible ? "animate-reveal-up" : "opacity-0"}`}
+                className={`group rounded-2xl border border-line bg-elevated p-6 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-violet-300/40 hover:shadow-md ${howItWorks.visible ? "animate-reveal-up" : "opacity-0"}`}
                 style={howItWorks.visible ? { animationDelay: `${i * 100}ms` } : undefined}
               >
                 <span className={`flex h-10 w-10 items-center justify-center rounded-xl text-sm font-bold ${s.color}`}>
@@ -406,50 +579,81 @@ export default function HomePage() {
                 </span>
                 <h3 className="mt-4 font-semibold">{s.title}</h3>
                 <p className="mt-2 text-sm leading-relaxed text-ink-muted">{s.body}</p>
+                {/* mini mock chips */}
+                <div className="mt-4 flex flex-wrap gap-1.5 opacity-70 transition group-hover:opacity-100">
+                  {s.mock.map((m) => (
+                    <span key={m} className="rounded-full border border-line bg-muted/50 px-2 py-0.5 text-[10px] text-ink-muted transition group-hover:border-violet-200 group-hover:text-ink">{m}</span>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
 
-          {/* Feature grid */}
+          {/* Feature grid — bento style with hover gradients */}
           <div ref={featureGrid.ref} className={`mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${featureGrid.visible ? "stagger-children" : ""}`}>
             {FEATURES.map((f, i) => (
               <div
                 key={f.title}
-                className={`group rounded-2xl border border-line bg-elevated p-5 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:border-violet-300/30 ${featureGrid.visible ? "animate-reveal-up" : "opacity-0"}`}
+                className={`group relative overflow-hidden rounded-2xl border border-line bg-elevated p-5 transition-all duration-300 hover:-translate-y-0.5 hover:border-violet-300/30 hover:shadow-md ${f.span} ${featureGrid.visible ? "animate-reveal-up" : "opacity-0"}`}
                 style={featureGrid.visible ? featureGrid.staggerDelay(i) : undefined}
               >
-                <f.icon className={`mb-3 h-5 w-5 ${f.color}`} />
-                <h3 className="font-semibold">{f.title}</h3>
-                <p className="mt-1 text-sm text-ink-muted">{f.body}</p>
+                <div className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${f.gradient} opacity-0 transition-opacity duration-300 group-hover:opacity-100`} />
+                <div className="relative">
+                  <f.icon className={`mb-3 h-5 w-5 transition-transform duration-300 group-hover:scale-110 ${f.color}`} />
+                  <h3 className="font-semibold">{f.title}</h3>
+                  <p className="mt-1 text-sm text-ink-muted">{f.body}</p>
+                </div>
               </div>
             ))}
           </div>
+        </div>
+      </section>
 
-          {/* Editor preview */}
-          <div className="mt-14 overflow-hidden rounded-3xl border border-line bg-elevated shadow-card">
-            <div className="flex items-center justify-between border-b border-line px-6 py-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wider text-violet-700">Live workflow preview</p>
-                <p className="mt-1 text-sm text-ink-muted">A clear path from event to outcome</p>
-              </div>
-              <span className="rounded-full bg-ok/10 px-3 py-1 text-xs font-medium text-ok">Ready to test</span>
-            </div>
-            <div className="grid gap-4 px-6 py-8 md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">
-              {[
-                { label: "New email", app: "Gmail", tone: "border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/30" },
-                { label: "Check priority", app: "Filter", tone: "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30" },
-                { label: "Notify team", app: "Slack", tone: "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30" },
-              ].map((step, i) => (
-                <div key={step.label} className="contents">
-                  <div className={`rounded-2xl border p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-md ${step.tone}`}>
-                    <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Step {i + 1}</p>
-                    <p className="mt-2 font-semibold">{step.label}</p>
-                    <p className="mt-1 text-xs text-ink-muted">{step.app}</p>
-                  </div>
-                  {i < 2 && <ArrowRight className="mx-auto hidden h-5 w-5 text-violet-500 md:block" />}
-                </div>
+      {/* ═══ Copilot section ═══ */}
+      <section id="copilot" ref={copilotSection.ref} className="relative overflow-hidden border-b border-line bg-elevated py-20">
+        <div className="pointer-events-none absolute inset-0">
+          <div className="animate-orb absolute -left-24 top-10 h-[350px] w-[350px] rounded-full bg-violet-500/10 blur-3xl" />
+        </div>
+        <div className={`relative mx-auto grid max-w-6xl items-center gap-10 px-6 lg:grid-cols-2 ${copilotSection.visible ? "stagger-children" : ""}`}>
+          <div className={copilotSection.visible ? "animate-reveal-left" : "opacity-0"}>
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-violet-600">AI Copilot</p>
+            <h2 className="text-3xl font-semibold">Describe it. Review the plan. Ship it.</h2>
+            <p className="mt-3 text-ink-muted">
+              Copilot reads the real app catalog and your real connections — it never invents apps or fields. You always approve the plan before anything is built, and nothing publishes itself.
+            </p>
+            <ul className="mt-5 space-y-2.5 text-sm">
+              {["Plans built only from the live app catalog", "Warns when a connection is missing", "Field mappings between steps, shown visually", "Suggest first, apply on your approval"].map((item, i) => (
+                <li key={item} className="flex items-center gap-2.5" style={{ animation: copilotSection.visible ? `reveal-up 0.4s ease both ${200 + i * 100}ms` : undefined }}>
+                  <Check className="h-4 w-4 shrink-0 text-violet-600" /> {item}
+                </li>
               ))}
-            </div>
+            </ul>
+          </div>
+          <div className={copilotSection.visible ? "animate-reveal-right" : "opacity-0"}>
+            <CopilotMockup />
+          </div>
+        </div>
+      </section>
+
+      {/* ═══ Agents section ═══ */}
+      <section id="agents" ref={agentSection.ref} className="border-b border-line bg-bg py-20">
+        <div className={`mx-auto grid max-w-6xl items-center gap-10 px-6 lg:grid-cols-2 ${agentSection.visible ? "stagger-children" : ""}`}>
+          <div className={`order-2 lg:order-1 ${agentSection.visible ? "animate-reveal-left" : "opacity-0"}`}>
+            <AgentMockup />
+          </div>
+          <div className={`order-1 lg:order-2 ${agentSection.visible ? "animate-reveal-right" : "opacity-0"}`}>
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-violet-600">AI Agents</p>
+            <h2 className="text-3xl font-semibold">Teammates that act — with guardrails</h2>
+            <p className="mt-3 text-ink-muted">
+              Give an agent a job, allow-list the exact actions it may take, and require human approval before risky calls. Every decision, tool call, and observation lands in an auditable run trace.
+            </p>
+            <ul className="mt-5 space-y-2.5 text-sm">
+              {["Allow-listed tools — nothing else is reachable", "Approval pause before sensitive actions", "Round-by-round run traces you can replay", "Knowledge, budgets, and model routing built in"].map((item, i) => (
+                <li key={item} className="flex items-center gap-2.5" style={{ animation: agentSection.visible ? `reveal-up 0.4s ease both ${200 + i * 100}ms` : undefined }}>
+                  <Check className="h-4 w-4 shrink-0 text-violet-600" /> {item}
+                </li>
+              ))}
+            </ul>
           </div>
         </div>
       </section>
@@ -467,17 +671,25 @@ export default function HomePage() {
               <LayoutTemplate className="h-4 w-4" /> See all templates after sign up
             </Link>
           </div>
-          <div className={`mt-8 grid gap-4 sm:grid-cols-2 ${templateGrid.visible ? "stagger-children" : ""}`}>
+          <div className={`mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${templateGrid.visible ? "stagger-children" : ""}`}>
             {TEMPLATES.map((t, i) => (
               <div
                 key={t.title}
-                className={`group rounded-2xl border border-line bg-elevated p-5 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-md ${templateGrid.visible ? "animate-reveal-up" : "opacity-0"}`}
+                className={`group rounded-2xl border border-line bg-elevated p-5 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-violet-300/30 hover:shadow-md ${templateGrid.visible ? "animate-reveal-up" : "opacity-0"}`}
                 style={templateGrid.visible ? templateGrid.staggerDelay(i) : undefined}
               >
                 <div className={`mb-3 h-1 w-12 rounded-full bg-gradient-to-r ${t.color}`} />
-                <p className="text-xs uppercase tracking-wide text-violet-700">{t.from} → {t.to}</p>
-                <h3 className="mt-2 font-semibold group-hover:text-violet-700 transition">{t.title}</h3>
+                <div className="flex items-center gap-1.5 text-xl" aria-hidden>
+                  {t.apps.map((a, j) => (
+                    <span key={j} className="transition-transform duration-300 group-hover:scale-110" style={{ transitionDelay: `${j * 60}ms` }}>{a}</span>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs uppercase tracking-wide text-violet-700">{t.from} → {t.to}</p>
+                <h3 className="mt-1.5 font-semibold transition group-hover:text-violet-700">{t.title}</h3>
                 <p className="mt-1 text-sm text-ink-muted">{t.body}</p>
+                <span className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-violet-700 opacity-0 transition group-hover:opacity-100">
+                  Use template <ArrowRight className="h-3 w-3" />
+                </span>
               </div>
             ))}
           </div>
@@ -487,9 +699,9 @@ export default function HomePage() {
       {/* ═══ Test Like Production ═══ */}
       <section className="border-b border-line bg-elevated py-20">
         <div className="mx-auto grid max-w-6xl items-center gap-10 px-6 lg:grid-cols-2">
-          <div className="rounded-3xl border border-line bg-bg p-6 shadow-card">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="h-2.5 w-2.5 rounded-full bg-ok animate-pulse" />
+          <div className="group rounded-3xl border border-line bg-bg p-6 shadow-card transition-all duration-300 hover:shadow-2xl">
+            <div className="mb-4 flex items-center gap-2">
+              <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-ok" />
               <span className="text-xs font-medium text-ok">Test run complete</span>
               <span className="ml-auto text-[10px] text-ink-muted">2.4s</span>
             </div>
@@ -502,7 +714,7 @@ export default function HomePage() {
               ].map((s, i) => (
                 <div
                   key={s.step}
-                  className="flex items-center gap-3 rounded-lg border border-line bg-elevated px-3 py-2 text-xs transition-all duration-300 hover:border-violet-300/30"
+                  className="flex items-center gap-3 rounded-lg border border-line bg-elevated px-3 py-2 text-xs transition-all duration-300 hover:border-violet-300/30 hover:shadow-sm"
                   style={{ animation: `reveal-up 0.4s ease both ${i * 120}ms` }}
                 >
                   <span className="h-2 w-2 rounded-full bg-ok" />
@@ -529,8 +741,77 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* ═══ Analytics band ═══ */}
+      <section className="border-b border-line bg-muted/40 py-20">
+        <div className="mx-auto grid max-w-6xl items-center gap-10 px-6 lg:grid-cols-2">
+          <div>
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-violet-600">Analytics</p>
+            <h2 className="text-3xl font-semibold">Know what your automations do</h2>
+            <p className="mt-3 text-ink-muted">
+              Run volume, success rates, latency percentiles, and the real error behind every failure — computed server-side, filterable by workflow, app, and status.
+            </p>
+          </div>
+          <AnalyticsMockup />
+        </div>
+      </section>
+
+      {/* ═══ Tables / Forms / Interfaces showcase ═══ */}
+      <section ref={dataSection.ref} className="border-b border-line bg-elevated py-20">
+        <div className="mx-auto max-w-6xl px-6">
+          <div className="mx-auto max-w-2xl text-center">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-violet-600">One connected platform</p>
+            <h2 className="text-3xl font-semibold">Data in, data out, all connected</h2>
+            <p className="mt-2 text-ink-muted">Forms feed Tables, Tables trigger workflows, agents act on records — one shared data layer, not four disconnected products.</p>
+          </div>
+          <div className={`mt-10 grid gap-5 lg:grid-cols-3 ${dataSection.visible ? "stagger-children" : ""}`}>
+            <div className={`group overflow-hidden rounded-2xl border border-line bg-elevated shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-teal/40 hover:shadow-lg ${dataSection.visible ? "animate-reveal-up" : "opacity-0"}`}>
+              <div className="flex items-center gap-2 border-b border-line bg-muted/40 px-4 py-2.5 text-[11px] font-semibold text-ink-muted"><Table2 className="h-3.5 w-3.5 text-teal" /> Tables · Lead pipeline</div>
+              <div className="space-y-1.5 p-4">
+                {["Ada · ada@acme.com · Hot", "Marcus · m@nova.io · Warm", "Priya · p@scale.co · New"].map((row, i) => (
+                  <div key={row} className="flex items-center gap-2 rounded-lg border border-line bg-muted/30 px-2.5 py-1.5 text-[10px] transition-all duration-300 group-hover:border-teal/30 group-hover:translate-x-0.5" style={{ animation: dataSection.visible ? `reveal-up 0.4s ease both ${i * 100}ms` : undefined }}>
+                    <span className="h-1.5 w-1.5 rounded-full bg-teal" /> {row}
+                  </div>
+                ))}
+                <div className="pt-1 text-[9px] text-ink-muted">+ Record created → triggers “Sheets → Calendar” workflow</div>
+              </div>
+            </div>
+            <div className={`group overflow-hidden rounded-2xl border border-line bg-elevated shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-violet-300/40 hover:shadow-lg ${dataSection.visible ? "animate-reveal-up" : "opacity-0"}`} style={dataSection.visible ? { animationDelay: "100ms" } : undefined}>
+              <div className="flex items-center gap-2 border-b border-line bg-muted/40 px-4 py-2.5 text-[11px] font-semibold text-ink-muted"><FileInput className="h-3.5 w-3.5 text-blue-500" /> Forms · Contact us</div>
+              <div className="space-y-2 p-4">
+                {["Name", "Email", "Company"].map((f, i) => (
+                  <div key={f} className="transition-all duration-300 group-hover:translate-x-0.5" style={{ animation: dataSection.visible ? `reveal-up 0.4s ease both ${150 + i * 100}ms` : undefined }}>
+                    <p className="mb-0.5 text-[9px] font-medium text-ink-muted">{f}</p>
+                    <div className="rounded-lg border border-line bg-bg px-2.5 py-1.5 text-[10px] text-ink-muted">{f === "Email" ? "ada@acme.com" : "…"}</div>
+                  </div>
+                ))}
+                <div className="rounded-lg bg-violet-600 px-2.5 py-1.5 text-center text-[10px] font-semibold text-white shadow-sm transition group-hover:shadow-md">Submit → creates record + starts workflow</div>
+              </div>
+            </div>
+            <div className={`group overflow-hidden rounded-2xl border border-line bg-elevated shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-amber-300/40 hover:shadow-lg ${dataSection.visible ? "animate-reveal-up" : "opacity-0"}`} style={dataSection.visible ? { animationDelay: "200ms" } : undefined}>
+              <div className="flex items-center gap-2 border-b border-line bg-muted/40 px-4 py-2.5 text-[11px] font-semibold text-ink-muted"><Layers className="h-3.5 w-3.5 text-amber-500" /> Interfaces · Live dashboard</div>
+              <div className="space-y-2 p-4">
+                <div className="grid grid-cols-2 gap-2">
+                  {["Open deals · 24", "New leads · 9"].map((s, i) => (
+                    <div key={s} className="rounded-lg border border-line bg-muted/30 px-2.5 py-2 transition group-hover:border-amber-300/30" style={{ animation: dataSection.visible ? `reveal-up 0.4s ease both ${200 + i * 100}ms` : undefined }}>
+                      <p className="text-[13px] font-bold">{s.split(" · ")[1]}</p>
+                      <p className="text-[9px] text-ink-muted">{s.split(" · ")[0]}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="rounded-lg border border-line bg-muted/30 px-2.5 py-2 transition group-hover:border-amber-300/30" style={{ animation: dataSection.visible ? "reveal-up 0.4s ease both 400ms" : undefined }}>
+                  <p className="text-[9px] font-medium text-ink-muted">Pipeline value</p>
+                  <div className="mt-1.5 flex h-8 items-end gap-1">
+                    {[40, 65, 30, 80, 55, 92].map((h, i) => <div key={i} className="flex-1 rounded-t bg-gradient-to-t from-amber-400/70 to-amber-300 transition-all duration-300 group-hover:from-amber-500" style={{ height: `${h}%` }} />)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ═══ Testimonials ═══ */}
-      <section ref={testimonials.ref} className="border-b border-line bg-muted/40 py-20">
+      <section ref={testimonials.ref} className="border-b border-line bg-elevated py-20">
         <div className="mx-auto max-w-6xl px-6">
           <p className="mb-3 text-center text-xs font-semibold uppercase tracking-wider text-violet-600">What teams say</p>
           <h2 className="text-center text-3xl font-semibold">Trusted by operators</h2>
@@ -538,7 +819,7 @@ export default function HomePage() {
             {TESTIMONIALS.map((t, i) => (
               <div
                 key={t.name}
-                className={`rounded-2xl border border-line bg-elevated p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md ${testimonials.visible ? "animate-reveal-up" : "opacity-0"}`}
+                className={`rounded-2xl border border-line bg-muted/30 p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:border-violet-300/30 hover:shadow-md ${testimonials.visible ? "animate-reveal-up" : "opacity-0"}`}
                 style={testimonials.visible ? testimonials.staggerDelay(i) : undefined}
               >
                 <div className="mb-3 flex gap-0.5">
@@ -548,7 +829,7 @@ export default function HomePage() {
                 </div>
                 <p className="text-sm leading-relaxed text-ink">&ldquo;{t.quote}&rdquo;</p>
                 <div className="mt-4 flex items-center gap-3">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-violet-100 text-sm font-bold text-violet-700 dark:bg-violet-900 dark:text-violet-300">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-blue-500 text-sm font-bold text-white">
                     {t.name.charAt(0)}
                   </div>
                   <div>
@@ -595,13 +876,13 @@ export default function HomePage() {
           <div className="animate-orb-reverse absolute -right-20 bottom-0 h-[300px] w-[300px] rounded-full bg-indigo-500/10 blur-3xl" />
         </div>
         <div className="relative mx-auto flex max-w-6xl flex-col items-center overflow-hidden rounded-3xl bg-ink px-8 py-14 text-center text-white">
-          <FloatingParticles />
+          <FloatingParticles count={14} />
           <div className="relative z-10">
-            <Zap className="mb-4 h-8 w-8 text-violet-300 animate-float" />
+            <Zap className="mb-4 h-8 w-8 animate-float text-violet-300" />
             <h2 className="text-3xl font-semibold">Ship your first workflow today</h2>
             <p className="mt-2 max-w-md text-sm text-white/70">Create a workspace, pick a template, and watch the test run move down the canvas.</p>
             <Link href="/register" className="mt-6 inline-block">
-              <Button className="bg-white text-ink hover:bg-violet-50 transition-all duration-300 hover:scale-105">
+              <Button className="bg-white text-ink transition-all duration-300 hover:scale-105 hover:bg-violet-50">
                 Start free <ArrowRight className="ml-1 h-4 w-4" />
               </Button>
             </Link>
@@ -612,7 +893,7 @@ export default function HomePage() {
       {/* ═══ Footer ═══ */}
       <footer className="border-t border-line py-8">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-6 text-xs text-ink-muted">
-          <Logo compact />
+          <Logo compact href="/" />
           <p>© {new Date().getFullYear()} FlowShip. Automate without the busywork.</p>
           <div className="flex gap-4">
             <Link href="/login" className="transition hover:text-ink">Sign in</Link>

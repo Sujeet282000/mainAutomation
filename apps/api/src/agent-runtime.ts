@@ -534,12 +534,13 @@ export async function decideAgentApproval(opts: {
   return { approval: { ...row, status: "approved" }, output: result.output };
 }
 
-/** Exposed for tests: env-based availability snapshot. */
+/** Exposed for tests and the /ai/model-options surface: availability snapshot. */
 export function modelAvailability() {
   return {
     openai: Boolean(env.openai),
     anthropic: Boolean(env.anthropic),
     gemini: Boolean(env.gemini),
+    groq: Boolean(env.groq),
     local: Boolean(env.localLlmUrl),
   };
 }

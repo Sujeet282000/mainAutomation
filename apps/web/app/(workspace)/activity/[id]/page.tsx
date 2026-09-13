@@ -1,10 +1,10 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Circle, Loader2, RotateCcw, Sparkles, XCircle } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, streamGetSse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -27,12 +27,16 @@ function StepDot({ status }: { status: string }) {
   if (status === "succeeded") return <CheckCircle2 className="h-4 w-4 text-ok" />;
   if (status === "failed") return <XCircle className="h-4 w-4 text-danger" />;
   if (status === "running") return <Loader2 className="h-4 w-4 animate-spin text-violet-600" />;
+  if (status === "waiting") return <Loader2 className="h-4 w-4 animate-pulse text-amber-500" />;
   return <Circle className="h-4 w-4 text-ink-muted" />;
 }
 
 export default function ActivityDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const queryClient = useQueryClient();
+  const [liveStatus, setLiveStatus] = useState<Record<string, string>>({});
+
   const q = useQuery({
     queryKey: ["execution", id],
     queryFn: () =>
@@ -41,8 +45,43 @@ export default function ActivityDetailPage() {
         steps?: Step[];
         logs?: Array<{ id: string; message: string; created_at: string }>;
       }>(`/executions/${id}`),
-    refetchInterval: 1500
+    // Live runs refresh on SSE step events (below); only active runs poll,
+    // and only at a humane 5s backstop. Terminal runs never poll.
+    refetchInterval: (query) => {
+      const status = query.state.data?.execution?.status;
+      return ["succeeded", "failed", "cancelled", "filtered"].includes(status ?? "")
+        ? false
+        : 5_000;
+    },
   });
+
+  // Live run stream (SSE): step_finished events overlay instant per-step
+  // statuses and trigger a fetch so the timeline updates as the run executes.
+  // streamGetSse sends the bearer header via fetch — EventSource cannot.
+  const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "filtered"];
+  const runActive = !TERMINAL_STATUSES.includes(q.data?.execution?.status ?? "");
+  useEffect(() => {
+    if (!runActive || !id) return;
+    const controller = new AbortController();
+    let cancelled = false;
+    void streamGetSse(`/runs/${id}/stream`, (event, data) => {
+      if (cancelled) return;
+      if (event === "step_finished" && typeof data.stepId === "string") {
+        setLiveStatus((prev) => ({ ...prev, [data.stepId as string]: String(data.status ?? "") }));
+        queryClient.invalidateQueries({ queryKey: ["execution", id] });
+      }
+      if (event === "run_finished") {
+        queryClient.invalidateQueries({ queryKey: ["execution", id] });
+      }
+    }, controller.signal).catch(() => {
+      /* stream errors are non-fatal: the 5s poll backstop still refreshes */
+    });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [id, runActive, queryClient]);
+
   const retry = useMutation({
     mutationFn: () => api<{ execution?: { id: string } }>(`/executions/${id}/retry`, { method: "POST" }),
     onSuccess: (d) => {
@@ -87,7 +126,10 @@ export default function ActivityDetailPage() {
   });
 
   const ex = q.data?.execution;
-  const steps = q.data?.steps ?? [];
+  // SSE events override the fetched step status for instant updates
+  const steps = (q.data?.steps ?? []).map((s) =>
+    liveStatus[s.step_id ?? s.id] ? { ...s, status: liveStatus[s.step_id ?? s.id]! } : s,
+  );
 
   return (
     <div>

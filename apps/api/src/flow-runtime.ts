@@ -174,34 +174,45 @@ function children(graph: WorkflowGraph, nodeId: string) {
     .filter((n): n is WorkflowGraph["nodes"][number] => Boolean(n));
 }
 
-async function executeNode(opts: {
-  node: WorkflowGraph["nodes"][number];
-  ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown };
-  orgId: string;
-  runId: string;
-}) {
-  const { node, ctx, orgId, runId } = opts;
-  if (node.type === "trigger" || !node.operation) {
-    return { ok: true as const, output: { ...(ctx.trigger ?? {}), appSlug: node.appSlug, operation: node.operation } };
-  }
-  const app = getApp(node.appSlug);
-  const op = app?.operations.find((o) => o.key === node.operation);
-  const auth = await loadConnectionSecret(node.connectionId, orgId);
-  // Resolve {{...}} mappings the same way the canonical engine does — raw
-  // templates must never reach a provider API (a literal "{{trigger.row[0]}}"
-  // used to be sent to Google Calendar and fail with an opaque 400).
-  const input = resolveValue({ ...(node.config ?? {}) }, {
+/** Resolve {{...}} step mappings the same way the canonical engine does — raw
+ *  templates must never reach a provider API (a literal "{{trigger.row[0]}}"
+ *  used to be sent to Google Calendar and fail with an opaque 400). */
+function resolveStepInput(
+  node: WorkflowGraph["nodes"][number],
+  ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown },
+) {
+  return resolveValue({ ...(node.config ?? {}) }, {
     trigger: ctx.trigger ?? {},
     steps: ctx.steps,
     vars: ctx.vars ?? {},
     item: ctx.item,
   }) as Record<string, unknown>;
+}
+
+async function executeNode(opts: {
+  node: WorkflowGraph["nodes"][number];
+  ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown };
+  orgId: string;
+  runId: string;
+  graph?: WorkflowGraph;
+}) {
+  const { node, ctx, orgId, runId } = opts;
+  if (node.type === "trigger" || !node.operation) {
+    return { ok: true as const, output: { ...(ctx.trigger ?? {}), appSlug: node.appSlug, operation: node.operation }, input: { ...(node.config ?? {}) } as Record<string, unknown> };
+  }
+  const app = getApp(node.appSlug);
+  const op = app?.operations.find((o) => o.key === node.operation);
+  const auth = await loadConnectionSecret(node.connectionId, orgId);
+  const input = resolveStepInput(node, ctx);
   // Fan-in nodes (aggregator) receive the live graph + step outputs so they
   // can merge their incoming branches. Underscore-prefixed keys are engine
   // context, never part of the user-visible config.
   if (node.appSlug === "aggregator") {
     input.__nodeId = node.id;
     input.__steps = ctx.steps;
+    if (opts.graph) {
+      input.__graph = { nodes: opts.graph.nodes.map((n) => ({ id: n.id })), edges: opts.graph.edges.map((e) => ({ source: e.source, target: e.target })) };
+    }
   }
   try {
     const result = await runAdapter({
@@ -213,10 +224,10 @@ async function executeNode(opts: {
       executionId: runId,
       connectionId: node.connectionId ?? undefined,
     });
-    return { ok: true as const, output: result.output ?? {} };
+    return { ok: true as const, output: result.output ?? {}, input };
   } catch (err) {
     if (op?.outputSample && /No live adapter/.test(err instanceof Error ? err.message : "")) {
-      return { ok: true as const, output: { ...(op.outputSample as Record<string, unknown>), _sample: true } };
+      return { ok: true as const, output: { ...(op.outputSample as Record<string, unknown>), _sample: true }, input };
     }
     throw err;
   }
@@ -234,7 +245,7 @@ export async function testFlowStep(opts: {
   const ctx = { trigger: {}, steps: {} as Record<string, Record<string, unknown>> };
   const started = Date.now();
   try {
-    const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: opts.flowId });
+    const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: opts.flowId, graph });
     return { ok: true, output: result.output, error: undefined, duration_ms: Date.now() - started, status: "succeeded" };
   } catch (err) {
     return {
@@ -394,8 +405,11 @@ export async function createAndRunFlow(opts: {
       continue;
     }
     try {
-      const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: run!.id });
+      const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: run!.id, graph });
       ctx.steps[node.id] = result.output;
+      // Persist the RESOLVED input ({{...}} templates already substituted) —
+      // the run explorer shows what actually reached the provider, so a bad
+      // mapping like To=row[0] is visible in the step input immediately.
       await query(
         `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, output_json, started_at, finished_at)
          VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,now(),now())`,
@@ -406,13 +420,22 @@ export async function createAndRunFlow(opts: {
           node.id,
           stepTypeOf(node),
           seq,
-          JSON.stringify(redact(node.config ?? {})),
+          JSON.stringify(redact(result.input ?? node.config ?? {})),
           JSON.stringify(result.output),
         ],
       );
       opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: result.output, durationMs: Date.now() - started.getTime() });
     } catch (err) {
       failed = err instanceof Error ? err.message : "step_failed";
+      // Persist the resolved input on failure too — for steps that throw in
+      // resolveValue itself (bad template path) the resolved input is whatever
+      // substituted before the throw; otherwise it mirrors the provider call.
+      let failedInput: Record<string, unknown> = {};
+      try {
+        failedInput = resolveStepInput(node, ctx);
+      } catch {
+        failedInput = { ...(node.config ?? {}) } as Record<string, unknown>;
+      }
       await query(
         `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, error_json, started_at, finished_at)
          VALUES ($1,$2,$3,$4,$5,$6,'failed',$7,$8,now(),now())`,
@@ -423,7 +446,7 @@ export async function createAndRunFlow(opts: {
           node.id,
           stepTypeOf(node),
           seq,
-          JSON.stringify(redact(node.config ?? {})),
+          JSON.stringify(redact(failedInput)),
           JSON.stringify({ message: failed }),
         ],
       );

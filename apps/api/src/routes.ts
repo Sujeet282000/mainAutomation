@@ -20,7 +20,7 @@ import { definitionHash } from "@algoverge/core";
 import { oauthRouter } from "./oauth";
 import { registerUiCompat, applyAutomationGraphShape } from "./ui-compat";
 import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
-import { copilotGraph, copilotChat } from "./copilot/copilot";
+import { copilotGraph } from "./copilot/copilot";
 import { fireTableRecordEvent } from "./events";
 import { runCopilotEngine } from "./copilot/copilot-engine";
 import { ensureProjectId, refineCopilotSession, streamCopilotSession } from "./copilot/copilot-http";
@@ -383,32 +383,52 @@ router.post("/public/interfaces/:workspaceId/:slug/buttons/:automationId/run", a
 // ── Public chatbot share links (apps/web/app/c/[workspaceId]/[slug]) ────────
 
 router.get("/public/chatbots/:workspaceId/:slug", async (req, res) => {
-  const bot = await queryOne<{ id: string; name: string; payload: { instructions?: string } }>(
+  const bot = await queryOne<{ id: string; name: string; payload: { instructions?: string; welcomeMessage?: string; is_public?: boolean } }>(
     `SELECT id, name, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
     [req.params.workspaceId, req.params.slug],
   );
   if (!bot) return res.status(404).json({ error: "not_found" });
-  res.json({ chatbot: { id: bot.id, name: bot.name, instructions: String(bot.payload.instructions ?? "") } });
+  // Private bots stay invisible on the public surface.
+  if ((bot.payload as { is_public?: boolean }).is_public === false) return res.status(404).json({ error: "not_found" });
+  res.json({
+    chatbot: {
+      id: bot.id,
+      name: bot.name,
+      instructions: String((bot.payload as { instructions?: string }).instructions ?? ""),
+      welcomeMessage: (bot.payload as { welcomeMessage?: string }).welcomeMessage ?? null,
+    },
+  });
 });
 
 router.post("/public/chatbots/:workspaceId/:slug/chat", async (req, res) => {
   const message = String((req.body as { message?: unknown } | undefined)?.message ?? "").trim();
   if (!message) return res.status(400).json({ error: "missing_message" });
+  if (message.length > 4000) return res.status(400).json({ error: "message_too_long" });
   const bot = await queryOne<{ id: string; payload: Record<string, unknown> }>(
     `SELECT id, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
     [req.params.workspaceId, req.params.slug],
   );
   if (!bot) return res.status(404).json({ error: "not_found" });
+  const payload = bot.payload as Record<string, unknown>;
+  if (payload.is_public === false) return res.status(404).json({ error: "not_found" });
+  // Public-surface abuse guard: fixed-window per-bot rate limit (fail open).
+  try {
+    const { consumeRateLimit } = await import("./rate-limit");
+    const rl = await consumeRateLimit("ws", `public-chat:${bot.id}`, env.rateLimits.publicChatPerMinute, 60);
+    if (!rl.allowed) return res.status(429).json({ error: "rate_limited", retryAfterSec: rl.resetAfterSec });
+  } catch { /* limiter unavailable — fail open */ }
   // Chatbot = Agent + chat channel (P1 #20/#21): reuse the one agent runtime
   // instead of a second AI path. No tools are exposed on public chat.
+  // agent_runs.agent_id is a UUID column — a "chatbot:..." prefix breaks every
+  // insert, so the workspace_item id (a real UUID) is used directly.
   try {
     const result = await runAgentLoop({
       agent: {
-        id: `chatbot:${bot.id}`,
-        instructions: String((bot.payload as { instructions?: string }).instructions ?? ""),
-        knowledge: String((bot.payload as { knowledge?: string }).knowledge ?? ""),
+        id: String(bot.id),
+        instructions: String(payload.instructions ?? ""),
+        knowledge: String(payload.knowledge ?? ""),
         tools: [],
-        model: typeof (bot.payload as { model?: string }).model === "string" ? String((bot.payload as { model?: string }).model) : null,
+        model: typeof payload.model === "string" ? payload.model : null,
         approval_required: false,
         max_actions: 4,
         status: "on",
@@ -418,6 +438,10 @@ router.post("/public/chatbots/:workspaceId/:slug/chat", async (req, res) => {
       organizationId: req.params.workspaceId,
       persistActivity: false,
     });
+    // Conversation history so the public widget (and the owner's history view)
+    // can replay the full thread.
+    await query(`INSERT INTO chatbot_messages (chatbot_id, role, content, metadata) VALUES ($1,'user',$2,'{}'::jsonb)`, [bot.id, message]);
+    await query(`INSERT INTO chatbot_messages (chatbot_id, role, content, metadata) VALUES ($1,'assistant',$2,$3)`, [bot.id, result.reply, JSON.stringify({ runId: result.runId })]);
     res.json({ reply: result.reply });
   } catch (err) {
     const code = err instanceof Error ? err.message : "chatbot_failed";
@@ -1090,21 +1114,27 @@ authed.get("/runs/:id/stream", async (req, res) => {
     status: run.status,
   });
 
+  // Terminal statuses computed once (shared by the pre-check and the poller)
+  const TERMINAL = ["succeeded", "failed", "cancelled", "filtered"];
+
   // If run is terminal, send final event and close
-  if (["succeeded", "failed", "cancelled", "filtered"].includes(run.status as string)) {
+  if (TERMINAL.includes(run.status as string)) {
     sendEvent("run_finished", { status: run.status });
     clearInterval(keepAlive);
     res.end();
     return;
   }
 
-  // In production, subscribe to Redis pub-sub for real-time updates
-  // For now, poll the database every 2 seconds
+  // Dedup cursor: only newly completed steps are emitted (sequence_no is
+  // monotonic per run), so the stream never re-sends old events.
+  let completedSteps = 0;
+
+  // DB-polling transport (Redis pub/sub is the production upgrade path).
   const poll = setInterval(async () => {
     try {
       const current = await queryOne<{ status: string }>(
-        `SELECT status FROM flow_runs WHERE id = $1`,
-        [run.id],
+        `SELECT status FROM flow_runs WHERE id = $1 AND org_id = $2`,
+        [run.id, req.orgId],
       );
 
       if (!current) {
@@ -1114,29 +1144,34 @@ authed.get("/runs/:id/stream", async (req, res) => {
         return;
       }
 
-      // Get latest steps
-      const steps = await query<{ step_id: string; status: string; duration_ms: number | null }>(
-        `SELECT step_id, status, duration_ms FROM run_steps WHERE run_id = $1 ORDER BY sequence_no DESC LIMIT 1`,
-        [run.id],
+      // Emit only NEWLY completed steps (dedup cursor), never re-sends.
+      const steps = await query<{ sequence_no: number; step_id: string; status: string; duration_ms: number | null }>(
+        `SELECT sequence_no, step_id, status, duration_ms FROM run_steps
+         WHERE run_id = $1 AND sequence_no > $2
+         ORDER BY sequence_no ASC`,
+        [run.id, completedSteps],
       );
 
       if (steps.length > 0) {
-        const step = steps[0];
-        sendEvent("step_finished", {
-          stepId: step.step_id,
-          status: step.status,
-          durationMs: step.duration_ms,
-        });
+        completedSteps = steps[steps.length - 1].sequence_no;
+        for (const step of steps) {
+          sendEvent("step_finished", {
+            stepId: step.step_id,
+            status: step.status,
+            durationMs: step.duration_ms,
+          });
+        }
       }
 
-      if (["succeeded", "failed", "cancelled", "filtered"].includes(current.status)) {
+      if (TERMINAL.includes(current.status)) {
         sendEvent("run_finished", { status: current.status });
         clearInterval(poll);
         clearInterval(keepAlive);
         res.end();
       }
-    } catch {
-      // Ignore polling errors
+    } catch (err) {
+      // Log transient DB errors — never silent, but the stream stays alive.
+      console.error("[run-stream] poll failed:", err);
     }
   }, 2000);
 
@@ -1896,137 +1931,6 @@ authed.post("/copilot/refine", async (req, res) => {
   res.json(result);
 });
 
-/**
- * POST /copilot/sessions/:sessionId/approve
- *
- * Server-authoritative approval boundary. The browser sends only the sessionId
- * (and optionally flowId). The server decides exactly what is being approved:
- *
- *   1. Load session — reject if missing, completed, or not in active state
- *   2. Load pending_operations from the session (stored by copilot-http)
- *   3. Load CURRENT workflow graph from the flows table
- *   4. Re-validate operations against the current catalog and current graph
- *   5. Apply with explicit approval (allowDestructive=true for user-approved ops)
- *   6. Validate the resulting graph
- *   7. Persist as draft
- *   8. Mark session completed
- *   9. Audit log
- *  10. Return the validated graph to the frontend
- *
- * Protection against:
- *   - stale proposal / already-completed session
- *   - browser-supplied replacement operations
- *   - wrong workspace / wrong flow
- *   - unknown catalog operations
- *   - invalid resulting workflow
- *   - credential injection
- *   - bypassing confirmation
- *   - partial application
- */
-authed.post("/copilot/sessions/:sessionId/approve", requireRole("owner", "admin", "editor"), async (req, res) => {
-  // 1. Load session and verify state
-  const session = await queryOne<{
-    id: string; org_id: string; flow_id: string | null; status: string;
-    pending_operations: unknown[] | null; proposed_definition: unknown;
-  }>(
-    `SELECT id, org_id, flow_id, status, pending_operations, proposed_definition
-     FROM copilot_sessions WHERE id = $1 AND org_id = $2`,
-    [req.params.sessionId, req.orgId],
-  );
-  if (!session) return res.status(404).json({ error: "session_not_found" });
-  if (session.status !== "active") {
-    return res.status(409).json({ error: "session_not_active", status: session.status });
-  }
-
-  // 2. Load pending operations from the session — browser cannot supply replacements
-  const pendingOps = session.pending_operations;
-  if (!Array.isArray(pendingOps) || pendingOps.length === 0) {
-    return res.status(400).json({ error: "no_pending_operations" });
-  }
-
-  // 3. Determine target flow and load CURRENT workflow graph
-  const body = z.object({ flowId: z.string().uuid().optional() }).parse(req.body ?? {});
-  const flowId = body.flowId ?? session.flow_id;
-  if (!flowId) return res.status(400).json({ error: "no_flow" });
-
-  const flow = await queryOne<{ draft_definition: unknown }>(
-    `SELECT draft_definition FROM flows WHERE id = $1 AND org_id = $2`,
-    [flowId, req.orgId],
-  );
-  if (!flow) return res.status(404).json({ error: "flow_not_found" });
-
-  const currentGraph = loadBuilderGraph(flow.draft_definition);
-
-  // 4-5. Re-validate operations against current catalog and apply with approval
-  const { applyAgentOperations } = await import("./agent-operation-applier");
-  const result = await applyAgentOperations({
-    graph: currentGraph,
-    operations: pendingOps,
-    workspaceId: req.orgId!,
-    organizationId: req.orgId!,
-    allowDestructive: true, // user explicitly approved — destructive ops allowed
-  });
-
-  // Reject if any operations were rejected during re-validation
-  if (result.rejected.length > 0) {
-    return res.status(422).json({
-      error: "operations_rejected",
-      rejected: result.rejected,
-      issues: result.issues,
-    });
-  }
-
-  // 6. Validate the resulting graph
-  const { validateWorkflowGraph } = await import("./workflow-validation");
-  const validation = await validateWorkflowGraph(result.graph, {
-    workspaceId: req.orgId!,
-    strict: true,
-  });
-  if (validation.issues.length > 0) {
-    return res.status(422).json({
-      error: "invalid_resulting_graph",
-      issues: validation.issues,
-    });
-  }
-
-  // 7. Persist as draft
-  const draft = persistBuilderDraft(validation.graph);
-  await query(
-    `UPDATE flows SET draft_definition = $3, updated_at = now(), updated_by = $4
-     WHERE id = $1 AND org_id = $2`,
-    [flowId, req.orgId, JSON.stringify(draft), req.user!.userId],
-  );
-
-  // 8. Mark session completed
-  await query(
-    `UPDATE copilot_sessions SET status = 'completed', pending_operations = NULL, updated_at = now()
-     WHERE id = $1`,
-    [session.id],
-  );
-
-  // 9. Audit log
-  await query(
-    `INSERT INTO audit_logs (org_id, actor_id, actor_kind, action, target_type, target_id, metadata)
-     VALUES ($1, $2, 'user', 'copilot_approve', 'flow', $3, $4)`,
-    [req.orgId, req.user!.userId, flowId, JSON.stringify({
-      sessionId: session.id,
-      applied: result.applied.length,
-      rejected: result.rejected.length,
-      needsConfirmation: result.needsConfirmation.length,
-    })],
-  ).catch(() => undefined);
-
-  // 10. Return the validated graph so the frontend can hydrate from it
-  res.json({
-    ok: true,
-    flowId,
-    graph: validation.graph,
-    applied: result.applied,
-    rejected: result.rejected,
-    needsConfirmation: result.needsConfirmation,
-    issues: result.issues,
-  });
-});
 
 authed.post("/copilot/suggest-field", async (req, res) => {
   const body = z.object({ definition: z.record(z.unknown()).optional(), stepId: z.string(), prop: z.string() }).parse(req.body);
@@ -2158,22 +2062,19 @@ authed.post("/todos/:id/resolve", async (req, res) => {
   if (!todo) return res.status(404).json({ error: "not_found" });
 
   if (body.decision === "approved") {
-    // Re-activate the paused run AND enqueue a transition job — setting the
-    // status alone left approved runs stalled forever (P0 resume fix).
-    const resumed = await query(
-      `UPDATE flow_runs SET status = 'running', paused_reason = NULL, transition_epoch = transition_epoch + 1
-       WHERE id = $1 AND org_id = $2 AND status = 'paused'
-       RETURNING cursor, transition_epoch`,
-      [todo.run_id, req.orgId],
+    // Re-activate the paused run through the CANONICAL boundary: the engine's
+    // durable cursor already advanced past the approval step at pause time,
+    // so the resumed run continues AFTER it — the todo is never re-created.
+    const { enqueueFlowResume } = await import("./queue");
+    await enqueueFlowResume(todo.run_id, req.orgId!);
+  } else {
+    // User rejection fails the run immediately — previously it stayed
+    // 'paused' until the sweeper's timeout policy eventually fired.
+    await query(
+      `UPDATE flow_runs SET status = 'failed', paused_reason = NULL, resume_at = NULL, finished_at = now()
+       WHERE id = $1 AND created_at = $2 AND status = 'paused'`,
+      [todo.run_id, todo.run_created_at],
     );
-    if (resumed[0]) {
-      const { queues } = await import("./queue");
-      await queues.steps.add(
-        "transition",
-        { runId: todo.run_id, orgId: req.orgId, cursor: Number(resumed[0].cursor ?? 0), epoch: Number(resumed[0].transition_epoch ?? 1) },
-        { jobId: `step:${todo.run_id}:${resumed[0].cursor}:${resumed[0].transition_epoch}`, removeOnComplete: 1000 },
-      ).catch(() => undefined);
-    }
   }
 
   res.json({ ok: true });
@@ -3637,41 +3538,117 @@ authed.delete("/chatbots/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+authed.patch("/chatbots/:id", async (req, res) => {
+  const body = z.object({
+    name: z.string().min(1).optional(),
+    instructions: z.string().optional(),
+    knowledge: z.string().optional(),
+    automationId: z.string().uuid().nullable().optional(),
+    keyword: z.string().nullable().optional(),
+    isPublic: z.boolean().optional(),
+    model: z.string().nullable().optional(),
+    welcomeMessage: z.string().nullable().optional(),
+    theme: z.record(z.unknown()).optional(),
+  }).parse(req.body);
+  const existing = await queryOne(`SELECT payload, name FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`, [req.params.id, req.orgId]);
+  if (!existing) return res.status(404).json({ error: "not_found" });
+  const payload = { ...(existing.payload as Record<string, unknown>) };
+  if (body.instructions !== undefined) payload.instructions = body.instructions;
+  if (body.knowledge !== undefined) payload.knowledge = body.knowledge;
+  if (body.automationId !== undefined) payload.automationId = body.automationId;
+  if (body.keyword !== undefined) payload.keyword = body.keyword;
+  if (body.isPublic !== undefined) payload.is_public = body.isPublic;
+  if (body.model !== undefined) payload.model = body.model;
+  if (body.welcomeMessage !== undefined) payload.welcomeMessage = body.welcomeMessage;
+  if (body.theme !== undefined) payload.theme = body.theme;
+  await query(
+    `UPDATE workspace_items SET name = $3, payload = $4, updated_at = now() WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`,
+    [req.params.id, req.orgId, body.name ?? existing.name, JSON.stringify(payload)],
+  );
+  res.json({ ok: true });
+});
+
+// Chatbot = Agent + chat channel: the same agent runtime the Agents page uses,
+// just with the chat tool surface. Keyword hit triggers the linked workflow.
 authed.post("/chatbots/:id/chat", async (req, res) => {
-  const body = z.object({ message: z.string().min(1) }).parse(req.body);
+  const body = z.object({ message: z.string().min(1), sessionId: z.string().optional() }).parse(req.body);
   const bot = await queryOne(`SELECT * FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`, [req.params.id, req.orgId]);
-  const instructions = String((bot?.payload as { instructions?: string })?.instructions ?? "");
-  const result = await copilotChat({
-    prompt: `${instructions}\n\nUser: ${body.message}`,
-    workspaceId: req.orgId,
-  } as any).catch(() => null);
-  const reply = result?.reply ?? result?.summary ?? `I received: "${body.message}". Connect an AI provider key for a live answer.`;
-  res.json({ reply });
+  if (!bot) return res.status(404).json({ error: "not_found" });
+  const payload = (bot.payload ?? {}) as Record<string, unknown>;
+  if (payload.status === "off") return res.status(400).json({ error: "chatbot_off" });
+  // Abuse guard: per-bot rate limit, fail open when Redis is down.
+  try {
+    const { consumeRateLimit } = await import("./rate-limit");
+    const rl = await consumeRateLimit("ws", `chat:${bot.id}`, env.rateLimits.chatPerMinute, 60);
+    if (!rl.allowed) return res.status(429).json({ error: "rate_limited", retryAfterSec: rl.resetAfterSec });
+  } catch { /* limiter unavailable */ }
+  await query(`INSERT INTO chatbot_messages (chatbot_id, role, content) VALUES ($1,'user',$2)`, [bot.id, body.message]);
+  try {
+    const result = await runAgentLoop({
+      agent: {
+        id: String(bot.id),
+        instructions: String(payload.instructions ?? ""),
+        knowledge: String(payload.knowledge ?? ""),
+        tools: [], // chat answers only; tool calls belong to Agents
+        model: typeof payload.model === "string" ? payload.model : null,
+        approval_required: false,
+        max_actions: 4,
+        status: "on",
+      },
+      message: body.message,
+      workspaceId: req.orgId!,
+      organizationId: req.orgId!,
+      userId: req.user?.userId,
+      persistActivity: false,
+    });
+    await query(`INSERT INTO chatbot_messages (chatbot_id, role, content, metadata) VALUES ($1,'assistant',$2,$3)`, [bot.id, result.reply, JSON.stringify({ runId: result.runId })]);
+    // Keyword (or natural language) trigger -> linked workflow.
+    let executionId: string | null = null;
+    const automationId = typeof payload.automationId === "string" ? payload.automationId : null;
+    const keyword = typeof payload.keyword === "string" ? payload.keyword.toLowerCase() : "";
+    const keywordHit = Boolean(keyword) && body.message.toLowerCase().includes(keyword);
+    if (automationId && (keywordHit || /start|run|zap|automate/i.test(body.message))) {
+      const { createAndRunFlow } = await import("./flow-runtime");
+      const exec = await createAndRunFlow({
+        orgId: req.orgId!,
+        flowId: automationId,
+        userId: req.user!.userId,
+        payload: { message: body.message, chatbotId: bot.id, sessionId: body.sessionId ?? null },
+        triggerKind: "chatbot",
+      }).catch(() => null);
+      executionId = exec?.id ?? null;
+    }
+    res.json({ reply: result.reply, executionId });
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "chatbot_failed";
+    if (code.startsWith("NO_MODEL_PROVIDER")) {
+      return res.status(503).json({ error: "no_model_provider", hint: "Connect an AI provider key to enable live chat." });
+    }
+    console.error("chatbot chat failed", err);
+    res.status(400).json({ error: code });
+  }
+});
+
+// Conversation history for the test-chat panel and audit.
+authed.get("/chatbots/:id/messages", async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
+  const messages = await query(
+    `SELECT id, role, content, metadata, created_at FROM chatbot_messages
+     WHERE chatbot_id = $1 ORDER BY created_at ASC LIMIT $2`,
+    [req.params.id, limit],
+  );
+  res.json({ messages });
+});
+
+authed.delete("/chatbots/:id/messages", async (req, res) => {
+  await query(`DELETE FROM chatbot_messages WHERE chatbot_id = $1`, [req.params.id]);
+  res.json({ ok: true });
 });
 
 authed.get("/agents", async (req, res) => {
   const rows = await listItems(req.orgId!, "agent");
   res.json({ agents: rows.map((r) => ({ ...presentItem(r), status: (r.payload as { status?: string })?.status ?? "active" })) });
 });
-
-authed.post("/agents", async (req, res) => {
-  const body = z.object({
-    name: z.string().min(1),
-    instructions: z.string().optional(),
-    knowledge: z.string().optional(),
-    pod: z.string().optional(),
-    automationId: z.string().uuid().optional(),
-    tools: z.array(z.record(z.unknown())).optional(),
-    approvalRequired: z.boolean().optional(),
-    model: z.string().optional(),
-  }).parse(req.body);
-  const row = await insertItem(req.orgId!, "agent", body.name, { ...body, status: "active", activities: [] });
-  res.json({ agent: presentItem(row!) });
-});
-
-authed.delete("/agents/:id", async (req, res) => {
-  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
-  res.json({ ok: true });  });
 
 authed.post("/agents/:id/run", async (req, res) => {
   const body = z.object({ message: z.string().min(1) }).parse(req.body);
@@ -3728,9 +3705,118 @@ authed.post("/agents/:id/run", async (req, res) => {
 });
 
 authed.get("/agents/:id/activities", async (req, res) => {
-  const agent = await queryOne(`SELECT payload FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
-  const activities = ((agent?.payload as { activities?: unknown[] })?.activities) ?? [];
-  res.json({ activities });
+  // Durable activity = durable runs from agent_runs (never the old in-payload
+  // array, which only captured the message/reply pair).
+  const runs = await query(
+    `SELECT id AS run_id, status, input_message, reply, rounds, stop_reason, usage, created_at
+     FROM agent_runs WHERE agent_id = $1 AND org_id = $2
+     ORDER BY created_at DESC LIMIT 50`,
+    [req.params.id, req.orgId],
+  );
+  res.json({ activities: runs });
+});
+
+// ── Agents (workspace_items): canonical CRUD + run history ──────────────────
+// Agents live in workspace_items (kind='agent') — migrations 0012/0013 made
+// agent_runs/agent_activities polymorphic precisely for this registry.
+
+authed.post("/agents", async (req, res) => {
+  const body = z
+    .object({
+      name: z.string().min(1),
+      instructions: z.string().optional(),
+      knowledge: z.string().optional(),
+      model: z.string().nullable().optional(),
+      pod: z.string().nullable().optional(),
+      automationId: z.string().uuid().nullable().optional(),
+      tools: z.array(z.record(z.unknown())).optional(),
+      triggerMode: z.enum(["manual", "monitor", "event"]).optional(),
+      approvalRequired: z.boolean().optional(),
+      maxActions: z.number().int().min(1).max(50).optional(),
+    })
+    .parse(req.body);
+  const row = await insertItem(req.orgId!, "agent", body.name, {
+    instructions: body.instructions ?? "",
+    knowledge: body.knowledge ?? "",
+    model: body.model ?? null,
+    pod: body.pod ?? null,
+    automationId: body.automationId ?? null,
+    tools: body.tools ?? [],
+    triggerMode: body.triggerMode ?? "manual",
+    approvalRequired: body.approvalRequired ?? false,
+    maxActions: body.maxActions ?? 8,
+    status: "on",
+    activities: [],
+  });
+  res.json({ agent: presentItem(row!) });
+});
+
+authed.patch("/agents/:id", async (req, res) => {
+  const body = z
+    .object({
+      name: z.string().min(1).optional(),
+      instructions: z.string().optional(),
+      knowledge: z.string().optional(),
+      model: z.string().nullable().optional(),
+      pod: z.string().nullable().optional(),
+      automationId: z.string().uuid().nullable().optional(),
+      tools: z.array(z.record(z.unknown())).optional(),
+      triggerMode: z.enum(["manual", "monitor", "event"]).optional(),
+      approvalRequired: z.boolean().optional(),
+      maxActions: z.number().int().min(1).max(50).optional(),
+      status: z.enum(["on", "off"]).optional(),
+    })
+    .parse(req.body);
+  const existing = await queryOne(`SELECT payload, name FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
+  if (!existing) return res.status(404).json({ error: "not_found" });
+  const payload = { ...(existing.payload as Record<string, unknown>) };
+  for (const key of ["instructions", "knowledge", "model", "pod", "automationId", "tools", "triggerMode", "approvalRequired", "maxActions", "status"] as const) {
+    if (body[key] !== undefined) (payload as Record<string, unknown>)[key] = body[key];
+  }
+  await query(
+    `UPDATE workspace_items SET name = $3, payload = $4, updated_at = now() WHERE id = $1 AND org_id = $2 AND kind = 'agent'`,
+    [req.params.id, req.orgId, body.name ?? existing.name, JSON.stringify(payload)],
+  );
+  res.json({ ok: true });
+});
+
+authed.delete("/agents/:id", async (req, res) => {
+  const existing = await queryOne(`SELECT id FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
+  if (!existing) return res.status(404).json({ error: "not_found" });
+  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
+  res.json({ ok: true });
+});
+
+authed.get("/agents/:id/runs", async (req, res) => {
+  const runs = await query(
+    `SELECT id, status, input_message, reply, rounds, stop_reason, model, usage, error, created_at, updated_at
+     FROM agent_runs WHERE agent_id = $1 AND org_id = $2
+     ORDER BY created_at DESC LIMIT 50`,
+    [req.params.id, req.orgId],
+  );
+  res.json({ runs });
+});
+
+authed.get("/agents/:id/runs/:runId", async (req, res) => {
+  const run = await queryOne(
+    `SELECT * FROM agent_runs WHERE id = $1 AND agent_id = $2 AND org_id = $3`,
+    [req.params.runId, req.params.id, req.orgId],
+  );
+  if (!run) return res.status(404).json({ error: "not_found" });
+  const events = await query(
+    `SELECT seq, type, at, data FROM agent_run_events WHERE run_id = $1 ORDER BY seq ASC`,
+    [req.params.runId],
+  );
+  res.json({ run, events });
+});
+
+authed.get("/agents/:id/approvals", async (req, res) => {
+  const approvals = await query(
+    `SELECT * FROM agent_approvals WHERE agent_id = $1 AND workspace_id = $2 AND status = 'pending'
+     ORDER BY created_at DESC`,
+    [req.params.id, req.workspaceId],
+  );
+  res.json({ approvals });
 });
 
 authed.post("/ai/copilot", async (req, res) => {
@@ -3762,6 +3848,13 @@ authed.post("/ai/copilot", async (req, res) => {
     graph: body.graph as any,
   });
   res.json({ graph: result.graph, summary: result.summary, source: result.source });
+});
+
+// Model picker options for Agents / Chatbots — reflects which providers the
+// runtime can actually route to (env keys configured).
+authed.get("/ai/model-options", async (_req, res) => {
+  const { modelOptions } = await import("./config");
+  res.json({ options: modelOptions() });
 });
 
 /** Simple AI text generation for table AI fields */

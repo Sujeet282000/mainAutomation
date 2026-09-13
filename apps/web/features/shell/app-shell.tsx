@@ -197,7 +197,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       >
         {/* Logo — pinned (never scrolls) */}
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-line/50 px-3">
-          <Logo compact={editor || collapsed} />
+          <a href="/dashboard" className="inline-flex rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500" title="FlowShip — Dashboard">
+            <Logo compact={editor || collapsed} />
+          </a>
           {!editor && (
             <button
               className="hidden rounded-lg p-1.5 text-ink-muted transition-colors hover:bg-muted hover:text-ink lg:block"

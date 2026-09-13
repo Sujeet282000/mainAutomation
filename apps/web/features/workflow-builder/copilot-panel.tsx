@@ -254,7 +254,7 @@ function SystemPlanView({ plan, onBuild }: { plan: SystemPlanResult; onBuild?: (
         </div>
       </div>
       <div className="mt-3 space-y-1.5">
-        {plan.capabilities.map((cap, i) => (
+        {(plan.capabilities ?? []).map((cap, i) => (
           <div key={i} className="flex items-center gap-2 text-[11px]">
             <span className="text-sm">{PRODUCT_ICONS[cap.product] || "\ud83d\udce6"}</span>
             <span className="font-medium text-ink capitalize">{cap.product}</span>
@@ -262,21 +262,21 @@ function SystemPlanView({ plan, onBuild }: { plan: SystemPlanResult; onBuild?: (
           </div>
         ))}
       </div>
-      {plan.needs_connections.length > 0 && (
+      {(plan.needs_connections ?? []).length > 0 && (
         <div className="mt-3 rounded-lg border border-amber-300/30 bg-amber-500/5 p-2">
           <p className="text-[11px] font-medium text-amber-700">Connections needed:</p>
           <div className="mt-1 flex flex-wrap gap-1">
-            {plan.needs_connections.map((c) => (
+            {(plan.needs_connections ?? []).map((c) => (
               <span key={c} className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">{c}</span>
             ))}
           </div>
         </div>
       )}
-      {plan.recommended_actions.length > 0 && (
+      {(plan.recommended_actions ?? []).length > 0 && (
         <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">I'll create</p>
           <ul className="mt-1 space-y-0.5">
-            {plan.recommended_actions.map((action, i) => (
+            {(plan.recommended_actions ?? []).map((action, i) => (
               <li key={i} className="flex items-center gap-1.5 text-[11px] text-ink">
                 <Check className="h-3 w-3 text-ok" />{action}
               </li>
@@ -304,6 +304,9 @@ function BadgeIcon({ type }: { type?: string }) {
 }
 
 function OperationCardView({ card, onSend }: { card: OperationCard; onSend?: (prompt: string) => void }) {
+  // Backend stage events can arrive without title/steps — rendering those as empty
+  // bordered boxes looked broken. Skip cards with no visible content.
+  if (!card?.title && !(card?.steps ?? []).length) return null;
   return (
     <div className={cn("rounded-xl border p-3 text-xs", card.status === "completed" ? "border-ok/30 bg-ok/5" : card.status === "failed" ? "border-danger/30 bg-danger/5" : "border-teal/30 bg-teal-soft/10")}>
       <div className="flex items-center gap-2">
@@ -314,7 +317,7 @@ function OperationCardView({ card, onSend }: { card: OperationCard; onSend?: (pr
         {card.detail && <span className="ml-auto text-[10px] text-ink-muted">{card.detail}</span>}
       </div>
       <div className="mt-2 space-y-1.5">
-        {card.steps.map((step, i) => (
+        {(card.steps ?? []).map((step, i) => (
           <div key={i} className="flex items-center gap-2">
             {step.status === "completed" && <div className="h-2 w-2 rounded-full bg-ok" />}
             {step.status === "running" && <Loader2 className="h-2 w-2 animate-spin text-teal" />}
@@ -366,7 +369,7 @@ function StepCardView({ card, onSend }: { card: StepCard; onSend?: (prompt: stri
       </div>
       {card.issues && card.issues.length > 0 && (
         <div className="mt-2 space-y-0.5">
-          {card.issues.map((issue, i) => (
+          {(card.issues ?? []).map((issue, i) => (
             <div key={i} className="flex items-center gap-1.5 text-[11px] text-amber-700">
               <AlertTriangle className="h-2.5 w-2.5 shrink-0" />{issue}
             </div>
@@ -424,7 +427,7 @@ function FieldMappingView({ card }: { card: FieldMappingCard }) {
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium text-ink-muted">{card.sourceLabel}</p>
           <ul className="mt-0.5 space-y-0.5">
-            {card.sourceFields.map((f, i) => (
+            {(card.sourceFields ?? []).map((f, i) => (
               <li key={i} className="text-[11px] text-ink">{f}</li>
             ))}
           </ul>
@@ -433,7 +436,7 @@ function FieldMappingView({ card }: { card: FieldMappingCard }) {
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium text-ink-muted">{card.targetLabel}</p>
           <ul className="mt-0.5 space-y-0.5">
-            {card.targetFields.map((f, i) => (
+            {(card.targetFields ?? []).map((f, i) => (
               <li key={i} className="text-[11px] text-ink">{f}</li>
             ))}
           </ul>
@@ -484,7 +487,7 @@ function ClarificationView({ clarification, onSelect }: { clarification: Clarifi
   return (
     <div className="rounded-xl border border-violet-400/30 bg-violet-500/5 p-3">
       <div className="flex items-start gap-2"><MessageSquare className="h-3.5 w-3.5 mt-0.5 shrink-0 text-violet-600" /><p className="text-xs font-medium text-ink">{clarification.question}</p></div>
-      <div className="mt-2 space-y-1">{clarification.options.map((option) => (<button key={option.label} type="button" className="flex w-full items-center gap-2 rounded-lg border border-line bg-elevated p-2 text-left text-[11px] transition-all hover:border-violet-400/40 hover:bg-violet-500/5 active:scale-[0.98]" onClick={() => onSelect(option.prompt)}><ChevronRight className="h-3 w-3 shrink-0 text-violet-600" /><div><span className="font-medium text-ink">{option.label}</span>{option.description && <span className="ml-1.5 text-ink-muted">{option.description}</span>}</div></button>))}</div>
+      <div className="mt-2 space-y-1">{(clarification.options ?? []).map((option) => (<button key={option.label} type="button" className="flex w-full items-center gap-2 rounded-lg border border-line bg-elevated p-2 text-left text-[11px] transition-all hover:border-violet-400/40 hover:bg-violet-500/5 active:scale-[0.98]" onClick={() => onSelect(option.prompt)}><ChevronRight className="h-3 w-3 shrink-0 text-violet-600" /><div><span className="font-medium text-ink">{option.label}</span>{option.description && <span className="ml-1.5 text-ink-muted">{option.description}</span>}</div></button>))}</div>
     </div>
   );
 }
@@ -733,7 +736,8 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         const hasSuggestion = Boolean(result.graph || result.preview);
         setAgentState("completed"); setAgentTitle("Done");
         setLiveActivities((prev) => prev.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a));
-        setMsgs((m) => { const fa = liveActivitiesRef.current.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a); const last = m[m.length - 1]; const msg: Msg = { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations?.length ? result.operations : streamingOps, clarification: result.clarification, activities: fa, agentState: "completed", agentTitle: "Done", stepCards: (result as Record<string, unknown>).stepCards as StepCard[] | undefined, connectionCards: (result as Record<string, unknown>).connectionCards as ConnectionCard[] | undefined, warnings: (result as Record<string, unknown>).warnings as string[] | undefined }; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...msg, stepCards: msg.stepCards || last.stepCards, connectionCards: msg.connectionCards || last.connectionCards, warnings: msg.warnings || last.warnings }]; return [...m, msg]; });
+        setMsgs((m) => { const fa = liveActivitiesRef.current.map((a) => a.kind === "running" ? { ...a, kind: "done" as AgentActivityKind } : a); const last = m[m.length - 1]; const msg: Msg = { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations?.length ? result.operations : streamingOps, clarification: result.clarification, activities: fa, agentState: "completed", agentTitle: "Done", stepCards: (result as Record<string, unknown>).stepCards as StepCard[] | undefined, connectionCards: (result as Record<string, unknown>).connectionCards as ConnectionCard[] | undefined, warnings: (result as Record<string, unknown>).warnings as string[] | undefined }; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...msg, stepCards: msg.stepCards || last.stepCards, connectionCards: msg.connectionCards || last.connectionCards, warnings: msg.warnings || last.warnings }]; // Never append an identical reply twice — duplicate streams used to show the same message back-to-back.
+          if (last && last.role === "assistant" && last.text === msg.text && msg.text !== "") return m; return [...m, msg]; });
         if (result.graph && result.applied) {
           setCheckpoint(true);
           void onApply(result.graph, result.sessionId);
@@ -747,7 +751,8 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         const result = await onChat(prompt);
         const hasSuggestion = Boolean(result.graph || result.preview);
         setAgentState("completed"); setAgentTitle("Done");
-        setMsgs((m) => [...m, { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations, clarification: result.clarification, stepCards: result.stepCards, connectionCards: result.connectionCards, warnings: result.warnings }]);
+        setMsgs((m) => { const last = m[m.length - 1]; // Dedupe guard (non-streaming path): skip an identical reply appended twice.
+          if (last && last.role === "assistant" && last.text === result.reply && result.reply !== "") return m; return [...m, { role: "assistant", text: result.reply, workflowPreview: result.preview, suggestion: hasSuggestion, applied: Boolean(result.graph && result.applied), suggestions: result.suggestions, operations: result.operations, clarification: result.clarification, stepCards: result.stepCards, connectionCards: result.connectionCards, warnings: result.warnings }]; });
         if (result.graph && result.applied) {
           setCheckpoint(true);
           void onApply(result.graph, result.sessionId);
@@ -770,7 +775,18 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
     setTimeout(() => { void send("chat", editingText.trim()); }, 50);
   }
 
-  useEffect(() => { if (!incomingPrompt?.trim()) return; const p = incomingPrompt.trim(); onIncomingPromptHandled?.(); void send("chat", p); }, [incomingPrompt]);
+  // Fire an incoming prompt exactly once per unique value — React StrictMode
+  // and re-renders can double-invoke effects, which used to send the same
+  // prompt twice and produce duplicate assistant replies.
+  const lastHandledPrompt = useRef<string | null>(null);
+  useEffect(() => {
+    const p = incomingPrompt?.trim();
+    if (!p) return;
+    if (lastHandledPrompt.current === p) return;
+    lastHandledPrompt.current = p;
+    onIncomingPromptHandled?.();
+    void send("chat", p);
+  }, [incomingPrompt]);
 
   const empty = msgs.length === 0 && !building && !sending;
   const collapsed = !open || minimized;
@@ -845,7 +861,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
                   <AgentMessage text={m.text} onSend={(p) => { setInput(p); void send("chat", p); }} />
 
                   {/* Operations */}
-                  {m.operations && m.operations.length > 0 && <div className="space-y-2">{m.operations.map((op, j) => <OperationCardView key={j} card={op} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}
+                  {m.operations && m.operations.length > 0 && <div className="space-y-2">{m.operations.map((op, j) => <OperationCardView key={j} card={op} onSend={(p) => { setInput(p); void send("chat", p); }} />).filter(Boolean)}</div>}
 
                   {/* Step cards */}
                   {m.stepCards && m.stepCards.length > 0 && <div className="space-y-2">{m.stepCards.map((card, j) => <StepCardView key={j} card={card} onSend={(p) => { setInput(p); void send("chat", p); }} />)}</div>}

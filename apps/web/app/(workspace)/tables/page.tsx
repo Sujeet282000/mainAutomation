@@ -59,8 +59,8 @@ function TableCard({ table, onOpen, onDelete }: { table: Table; onOpen: () => vo
       </div>
       {fields.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
-          {fields.slice(0, 5).map((f) => (
-            <span key={f.key} className="inline-flex items-center gap-1 rounded-full border border-line bg-muted/50 px-2 py-0.5 text-[10px] text-ink-muted">
+          {fields.slice(0, 5).map((f, i) => (
+            <span key={f.key} className="inline-flex items-center gap-1 rounded-full border border-line bg-muted/50 px-2 py-0.5 text-[10px] text-ink-muted transition-transform duration-200 group-hover:scale-105" style={{ transitionDelay: `${i * 40}ms` }}>
               {f.label ?? f.key}
               <FieldTypeBadge type={f.type} />
             </span>
@@ -534,18 +534,41 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
           )}
         </div>
 
-        {view === "grid" && (
-          <div className="border-t border-line px-4 py-3">
-            <div className="flex gap-2 items-end">
+        {view === "grid" && fields.length > 0 && (
+          <div className="border-t border-line bg-elevated px-4 py-3">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">Quick add row</p>
+            <div className="flex flex-wrap gap-2 items-end">
               {fields.filter((f) => f.type !== "formula" && f.type !== "button" && f.type !== "ai").map((f) => (
                 <div key={f.key}>
-                  <label className="mb-0.5 block text-[9px] text-ink-muted">{f.label ?? f.key}</label>
-                  <Input
-                    className="w-40"
-                    placeholder={f.label ?? f.key}
-                    value={draft[f.key] ?? ""}
-                    onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
-                  />
+                  <label className="mb-0.5 block text-[9px] font-medium text-ink-muted">{f.label ?? f.key}</label>
+                  {f.type === "select" ? (
+                    <select
+                      className="h-9 w-40 rounded-lg border border-line bg-elevated px-2 text-xs transition focus:border-teal focus:outline-none"
+                      value={draft[f.key] ?? ""}
+                      onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
+                    >
+                      <option value="">Select…</option>
+                      {(f.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+                  ) : f.type === "checkbox" ? (
+                    <label className="flex h-9 w-40 items-center gap-2 rounded-lg border border-line bg-elevated px-2 text-xs text-ink-muted">
+                      <input
+                        type="checkbox"
+                        checked={draft[f.key] === "true"}
+                        onChange={(e) => setDraft({ ...draft, [f.key]: e.target.checked ? "true" : "" })}
+                        className="h-3.5 w-3.5 accent-teal"
+                      />
+                      {f.label ?? f.key}
+                    </label>
+                  ) : (
+                    <Input
+                      className="w-40"
+                      type={f.type === "date" ? "date" : f.type === "number" ? "number" : f.type === "email" ? "email" : "text"}
+                      placeholder={f.label ?? f.key}
+                      value={draft[f.key] ?? ""}
+                      onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
+                    />
+                  )}
                 </div>
               ))}
               <Button size="sm" onClick={async () => {
@@ -553,9 +576,14 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                 for (const f of fields) {
                   if (f.type === "formula" || f.type === "button" || f.type === "ai" || f.type === "linked") delete data[f.key];
                 }
-                await api(`/tables/${table.id}/records`, { method: "POST", body: JSON.stringify({ data }) });
-                setDraft({});
-                loadRecords();
+                try {
+                  await api(`/tables/${table.id}/records`, { method: "POST", body: JSON.stringify({ data }) });
+                  setDraft({});
+                  loadRecords();
+                  toast.success("Record added");
+                } catch (err) {
+                  toast.error("Failed to add record", { description: err instanceof Error ? err.message : "Unknown error" });
+                }
               }}><Plus className="mr-1 h-3 w-3" />Add row</Button>
             </div>
           </div>

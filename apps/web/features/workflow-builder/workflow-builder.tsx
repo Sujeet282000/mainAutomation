@@ -690,15 +690,16 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       const op = app?.operations.find((o) => opKey(o) === trigger?.data.operation);
       const payload = op ? opSample(op) : { ping: true, test: true };
 
-      /* Step-by-step entrance animation: each node goes running sequentially */
+      /* Step-by-step entrance sweep: nodes go running → queued sequentially.
+         NEVER paint optimistic green checks here — ok/fail come from the real
+         run stream, so a failing step no longer flashes green first. */
       for (let idx = 0; idx < ordered.length; idx++) {
         await new Promise((r) => setTimeout(r, idx === 0 ? 100 : 400));
         setRunStates((prev) => {
           const next = { ...prev };
-          /* Mark previous as ok if still in running */
           if (idx > 0) {
             const prevId = ordered[idx - 1].id;
-            if (next[prevId] === "running") next[prevId] = "ok";
+            if (next[prevId] === "running") next[prevId] = "queued";
           }
           next[ordered[idx].id] = "running";
           return next;
@@ -707,14 +708,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         setSelected(ordered[idx].id);
         setInspectorTab("test");
       }
-      /* Mark the last one as ok after the final entrance */
       await new Promise((r) => setTimeout(r, 400));
-      setRunStates((prev) => {
-        const next = { ...prev };
-        const lastId = ordered[ordered.length - 1].id;
-        if (next[lastId] === "running") next[lastId] = "ok";
-        return next;
-      });
+      /* Reset the sweep to queued — the run stream owns ok/fail painting */
+      setRunStates(Object.fromEntries(ordered.map((n) => [n.id, "queued" as RunState])));
 
       /* Now fire the actual run */
       const d = await api<{ execution: { id: string } }>(`/automations/${automationId}/run`, {
@@ -781,8 +777,21 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       });
       const ok = lastRef.current?.execution.status === "succeeded";
       setTestResult({ ok: Boolean(ok), body: lastRef.current });
-      /* After test completes, select the failed node if any, otherwise the last node */
-      const finalFailed = ordered.find((n) => runStates[n.id] === "fail");
+      /* After test completes, select the failed node if any, otherwise the last
+         node. Read from lastRef (the final snapshot) — the runStates state from
+         this closure is stale and always empty here. */
+      const finalStatuses: Record<string, RunState> = {};
+      for (const s of lastRef.current?.steps ?? []) {
+        finalStatuses[s.step_id] =
+          s.status === "succeeded" || s.status === "success" || s.status === "completed"
+            ? "ok"
+            : s.status === "failed" || s.status === "cancelled"
+              ? "fail"
+              : s.status === "waiting" || s.status === "pending_approval"
+                ? "waiting"
+                : s.status === "queued" ? "queued" : "running";
+      }
+      const finalFailed = ordered.find((n) => finalStatuses[n.id] === "fail");
       const finalNode = finalFailed || ordered[ordered.length - 1];
       if (finalNode) {
         setSelected(finalNode.id);
@@ -1107,17 +1116,20 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       </header>
 
       <div className="flex min-h-0 min-w-0 flex-1">
-        <CopilotPanel
-          automationId={automationId}
-          open={copilotOpen}
-          modal={copilotModal}
-          onOpenModal={() => setCopilotModal(true)}
-          building={busy === "copilot"}
-          draftConfigured={nodes.some((n) => Boolean(n.data.appSlug && n.data.operation))}
-          draftOutline={nodes
-            .filter((n) => n.data.appSlug && n.data.operation)
-            .map((n, i) => `${i + 1}. ${n.data.label || n.data.operation}`)
-            .join(" → ")}
+        {/* Only mount when the modal isn't shown — two mounted panels would both
+            handle incomingPrompt and send duplicate requests. */}
+        {!copilotModal && (
+          <CopilotPanel
+            automationId={automationId}
+            open={copilotOpen}
+            modal={false}
+            onOpenModal={() => setCopilotModal(true)}
+            building={busy === "copilot"}
+            draftConfigured={nodes.some((n) => Boolean(n.data.appSlug && n.data.operation))}
+            draftOutline={nodes
+              .filter((n) => n.data.appSlug && n.data.operation)
+              .map((n, i) => `${i + 1}. ${n.data.label || n.data.operation}`)
+              .join(" → ")}
           firstHumanAction={firstHumanAction}
           mode={copilotMode}
           onModeChange={(next) => {
@@ -1149,7 +1161,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             setBusy(null);
           }}
           onApply={async (graph, sessionId) => {
-            copilotCheckpoint.current = toApi(nodes, edges);
+            // Snapshot the CURRENT store state — the nodes/edges captured in
+            // this render closure can be stale right after a copilot build.
+            const snap = useBuilderStore.getState();
+            copilotCheckpoint.current = toApi(snap.nodes, snap.edges);
             if (sessionId) {
               try {
                 const result = await api<{
@@ -1182,12 +1197,16 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           }}
           onUiAction={handleCopilotUiAction}
           onRevert={() => {
-            if (!copilotCheckpoint.current) return;
-            const g = fromApi(copilotCheckpoint.current);
+            const snap = copilotCheckpoint.current;
+            copilotCheckpoint.current = null;
+            if (!snap) {
+              setMsg("Nothing to revert — no Copilot checkpoint was saved.");
+              return;
+            }
+            const g = fromApi(snap);
             hydrate(g.nodes, g.edges);
             setGraph(g.nodes, g.edges);
-            copilotCheckpoint.current = null;
-            setMsg("Copilot change reverted.");
+            setMsg("Copilot change reverted. The previous draft is restored.");
           }}
           incomingPrompt={injectPrompt}
           onIncomingPromptHandled={() => setInjectPrompt(null)}
@@ -1283,6 +1302,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             };
           }}
         />
+        )}
         <div className="relative min-h-0 min-w-0 flex-1">
           {copilotBanner && !copilotOpen && (
             <div className="pointer-events-none absolute left-1/2 top-3 z-10 w-[min(100%-2rem,560px)] -translate-x-1/2">
@@ -2120,7 +2140,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 };
               }}
               onApply={async (graph, sessionId) => {
-                copilotCheckpoint.current = toApi(nodes, edges);
+                // Snapshot the CURRENT store state — the nodes/edges captured in
+                // this render closure can be stale right after a copilot build.
+                const snap = useBuilderStore.getState();
+                copilotCheckpoint.current = toApi(snap.nodes, snap.edges);
                 if (sessionId) {
                   try {
                     const result = await api<{
@@ -2151,12 +2174,16 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               }}
               onUiAction={handleCopilotUiAction}
               onRevert={() => {
-                if (!copilotCheckpoint.current) return;
-                const g = fromApi(copilotCheckpoint.current);
+                const snap = copilotCheckpoint.current;
+                copilotCheckpoint.current = null;
+                if (!snap) {
+                  setMsg("Nothing to revert — no Copilot checkpoint was saved.");
+                  return;
+                }
+                const g = fromApi(snap);
                 hydrate(g.nodes, g.edges);
                 setGraph(g.nodes, g.edges);
-                copilotCheckpoint.current = null;
-                setMsg("Copilot change reverted.");
+                setMsg("Copilot change reverted. The previous draft is restored.");
               }}
               incomingPrompt={injectPrompt}
               onIncomingPromptHandled={() => setInjectPrompt(null)}

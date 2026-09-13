@@ -69,19 +69,14 @@ export default function AiPage() {
     setMsg("");
     try {
       if (planData?.sessionId && planData?.graph) {
-        // Use the analyzed plan's graph — the full pipeline already ran.
-        const created = await api<{ automation: { id: string } }>("/automations", {
-          method: "POST",
-          body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft", graph: planData.graph, origin: "copilot" }),
-        });
-        const flowId = created.automation.id;
-        try {
-          await api<{ ok: boolean; graph?: unknown }>(`/copilot/sessions/${planData.sessionId}/approve`, {
-            method: "POST",
-            body: JSON.stringify({ flowId }),
-          });
-          persistCopilotSession(planData.sessionId, flowId).catch(() => undefined);
-        } catch { /* approval is best-effort */ }
+        // Approve adopts the reviewed plan server-side and creates the
+        // workflow in one step — no client-side pre-creation double-apply.
+        const approved = await api<{ ok: boolean; flowId: string; graph?: unknown }>(
+          `/copilot/sessions/${planData.sessionId}/approve`,
+          { method: "POST", body: JSON.stringify({ name: next.slice(0, 60) || "Copilot draft" }) },
+        );
+        const flowId = approved.flowId;
+        persistCopilotSession(planData.sessionId, flowId).catch(() => undefined);
         toast.success("Workflow created!", { description: `${next.slice(0, 40)}… is ready in the editor` });
         router.push(`/automations/${flowId}/editor?idea=${encodeURIComponent(next)}`);
         return;

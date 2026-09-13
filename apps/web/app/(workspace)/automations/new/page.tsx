@@ -101,12 +101,12 @@ export default function NewAutomationPage() {
           onConfirm={async () => {
             if (!plan?.sessionId || !plan?.graph) { setPlan(null); return; }
             try {
-              const d = await api<{ automation: { id: string } }>("/automations", {
-                method: "POST",
-                body: JSON.stringify({ name: prompt.slice(0, 60) || name, graph: plan.graph, origin: "copilot" })
-              });
-              await api(`/copilot/sessions/${plan.sessionId}/approve`, { method: "POST" }).catch(() => undefined);
-              router.push(`/automations/${d.automation.id}/editor?idea=${encodeURIComponent(prompt)}`);
+              // Approve adopts the reviewed plan server-side and creates the workflow.
+              const approved = await api<{ ok: boolean; flowId: string; graph?: unknown }>(
+                `/copilot/sessions/${plan.sessionId}/approve`,
+                { method: "POST", body: JSON.stringify({ name: prompt.slice(0, 60) || name }) },
+              );
+              router.push(`/automations/${approved.flowId}/editor?idea=${encodeURIComponent(prompt)}`);
             } catch (err) {
               setError(err instanceof Error ? err.message : "Create failed");
               setPlan(null);

@@ -15,7 +15,7 @@
                                 │ REST /fetch         │ OAuth redirect
                         ┌───────▼────────┐    ┌───────▼────────┐
                         │   apps/api     │◄──►│  Supabase Auth │
-                        │ (Fastify TS)   │    └────────────────┘
+                        │ (Express TS)   │    └────────────────┘
                         └───┬───┬───┬────┘
               enqueue jobs  │   │   │  catalog/copilot/auth
           ┌─────────────────▼┐ ┌▼───▼──────────────┐   ┌──────────────┐
@@ -56,7 +56,7 @@
 | Service | Location | Stack | Port / Role |
 |---|---|---|---|
 | **web** | `apps/web` | Next.js 15 App Router, React Flow builder, Tailwind | UI: dashboard, flows editor, runs, connections, AI page, login/register |
-| **api** | `apps/api` | Node + Fastify, TypeScript | Main backend: auth, catalog, copilot, connections/OAuth, metering, MCP tools, webhook ingress, trigger activation, seed/migrations |
+| **api** | `apps/api` | Node + Express, TypeScript | Main backend: auth, catalog, copilot, connections/OAuth, metering, MCP tools, webhook ingress, trigger activation, seed/migrations |
 | **worker** | `apps/worker` | Node, Redis consumer | Executes automation runs using `@orchestra/engine` |
 | **scheduler** | `apps/scheduler` | Node | Cron/polling: finds scheduled & polling triggers, enqueues runs |
 | **ai** | `apps/ai` | Python FastAPI (`main:app`, port 8000) | Copilot LLM service; prompts in `apps/ai/prompts/copilot/*.txt`; called by API copilot-engine |

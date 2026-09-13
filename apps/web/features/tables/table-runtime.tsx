@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Bot, Zap, Link2, Calculator, Play, Loader2, Sparkles } from "lucide-react";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /** ── Field type definitions ─────────────────────────────────────────────── */
@@ -182,12 +184,22 @@ export function LinkedRecordRenderer({
 }) {
   const [open, setOpen] = useState(false);
   const linkedTable = allTables.find((t) => t.id === field.linkedTableId);
+  // Real records from the linked table — no mock/demo data in production paths.
+  const linkedRecords = useQuery({
+    queryKey: ["linked-records", field.linkedTableId],
+    queryFn: () => api<{ records: TableRecord[] }>(`/tables/${field.linkedTableId}/records`),
+    enabled: open && Boolean(field.linkedTableId),
+  });
+  const display = linkedRecords.data?.records.find((r) => r.id === value)?.data;
+  const displayLabel = display
+    ? String(display[field.linkedField ?? ""] ?? Object.values(display)[0] ?? String(value))
+    : String(value);
   return (
     <div className="relative inline-flex items-center gap-1">
       <Link2 className="h-2.5 w-2.5 text-blue-500" />
       {value ? (
         <span className="text-blue-600 underline decoration-blue-200 underline-offset-2">
-          {String(value)}
+          {displayLabel}
         </span>
       ) : (
         <button
@@ -201,19 +213,38 @@ export function LinkedRecordRenderer({
         </button>
       )}
       {open && (
-        <div className="absolute left-0 top-full z-20 mt-1 rounded-xl border border-line bg-elevated p-2 shadow-lg">
-          <p className="mb-1 text-[10px] font-medium text-ink-muted">
+        <div className="absolute left-0 top-full z-20 mt-1 max-h-56 w-52 overflow-y-auto rounded-xl border border-line bg-elevated p-1.5 shadow-lg">
+          <p className="px-1.5 pb-1 pt-0.5 text-[10px] font-medium text-ink-muted">
             Select from {linkedTable?.name ?? "linked table"}
           </p>
-          <button
-            className="w-full rounded-lg px-2 py-1 text-left text-xs text-ink hover:bg-muted"
-            onClick={() => {
-              onSelect(field.key, "demo-record-id");
-              setOpen(false);
-            }}
-          >
-            (demo) First record
-          </button>
+          {linkedRecords.isLoading && (
+            <div className="flex items-center gap-1.5 px-2 py-2 text-[11px] text-ink-muted">
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading records…
+            </div>
+          )}
+          {linkedRecords.isError && (
+            <p className="px-2 py-2 text-[11px] text-danger">Failed to load records. Retry by reopening.</p>
+          )}
+          {linkedRecords.data?.records.map((r) => {
+            const label = String(
+              r.data?.[field.linkedField ?? ""] ?? Object.values(r.data ?? {})[0] ?? r.id,
+            );
+            return (
+              <button
+                key={r.id}
+                className="w-full truncate rounded-lg px-2 py-1 text-left text-xs text-ink transition hover:bg-muted"
+                onClick={() => {
+                  onSelect(field.key, r.id);
+                  setOpen(false);
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+          {linkedRecords.data && linkedRecords.data.records.length === 0 && (
+            <p className="px-2 py-2 text-[11px] text-ink-muted">The linked table has no records yet.</p>
+          )}
         </div>
       )}
     </div>

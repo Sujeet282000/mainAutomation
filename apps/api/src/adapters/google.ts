@@ -12,6 +12,40 @@ function requireValue(input: Record<string, unknown>, key: string, label: string
   return String(v);
 }
 
+/** Accepts ISO datetimes, plain dates, or relative forms like "in 30 minutes" / "tomorrow 9am". */
+function resolveDateTime(raw: string): string {
+  const text = raw.trim();
+  const relative = text.match(/^in\s+(\d+)\s*(second|minute|hour|day|week)s?$/i);
+  if (relative) {
+    const n = Number(relative[1]);
+    const unitMs: Record<string, number> = { second: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000, week: 604_800_000 };
+    return new Date(Date.now() + n * unitMs[relative[2].toLowerCase()]).toISOString();
+  }
+  if (/^tomorrow/i.test(text)) {
+    const timePart = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + 1);
+    if (timePart) {
+      let h = Number(timePart[1]);
+      const m = Number(timePart[2] ?? 0);
+      if (/pm/i.test(timePart[3] ?? "") && h < 12) h += 12;
+      if (/am/i.test(timePart[3] ?? "") && h === 12) h = 0;
+      d.setUTCHours(h, m, 0, 0);
+    } else d.setUTCHours(9, 0, 0, 0);
+    return d.toISOString();
+  }
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  throw new Error(
+    `"${text.slice(0, 80)}" is not a valid date/time. Map a date column into ${""}Start — ` +
+    `for example {{trigger.row[2]}} instead of {{trigger.row[0]}} when row[0] holds a name.`
+  );
+}
+
+function requireDateTime(input: Record<string, unknown>, key: string, label: string) {
+  return resolveDateTime(requireValue(input, key, label));
+}
+
 function parseRow(values: unknown): unknown[] {
   if (Array.isArray(values)) return values;
   if (typeof values === "string") {
@@ -114,6 +148,17 @@ registerAdapter("gmail", "new_email", async (ctx) => {
 });
 registerAdapter("gmail", "send_email", async (ctx) => {
   const to = requireValue(ctx.input, "to", "To");
+  // Gmail rejects non-addresses with an opaque 400 "Invalid To header". Catch
+  // the common case early — a mapped value that is a name/label instead of an
+  // email (e.g. the first spreadsheet column) — and say how to fix the mapping.
+  const emails = String(to).split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+  const invalid = emails.find((e) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+  if (invalid) {
+    throw new Error(
+      `"${invalid.slice(0, 80)}" is not a valid email address. Map the email column into To — ` +
+      `for example {{trigger.row[1]}} instead of {{trigger.row[0]}} when row[0] holds a name.`
+    );
+  }
   const subject = requireValue(ctx.input, "subject", "Subject");
   const raw = Buffer.from(
     `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${ctx.input.body ?? ""}`
@@ -258,8 +303,18 @@ registerAdapter("google-calendar", "new_event", async (ctx) => {
 registerAdapter("google-calendar", "create_event", async (ctx) => {
   const calendarId = encodeURIComponent(String(ctx.input.calendarId ?? "primary"));
   const summary = requireValue(ctx.input, "summary", "Title");
-  const start = requireValue(ctx.input, "start", "Start");
-  const end = requireValue(ctx.input, "end", "End");
+  const start = requireDateTime(ctx.input, "start", "Start");
+  // Calendar's API rejects an end before start with an opaque 400 — default to
+  // start + 30min (Zapier-style) so a missing/placeholder End still succeeds.
+  let end: string;
+  if (ctx.input.end === undefined || ctx.input.end === null || String(ctx.input.end).trim() === "") {
+    end = new Date(new Date(start).getTime() + 30 * 60_000).toISOString();
+  } else {
+    end = requireDateTime(ctx.input, "end", "End");
+    if (new Date(end).getTime() <= new Date(start).getTime()) {
+      end = new Date(new Date(start).getTime() + 30 * 60_000).toISOString();
+    }
+  }
   const output = await googleFetch(
     ctx,
     `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
@@ -293,8 +348,8 @@ registerAdapter("google-calendar", "update_event", async (ctx) => {
   const eventId = encodeURIComponent(requireValue(ctx.input, "eventId", "Event ID"));
   const patch: Record<string, unknown> = {};
   if (ctx.input.summary) patch.summary = ctx.input.summary;
-  if (ctx.input.start) patch.start = { dateTime: ctx.input.start, timeZone: "UTC" };
-  if (ctx.input.end) patch.end = { dateTime: ctx.input.end, timeZone: "UTC" };
+  if (ctx.input.start) patch.start = { dateTime: requireDateTime(ctx.input, "start", "Start"), timeZone: "UTC" };
+  if (ctx.input.end) patch.end = { dateTime: requireDateTime(ctx.input, "end", "End"), timeZone: "UTC" };
   const output = await googleFetch(
     ctx,
     `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,

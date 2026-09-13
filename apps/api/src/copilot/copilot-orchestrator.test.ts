@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+// Keep this suite deterministic: never call live model providers (a Groq 429
+// once stalled the run for 3+ minutes via the failover cascade).
+process.env.AA_DISABLE_AI = "1";
+
 import {
   classifyCopilotChapter,
   fillEmptyFields,
+  formatCopilotReply,
   inspectDraft,
   orchestrateCopilot
 } from "./copilot-orchestrator";
@@ -327,6 +333,27 @@ test("fillEmptyFields never overwrites user-provided config", () => {
   assert.equal(filled.graph.nodes[1].config.spreadsheetId, "sheet-user");
   assert.equal(filled.graph.nodes[1].config.row, "keep-me");
   assert.equal(filled.filledKeys.length, 0);
+});
+
+test("formatCopilotReply emits the trusted HTML subset (bold, lists, colored spans)", () => {
+  const snapshot = inspectDraft(gmailSheetsDraft());
+  const reply = formatCopilotReply(snapshot);
+  // Bold step list + section headers
+  assert.match(reply, /Inspected your <b>2-step draft<\/b>/);
+  assert.match(reply, /<b>Do this first \(I cannot\):<\/b>/);
+  assert.match(reply, /<b>I can help next:<\/b>/);
+  // Proper list markup
+  assert.match(reply, /<ul>/);
+  assert.match(reply, /<li><b>1\. /);
+  // Colored chapter spans use only the frontend's allowlisted classes
+  const classes = [...reply.matchAll(/<span class="([a-z]+)">/g)].map((m) => m[1]);
+  assert.ok(classes.length > 0, "reply should contain colored spans");
+  for (const c of classes) assert.ok(["ok", "warn", "err", "hl"].includes(c), `unexpected span class: ${c}`);
+  // No raw markup outside the allowlist
+  assert.doesNotMatch(reply, /<(?!\/?\b(b|strong|i|em|code|ul|ol|li|a|p|span|br)\b)[a-z]/i);
+  // Empty-canvas variant still renders
+  const empty = formatCopilotReply({ ...snapshot, empty: true, nodeCount: 0 });
+  assert.match(empty, /canvas has no steps yet/);
 });
 
 test("starter canvas may rebuild; configured canvas may not on a fill prompt", () => {

@@ -8,30 +8,64 @@ import { Fragment, type ReactNode } from "react";
  *   <b>/<strong>, <i>/<em>, <code>, <br>, <ul>/<ol>/<li>, <a href>, <p>
  *   <span class="ok|warn|err|hl">…</span>  — colored highlights
  *
+ * Plain text (and markdown from AI providers) is normalized first:
+ *   **bold** → <b>, *italic* → <i>, `code` → <code>, bullets → <li>,
+ *   HTTP status codes (429, 401…) and {{field}} mappings → highlighted.
+ *
  * Everything else is escaped: we never use dangerouslySetInnerHTML with raw
  * strings. The allowlist below parses the small tag set we trust and rebuilds
  * it as React nodes, so no untrusted attribute (event handlers, styles) can
  * reach the DOM.
  */
 
+const ALLOWED_TAG = /<(\/?(?:b|strong|i|em|code|ul|ol|li|a|p|span|br)\b[^>]*)>/gi;
+
 export function formatCopilotText(text: string): string {
-  // Normalize raw text into friendly HTML-ish markup before rendering:
-  //  - 429/401-style codes → highlighted
-  //  - bullet lines → list items
-  // Kept small and predictable on purpose.
-  const escaped = text
+  // Escape first, then rebuild trusted markup ourselves. Allowlisted tags that
+  // already exist in backend HTML are parked in sentinels so they survive the
+  // escape pass — mixed HTML+markdown messages keep their tags AND get their
+  // markdown (tables, bold, bullets) normalized instead of leaking raw syntax.
+  const parked = text
     .replace(/&/g, "&amp;")
+    .replace(ALLOWED_TAG, "\u0001$1\u0002")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  const lines = escaped.split(/\r?\n/);
-  return lines
-    .map((line) => {
-      const trimmed = line.trim();
-      if (/^[-•*]\s+/.test(trimmed)) return `<li>${trimmed.replace(/^[-•*]\s+/, "")}</li>`;
-      if (/^\d+[.)]\s+/.test(trimmed)) return `<li>${trimmed.replace(/^\d+[.)]\s+/, "")}</li>`;
-      return trimmed;
-    })
-    .join("\n");
+    .replace(/>/g, "&gt;")
+    .replace(/\u0001/g, "<")
+    .replace(/\u0002/g, ">");
+  const lines = parked.split(/\r?\n/);
+  const out: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Markdown table rows: | A | B | C | → one list item per row; separator
+    // rows (|---|---|) are dropped entirely.
+    if (/^\|.*\|$/.test(trimmed)) {
+      if (/^\|[\s:|-]+\|$/.test(trimmed)) continue;
+      const cells = trimmed.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()).filter(Boolean);
+      if (cells.length) out.push(`<li>${cells.map(inlineMarkdown).join(" · ")}</li>`);
+      continue;
+    }
+    if (/^[-•*]\s+/.test(trimmed)) { out.push(`<li>${inlineMarkdown(trimmed.replace(/^[-•*]\s+/, ""))}</li>`); continue; }
+    if (/^\d+[.)]\s+/.test(trimmed)) { out.push(`<li>${inlineMarkdown(trimmed.replace(/^\d+[.)]\s+/, ""))}</li>`); continue; }
+    out.push(inlineMarkdown(trimmed));
+  }
+  return out.join("\n");
+}
+
+/** Convert markdown inline syntax to the trusted HTML subset. Input is already escaped. */
+function inlineMarkdown(line: string): string {
+  let out = line;
+  // `code` → <code> (do this first so bold/italic inside code stays literal)
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  // **bold** → <b>
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  // *italic* / _italic_ → <i> (only single unmatched asterisks)
+  out = out.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
+  out = out.replace(/(^|[\s(])_([^_\s][^_]*)_/g, "$1<i>$2</i>");
+  // {{trigger.row[1]}} style mapping tokens → highlighted
+  out = out.replace(/(\{\{[^}]+\}\})/g, '<span class="hl">$1</span>');
+  // HTTP status codes like 429 / 401 / 500 → highlighted
+  out = out.replace(/\b(4\d{2}|5\d{2})\b(?=\s|$|:|,|\.)/g, '<span class="err">$1</span>');
+  return out;
 }
 
 const CLASS_COLORS: Record<string, string> = {
@@ -97,7 +131,13 @@ function wrap(name: string, attrs: Record<string, string>, children: ReactNode[]
 }
 
 export function FormattedCopilotMessage({ text, className }: { text: string; className?: string }) {
+  // Markdown detection now includes pipe-tables. When ANY markdown marker is
+  // present we run the normalizer (which now PRESERVES allowlisted tags), so
+  // mixed HTML+markdown never leaks raw | or ** into the UI.
+  const hasMarkdown = /\*\*[^*]+\*\*|`[^`]+`|(^|\n)\s*[-•*]\s+|(^|\n)\s*\|.*\|/m.test(text);
   const looksLikeHtml = /<\s*(b|strong|i|em|code|ul|ol|li|a|p|span|br)[\s>]/i.test(text);
-  const content = looksLikeHtml ? renderMarkup(text) : renderMarkup(formatCopilotText(text));
+  const content = !hasMarkdown && looksLikeHtml
+    ? renderMarkup(text)
+    : renderMarkup(formatCopilotText(text));
   return <div className={className}>{content}</div>;
 }

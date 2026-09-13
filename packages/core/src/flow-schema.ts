@@ -125,6 +125,10 @@ const BaseStep = z.object({
   onError: z
     .union([z.literal("fail"), z.literal("continue"), StepId])
     .default("fail"),
+  // Value recorded as the step output when onError = "fallback". Lives at
+  // step level (not inside props) so it survives definition parsing for
+  // every step type.
+  fallbackValue: JsonValueSchema.optional(),
 });
 
 // ── Piece action step ───────────────────────────────────────────────────────
@@ -288,6 +292,24 @@ const SubFlowStep = BaseStep.extend({
   }),
 });
 
+// ── Aggregator step ─────────────────────────────────────────────────────────
+// Fan-in: merges the outputs of previously executed source steps (e.g. the
+// branches of a router or iterations of a loop) into ONE step output so
+// downstream steps see a single payload.
+//   mode "merge"   → spread each source's object output into the step output
+//                    (plus `sources` keyed by step id and `missing` ids)
+//   mode "collect" → gather source outputs into `items` (+ `count`, `text`)
+
+const AggregatorStep = BaseStep.extend({
+  type: z.literal("aggregator"),
+  props: z.object({
+    // Sources may be empty when derived from graph edges at runtime.
+    sources: z.array(z.string().min(1)).default([]),
+    mode: z.enum(["merge", "collect"]).default("merge"),
+    separator: z.string().max(64).optional(),
+  }),
+});
+
 // ── Recursive container steps (lazy to avoid circular refs) ─────────────────
 // Branch, Router, and Loop reference the Step union through lazy().
 
@@ -340,6 +362,7 @@ export const StepSchema: z.ZodTypeAny = z.lazy(() =>
     BranchStepSchema,
     RouterStepSchema,
     LoopStepSchema,
+    AggregatorStep,
   ])
 );
 

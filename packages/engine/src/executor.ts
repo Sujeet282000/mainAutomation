@@ -44,6 +44,24 @@ function backoff(attempt: number, policy: { backoff: "fixed" | "exponential"; in
 }
 function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
+/**
+ * Fan-in merge shared by top-level and inline aggregator execution.
+ * mode "merge"   → spread source outputs (+ `sources` keyed by id, `missing` ids)
+ * mode "collect" → `items` array (+ `count`, `text` joined by separator)
+ */
+export function aggregateOutput(sources: string[], mode: string | undefined, separator: string | undefined, context: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const outputs = sources.map((id) => (context[id] as Record<string, unknown> | undefined) ?? null);
+  const present = sources.filter((id) => context[id] !== undefined);
+  if (mode === "collect") {
+    const items = outputs.filter((o) => o !== null);
+    const sep = separator ?? "\n";
+    return { items, count: items.length, text: items.map((o) => (typeof o === "string" ? o : JSON.stringify(o))).join(sep), missing: sources.filter((id) => context[id] === undefined) };
+  }
+  const merged: Record<string, unknown> = {};
+  for (const o of outputs) if (o && typeof o === "object") Object.assign(merged, o);
+  return { ...merged, sources: Object.fromEntries(present.map((id, i) => [id, outputs[i]])), missing: sources.filter((id) => context[id] === undefined) };
+}
+
 /** Recursion depth guard for inline container execution (branch → branch → …). */
 const MAX_INLINE_DEPTH = 16;
 
@@ -59,6 +77,7 @@ export class Executor {
     if (step.type === "filter") { if (!evaluateFlowCondition(step.condition as any, context)) return this.finish(run.id, "filtered", context); return this.advance(run, cursor, { [step.id]: { passed: true } }, steps.length); }
     if (step.type === "branch" || step.type === "router") return this.executeContainer(run, definition, step, cursor, context);
     if (step.type === "sub_flow") return this.executeSubFlow(run, definition, step as any, cursor, context);
+    if (step.type === "aggregator") return this.executeAggregator(run, definition, step as any, cursor, context);
     if (step.type === "loop") return this.executeLoop(run, definition, step as any, cursor, context);
     if (step.type === "note") return this.advance(run, cursor, { [step.id]: { noted: true } }, steps.length);
     if (step.type === "delay") return this.executeDelay(run, cursor, context, step as any);
@@ -84,9 +103,10 @@ export class Executor {
 
   // ── Delay (P0 #4 fix): normalize mode:"duration" into a concrete resumeAt. ──
   // The schema allows { mode: "duration", seconds } or { mode: "until", untilIso }.
-  // Previously a duration delay produced resumeAt: undefined — the run paused
-  // forever. Now duration → now + seconds, and both modes schedule a BullMQ
-  // delayed resume job so the run continues without any browser timer.
+  // Resume semantics (durable cursor): the pause checkpoints cursor+1 with the
+  // delay marker in the context, so a resumed run CONTINUES after the delay —
+  // re-entering at the same cursor would re-execute the delay and re-pause
+  // forever. The delayed BullMQ job drives the resume; never a browser timer.
   private async executeDelay(run: { id: string; orgId: string; createdAt?: string }, cursor: number, context: Record<string, unknown>, step: { id: string; props?: { mode?: string; seconds?: number; untilIso?: string } }): Promise<void> {
     const props = step.props ?? {};
     let resumeAt: string | null = null;
@@ -102,17 +122,22 @@ export class Executor {
       return this.finish(run.id, "failed", { ...context, [step.id]: { error: { code: "INVALID_DELAY", message: "Delay step has no resolvable resume time" } } });
     }
     await this.scheduleResume(run, cursor, resumeAt);
-    return this.pause(run, cursor, context, { kind: "pause", reason: "delay", resumeAt });
+    return this.pause(run, cursor, { ...context, [step.id]: { waiting: true, resumeAt } }, { kind: "pause", reason: "delay", resumeAt });
   }
 
   // ── Approval (P0 #7): persist the configured timeout so it is enforceable. ──
-  private async executeApproval(run: { id: string; orgId: string; createdAt?: string }, cursor: number, context: Record<string, unknown>, step: { id: string; props?: { title?: string; editableFields?: Record<string, unknown>; timeoutHours?: number } }): Promise<void> {
+  // Resume semantics: the pause checkpoints cursor+1 with a waiting marker in
+  // the context. The approval decision (user resolve or sweeper timeout
+  // policy) resumes the run AFTER this step — never re-creating the todo.
+  // The timeout policy itself is owned by the paused-run sweeper
+  // (onTimeout approve/reject/fail), so no raw engine resume is scheduled:
+  // an unconditional timer resume would bypass the configured policy.
+  private async executeApproval(run: { id: string; orgId: string; createdAt?: string }, cursor: number, context: Record<string, unknown>, step: { id: string; props?: { title?: string; editableFields?: Record<string, unknown>; timeoutHours?: number; onTimeout?: string } }): Promise<void> {
     const props = step.props ?? {};
     const timeoutHours = Math.max(1, Math.min(720, Number(props.timeoutHours ?? 72)));
     const resumeAt = new Date(Date.now() + timeoutHours * 3_600_000).toISOString();
     await this.db.todos.create(run.orgId, run.id, String(run.createdAt ?? new Date().toISOString()), step.id, props.title || "Approval needed", { ...props.editableFields, timeoutHours, onTimeout: (step as any).props?.onTimeout ?? "reject" });
-    await this.scheduleResume(run, cursor, resumeAt);
-    return this.pause(run, cursor, context, { kind: "pause", reason: "approval", resumeAt });
+    return this.pause(run, cursor, { ...context, [step.id]: { waiting: true, title: props.title || "Approval needed" } }, { kind: "pause", reason: "approval", resumeAt });
   }
 
   // ── Sub-flow (P0 #3 fix): actually execute the referenced flow version. ────
@@ -163,6 +188,17 @@ export class Executor {
       return this.applyErrorPolicy(run, definition, step as unknown as Step, cursor, context, new EngineError(err.errorClass, "SUBFLOW_FAILED", `Sub-flow failed: ${err.message}`));
     }
     return this.advance(run, cursor, { [step.id]: childOutput }, totalSteps);
+  }
+
+  /**
+   * Aggregator (workflow-parity gap): fan-in merge of previously executed
+   * steps' outputs into ONE step output. Shared pure logic so the top-level
+   * transition path and inline containers behave identically.
+   */
+  private async executeAggregator(run: { id: string; orgId: string }, definition: TFlowDefinition, step: { id: string; props?: { sources?: string[]; mode?: string; separator?: string } }, cursor: number, context: Record<string, unknown>): Promise<void> {
+    const props = resolveProps((step.props ?? {}) as Record<string, unknown>, context) as { sources?: string[]; mode?: string; separator?: string };
+    const output = aggregateOutput(props.sources ?? [], props.mode, props.separator, context);
+    return this.advance(run, cursor, { [step.id]: output }, definition.steps.length);
   }
 
   private async executeContainer(run: { id: string; orgId: string; contextJson?: Record<string, unknown> }, definition: TFlowDefinition, step: Step, cursor: number, context: Record<string, unknown>): Promise<void> {
@@ -261,17 +297,23 @@ export class Executor {
       context[step.id] = { status: "succeeded", flowId: childFlowId, steps: childContext };
       return "ok";
     }
+    if (step.type === "aggregator") {
+      const props = resolveProps((step.props ?? {}) as Record<string, unknown>, context) as { sources?: string[]; mode?: string; separator?: string };
+      context[step.id] = aggregateOutput(props.sources ?? [], props.mode, props.separator, context);
+      return "ok";
+    }
     const props = resolveProps((step as Record<string, unknown>).props as Record<string, unknown> ?? {}, context);
     const result = await this.executeLeaf(run, step, props, context);
     if (result.kind === "ok") { context[step.id] = result.output; return "ok"; }
     if (result.kind === "stop") return "halt";
     // Non-ok inside a container: honor per-step error policy before throwing.
-    const policy = typeof (step as Record<string, unknown>).onError === "string" ? (step as Record<string, unknown>).onError : "fail";
-    const propsMeta = (step as Record<string, unknown>).props as Record<string, unknown> | undefined;
+    const onErrorRaw = (step as Record<string, unknown>).onError ?? "fail";
+    const policy = typeof onErrorRaw === "string" ? onErrorRaw : "fail";
+    const fallbackValue = (step as Record<string, unknown>).fallbackValue;
     if (result.kind === "pause") throw new EngineError("fatal", "INLINE_PAUSED", "pause inside container");
     if (result.kind === "error" && result.error.errorClass !== "auth" && (policy === "continue" || policy === "fallback")) {
-      context[step.id] = policy === "fallback" && propsMeta?.fallbackValue !== undefined
-        ? (resolveValue(propsMeta.fallbackValue, context) as Record<string, unknown>)
+      context[step.id] = policy === "fallback" && fallbackValue !== undefined
+        ? (resolveValue(fallbackValue, context) as Record<string, unknown>)
         : { error: { message: result.error.message, code: result.error.code } };
       return "ok";
     }
@@ -308,19 +350,27 @@ export class Executor {
     await this.queues.flowStep.add("resume", { runId: run.id, orgId: run.orgId, cursor, kind: "resume" }, { jobId: `resume:${run.id}:${cursor}:${resumeAt}`, delay: delayMs, removeOnComplete: 1000 });
   }
 
-  private async pause(run: { id: string; transitionEpoch?: number }, cursor: number, context: Record<string, unknown>, outcome: { kind?: string; reason: string; resumeAt?: string }): Promise<void> { await this.db.flowRuns.pause(run.id, { expectedCursor: cursor, expectedEpoch: run.transitionEpoch ?? 1, contextJson: context, reason: outcome.reason, resumeAt: outcome.resumeAt ?? null }); }
+  /**
+   * Pause a run at `cursor` while ATOMICALLY advancing the stored cursor to
+   * `nextCursor` (default: the step after the pause). The durable-cursor
+   * contract: resume() re-enters transition() at the STORED cursor, so the
+   * pause must move it past the delay/approval step — otherwise a resumed
+   * run re-executes the pause step forever (delay re-pauses, approval
+   * re-creates its todo).
+   */
+  private async pause(run: { id: string; transitionEpoch?: number }, cursor: number, context: Record<string, unknown>, outcome: { kind?: string; reason: string; resumeAt?: string }, nextCursor = cursor + 1): Promise<void> { await this.db.flowRuns.pause(run.id, { expectedCursor: cursor, expectedEpoch: run.transitionEpoch ?? 1, contextJson: context, reason: outcome.reason, resumeAt: outcome.resumeAt ?? null, nextCursor }); }
 
   private async applyErrorPolicy(run: { id: string; orgId: string; transitionEpoch?: number }, definition: TFlowDefinition, step: Step, cursor: number, context: Record<string, unknown>, error: EngineError): Promise<void> {
     // Per-step error policy per the core schema: onError = "fail" | "continue" | StepId.
     // A StepId routes the error to a named handler step; "continue" keeps
     // executing downstream; auth-class failures always stop.
-    const props = (step as Record<string, unknown>).props as Record<string, unknown> | undefined;
-    const onErrorRaw = (step as Record<string, unknown>).onError ?? props?.onError ?? "fail";
+    const onErrorRaw = (step as Record<string, unknown>).onError ?? "fail";
     const policy = typeof onErrorRaw === "string" ? onErrorRaw : "fail";
+    const fallbackValue = (step as Record<string, unknown>).fallbackValue;
     const errorOutput = { error: { message: error.message, code: error.code } };
     if (error.errorClass !== "auth") {
       if (policy === "continue" || policy === "fallback") {
-        const fallback = policy === "fallback" && props?.fallbackValue !== undefined ? resolveValue(props.fallbackValue, context) : errorOutput;
+        const fallback = policy === "fallback" && fallbackValue !== undefined ? resolveValue(fallbackValue, context) : errorOutput;
         return this.advance(run as any, cursor, { [step.id]: fallback as Record<string, unknown> }, definition.steps.length);
       }
       // onError === <stepId>: route the error to a named error-handler step.

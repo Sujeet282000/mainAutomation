@@ -1,6 +1,7 @@
-import vm from "node:vm";
-import { evaluateCondition, type FilterOperator } from "@algoverge/shared";
+import { runCodeStep } from "../code-runner";
+import { aggregateOutput } from "@algoverge/engine";
 import { query, queryOne } from "../db";
+import { evaluateCondition, type FilterOperator } from "@algoverge/shared";
 import { httpRequest } from "./http";
 import { registerAdapter } from "./registry";
 
@@ -51,27 +52,20 @@ registerAdapter("paths", "router", async ({ input }) => {
     if (fallback?.id) matched.push(String(fallback.id));
   }
   return { output: { matched }, control: "paths", matchedHandles: matched };
-});
-
-// Aggregator (P1 #14): fan-in node after Router/Loop branches. Merges the
-// outputs of all incoming steps into one object/array downstream.
-registerAdapter("aggregator", "merge", async ({ input, workspaceId }) => {
-  const graph = input.__graph as { nodes?: Array<{ id: string }>; edges?: Array<{ source: string; target: string }> } | undefined;
+});// Aggregator (P1 #14): fan-in node after Router/Loop branches. ONE canonical
+// merge implementation: the engine's aggregateOutput. The adapter's only job
+// is to derive the fan-in sources from graph edges when sources were not
+// explicitly configured, then delegate.
+registerAdapter("aggregator", "merge", async ({ input }) => {
+  const graph = input.__graph as { edges?: Array<{ source: string; target: string }> } | undefined;
   const nodeRef = input.__nodeId as string | undefined;
-  const strategy = String(input.strategy ?? "merge");
-  if (graph && nodeRef) {
-    const incoming = (graph.edges ?? []).filter((e) => e.target === nodeRef).map((e) => e.source);
-    const parts = incoming.map((sourceId) => (input.__steps as Record<string, unknown> | undefined)?.[sourceId]).filter((v) => v !== undefined);
-    if (strategy === "append") return { output: { items: parts, count: parts.length } };
-    const merged = Object.assign({}, ...parts.filter((p) => p && typeof p === "object"));
-    return { output: { merged, count: parts.length } };
-  }
-  // Fallback: merge anything provided directly as `items`.
-  const parts = Array.isArray(input.items) ? input.items : [];
-  if (strategy === "append") return { output: { items: parts, count: parts.length } };
-  const merged = Object.assign({}, ...parts.filter((p) => p && typeof p === "object"));
-  void workspaceId;
-  return { output: { merged, count: parts.length } };
+  const configured = Array.isArray(input.sources) && input.sources.length ? (input.sources as string[]) : [];
+  const derived = graph && nodeRef ? (graph.edges ?? []).filter((e) => e.target === nodeRef).map((e) => e.source) : [];
+  // Dedupe while preserving order; edges + explicit sources may overlap.
+  const sources = [...new Set([...configured, ...derived])];
+  const strategy = String(input.strategy ?? input.mode ?? "merge");
+  const output = aggregateOutput(sources, strategy === "append" || strategy === "collect" ? "collect" : "merge", typeof input.separator === "string" ? input.separator : undefined, (input.__steps ?? {}) as Record<string, unknown>);
+  return { output: strategy === "append" || strategy === "collect" ? { items: output.items, count: output.count, text: output.text, missing: output.missing } : output };
 });
 
 registerAdapter("loop", "for_each", async ({ input }) => {
@@ -133,9 +127,15 @@ registerAdapter("formatter", "number", async ({ input }) => {
 });
 
 registerAdapter("code", "javascript", async ({ input, auth }) => {
-  const sandbox = { input, auth: { connected: Boolean(auth) }, result: undefined as unknown };
-  vm.runInNewContext(`${String(input.code ?? "result = input")};`, sandbox, { timeout: 1500 });
-  return { output: { result: sandbox.result ?? sandbox } };
+  // Isolated execution: short-lived worker thread + wall-clock kill + V8 heap
+  // limits. Never run user code inline on the API process (spec #25).
+  const run = await runCodeStep(
+    String(input.code ?? "result = input;"),
+    input,
+    Boolean(auth),
+  );
+  if (!run.ok) throw new Error(run.error);
+  return { output: { result: run.result } };
 });
 
 async function ownedTable(tableId: unknown, orgId: string) {
