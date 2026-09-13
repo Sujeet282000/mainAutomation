@@ -45,4 +45,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # Guard/integration tests exercise real connection ownership queries.
+      # Apply the same migrations used by the application before running tests.
+      - run: npm run migrate
       - run: npm test
