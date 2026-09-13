@@ -12,15 +12,25 @@ if (!databaseUrl) throw new Error("DATABASE_URL is required for the worker");
 const db = new Db(databaseUrl);
 const transitionQueue = new Queue("flow-steps", { connection });
 const engineDb = createEngineDb(db);
-const executor = new Executor(engineDb, { flowStep: transitionQueue }, new Map([
-  ["piece_action", adapterStepHandler],
-]));
+
+// The canonical FlowDefinition contains both piece_action and schema-native
+// leaf steps. Every leaf must resolve to the same adapter bridge; otherwise a
+// valid HTTP/Code/AI/Agent/Table workflow can reach the durable worker and fail
+// with NO_HANDLER while the interactive runtime succeeds.
+const canonicalLeafTypes = [
+  "piece_action",
+  "http",
+  "code",
+  "ai",
+  "agent",
+  "data_table",
+];
+const handlers = new Map(canonicalLeafTypes.map((type) => [type, adapterStepHandler] as const));
+const executor = new Executor(engineDb, { flowStep: transitionQueue }, handlers);
 
 const flowWorker = new Worker(
   "flow-steps",
   async (job) => {
-    // Delayed resume jobs re-activate the paused run at its stored cursor;
-    // normal transition jobs continue an already-running run.
     if (job.data.kind === "resume") {
       await executor.resume(String(job.data.runId));
       return;
@@ -34,9 +44,8 @@ const flowWorker = new Worker(
   { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10) },
 );
 
-// Compatibility worker: existing UI/API executions continue to work while
-// automations are migrated to flow_runs. It can be removed only after the
-// migration is complete and no callers enqueue the legacy queue.
+// Compatibility worker remains only for the legacy executions queue. New
+// flow_runs must always execute through the canonical durable Executor above.
 const legacyWorker = new Worker(
   "executions",
   async (job) => {
