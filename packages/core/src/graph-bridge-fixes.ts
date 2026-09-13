@@ -1,6 +1,7 @@
 import { graphToFlowDefinition as compileGraph } from "./graph-bridge";
 import { normalizeWorkflowGraph } from "@algoverge/shared";
 import type { TFlowDefinition, Step } from "./flow-schema";
+import { expandConfiguredRouters } from "./router-compiler";
 
 /**
  * The React Flow graph is a UI representation; the engine consumes the
@@ -30,16 +31,11 @@ function assertAcyclicAndUnambiguousGraph(raw: unknown): unknown {
       incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1);
     }
   }
-
-  // A normal node has one upstream path. If multiple branches reconnect,
-  // require an explicit aggregator/merge node so the runtime has deterministic
-  // semantics instead of silently compiling the same node twice.
   for (const [id, count] of incoming) {
     if (count > 1 && nodeById.get(id)?.appSlug !== "aggregator") {
       throw new Error(`WORKFLOW_GRAPH_JOIN_REQUIRES_AGGREGATOR:${id}`);
     }
   }
-
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string): void => {
@@ -58,15 +54,11 @@ function normalizeStep(step: Step): Step {
   const value = step as any;
   if (value.type === "table_op") value.type = "data_table";
   if (value.type === "subflow") value.type = "sub_flow";
-
   if (value.type === "branch") {
     value.onTrue = (value.onTrue ?? []).map(normalizeStep);
     value.onFalse = (value.onFalse ?? []).map(normalizeStep);
   } else if (value.type === "router") {
-    value.branches = (value.branches ?? []).map((branch: any) => ({
-      ...branch,
-      steps: (branch.steps ?? []).map(normalizeStep),
-    }));
+    value.branches = (value.branches ?? []).map((branch: any) => ({ ...branch, steps: (branch.steps ?? []).map(normalizeStep) }));
   } else if (value.type === "loop") {
     value.steps = (value.steps ?? []).map(normalizeStep);
   }
@@ -76,8 +68,5 @@ function normalizeStep(step: Step): Step {
 export function graphToFlowDefinition(raw: unknown): TFlowDefinition {
   const normalized = assertAcyclicAndUnambiguousGraph(raw);
   const compiled = compileGraph(normalized) as TFlowDefinition;
-  return {
-    ...compiled,
-    steps: compiled.steps.map(normalizeStep),
-  };
+  return expandConfiguredRouters({ ...compiled, steps: compiled.steps.map(normalizeStep) }, normalized);
 }
