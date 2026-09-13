@@ -1,7 +1,7 @@
 import type { Db } from "@algoverge/db";
 import { redact } from "../../api/src/crypto";
 
-/** Maps the SQL repository's snake_case rows to the engine's runtime contract. */
+/** Maps SQL rows to the runtime contract expected by the canonical executor. */
 export function createEngineDb(db: Db) {
   return {
     flowRuns: {
@@ -32,9 +32,6 @@ export function createEngineDb(db: Db) {
         );
       },
       async pause(runId: string, input: { expectedCursor: number; expectedEpoch: number; contextJson: Record<string, unknown>; reason: string; resumeAt: string | null; nextCursor?: number }) {
-        // Durable-cursor contract: pausing a delay/approval step also advances
-        // the stored cursor past it, so Executor.resume() continues AFTER the
-        // pause step instead of re-executing it forever.
         const nextCursor = input.nextCursor ?? input.expectedCursor + 1;
         const result = await db.service.query(
           `UPDATE flow_runs SET status = 'paused', paused_reason = $3, resume_at = $4, context = $5::jsonb, cursor = $6
@@ -43,7 +40,6 @@ export function createEngineDb(db: Db) {
         );
         if (!result.rowCount) throw new Error("FLOW_RUN_PAUSE_CONFLICT");
       },
-      /** Atomically re-activate a paused run so the executor can resume it. */
       async resumeClaim(runId: string) {
         const result = await db.service.query(
           `UPDATE flow_runs SET status = 'running', paused_reason = NULL, transition_epoch = transition_epoch + 1
@@ -61,6 +57,14 @@ export function createEngineDb(db: Db) {
         const row = result.rows[0];
         return row ? { id: row.id, orgId: row.org_id, flowId: row.flow_id, versionNumber: row.version_number, definition: row.definition } : null;
       },
+      async currentPublished(flowId: string) {
+        const result = await db.service.query(
+          `SELECT v.* FROM flow_versions v JOIN flows f ON f.published_version_id = v.id WHERE f.id = $1 LIMIT 1`,
+          [flowId],
+        );
+        const row = result.rows[0];
+        return row ? { id: row.id, orgId: row.org_id, flowId: row.flow_id, versionNumber: row.version_number, definition: row.definition } : null;
+      },
     },
     runSteps: {
       async completedByEffectKey(runId: string, stepId: string, effectKey: string) {
@@ -72,9 +76,35 @@ export function createEngineDb(db: Db) {
         return row ? { outputJson: row.output_json ?? {} } : null;
       },
       async insert(input: any) {
+        // The run_created_at + org_id pair is part of the partitioned FK. Do
+        // not trust a JS Date supplied by the engine: PostgreSQL owns the exact
+        // timestamp stored on the parent row.
+        const meta = await db.service.query(
+          `SELECT created_at, org_id FROM flow_runs WHERE id = $1 LIMIT 1`,
+          [input.runId],
+        );
+        const run = meta.rows[0];
+        if (!run) throw new Error("FLOW_RUN_NOT_FOUND_FOR_STEP");
         const result = await db.service.query(
           `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, output_json, error_class, error_code, error_json, attempt, duration_ms, finished_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,           [input.runId, input.runCreatedAt, input.orgId, input.stepId, input.stepType, input.operationId ?? null, input.effectKey ?? null, input.status, input.inputJson ? JSON.stringify(redact(input.inputJson)) : null, input.outputJson ? JSON.stringify(redact(input.outputJson)) : null, input.errorClass ?? null, input.errorCode ?? null, input.errorJson ? JSON.stringify(redact(input.errorJson)) : null, input.attempt ?? 1, input.durationMs ?? null],
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,
+          [
+            input.runId,
+            run.created_at,
+            run.org_id,
+            input.stepId,
+            input.stepType,
+            input.operationId ?? null,
+            input.effectKey ?? null,
+            input.status,
+            input.inputJson ? JSON.stringify(redact(input.inputJson)) : null,
+            input.outputJson ? JSON.stringify(redact(input.outputJson)) : null,
+            input.errorClass ?? null,
+            input.errorCode ?? null,
+            input.errorJson ? JSON.stringify(redact(input.errorJson)) : null,
+            input.attempt ?? 1,
+            input.durationMs ?? null,
+          ],
         );
         return result.rows[0];
       },
@@ -83,6 +113,21 @@ export function createEngineDb(db: Db) {
           `UPDATE run_steps SET status=$3, output_json=$4::jsonb, error_class=$5, error_code=$6, error_json=$7::jsonb, duration_ms=$8, finished_at=now() WHERE id=$1 AND org_id=$2`,
           [id, orgId, status, output == null ? null : JSON.stringify(output), errorClass ?? null, errorCode ?? null, errorJson ? JSON.stringify(errorJson) : null, durationMs],
         );
+      },
+    },
+    // Sub-flow fire-and-forget needs the same flow_runs table as the parent
+    // engine. It must start queued so the first transition is atomically
+    // claimed by the durable worker rather than executing in the API process.
+    runs: {
+      async create(input: { orgId: string; projectId?: string; flowId: string; flowVersionId: string; triggerKind: string; context: Record<string, unknown> }) {
+        const result = await db.service.query(
+          `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, status, context)
+           VALUES ($1,$2,$3,$4,$5,'queued',$6) RETURNING *`,
+          [input.orgId, input.projectId ?? null, input.flowId, input.flowVersionId, input.triggerKind, JSON.stringify(input.context)],
+        );
+        const row = result.rows[0];
+        if (!row) throw new Error("FLOW_RUN_CREATE_FAILED");
+        return mapRun(row);
       },
     },
     todos: {
@@ -97,6 +142,7 @@ export function createEngineDb(db: Db) {
 }
 
 function mapRun(row: any) {
+  const context = row.context ?? {};
   return {
     id: row.id,
     createdAt: row.created_at,
@@ -106,7 +152,9 @@ function mapRun(row: any) {
     flowVersionId: row.flow_version_id,
     triggerKind: row.trigger_kind,
     status: row.status,
-    context: row.context ?? {},
+    context,
+    // Executor reads contextJson; keep context as an alias for compatibility.
+    contextJson: context,
     transitionEpoch: row.transition_epoch,
     cursor: row.cursor,
   };
