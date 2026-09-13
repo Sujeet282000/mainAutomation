@@ -9,18 +9,8 @@ import { isAuthError } from "./runtime-guards";
 import { buildTriggerEnvelope } from "./trigger-envelope";
 
 export function persistBuilderDraft(graph: unknown) {
-  try {
-    const def = graphToFlowDefinition(graph);
-    return { ...def, builderGraph: graph };
-  } catch {
-    return {
-      schemaVersion: 1,
-      trigger: { id: "trigger", type: "manual", props: {} },
-      steps: [],
-      settings: { timezone: "UTC" },
-      builderGraph: graph,
-    };
-  }
+  try { const def = graphToFlowDefinition(graph); return { ...def, builderGraph: graph }; }
+  catch { return { schemaVersion: 1, trigger: { id: "trigger", type: "manual", props: {} }, steps: [], settings: { timezone: "UTC" }, builderGraph: graph }; }
 }
 
 export function loadBuilderGraph(draft: unknown): WorkflowGraph {
@@ -30,113 +20,46 @@ export function loadBuilderGraph(draft: unknown): WorkflowGraph {
 }
 
 export async function ensureRunPartition() {
-  // Create partitions for current and next month to be safe
-  const months = [new Date()];
-  const nextMonth = new Date();
-  nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
-  months.push(nextMonth);
-
+  const months = [new Date()]; const nextMonth = new Date(); nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1); months.push(nextMonth);
   for (const date of months) {
-    const start = new Date(date);
-    start.setUTCDate(1);
-    start.setUTCHours(0, 0, 0, 0);
-    const end = new Date(start);
-    end.setUTCMonth(end.getUTCMonth() + 1);
+    const start = new Date(date); start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
+    const end = new Date(start); end.setUTCMonth(end.getUTCMonth() + 1);
     const name = `flow_runs_${start.getUTCFullYear()}_${String(start.getUTCMonth() + 1).padStart(2, "0")}`;
     const startStr = start.toISOString().replace("T", " ").replace(".000Z", "");
     const endStr = end.toISOString().replace("T", " ").replace(".000Z", "");
     try {
-      await query(
-        `CREATE TABLE IF NOT EXISTS public."${name}" PARTITION OF public.flow_runs FOR VALUES FROM ($1) TO ($2)`,
-        [startStr, endStr],
-      );
-      // Partition creation materializes the parent's indexes under auto-generated
-      // names (…_key). Only add our named copy when it doesn't already exist, so
-      // re-running this never stacks duplicate indexes on the partition.
-      await query(`
-        DO $do$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1 FROM pg_indexes
-            WHERE schemaname = 'public' AND tablename = '${name}'
-              AND indexdef LIKE '%(id, created_at, org_id)%'
-          ) THEN
-            EXECUTE 'CREATE UNIQUE INDEX "${name}_id_created_at_org_id_idx" ON public."${name}" (id, created_at, org_id)';
-          END IF;
-        END
-        $do$;
-      `);
-    } catch {
-      // Partition may already exist — continue
-    }
+      await query(`CREATE TABLE IF NOT EXISTS public."${name}" PARTITION OF public.flow_runs FOR VALUES FROM ($1) TO ($2)`, [startStr, endStr]);
+      await query(`DO $do$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='${name}' AND indexdef LIKE '%(id, created_at, org_id)%') THEN EXECUTE 'CREATE UNIQUE INDEX "${name}_id_created_at_org_id_idx" ON public."${name}" (id, created_at, org_id)'; END IF; END $do$;`);
+    } catch { /* already exists / another worker won */ }
   }
 }
 
-export async function ensureFlowVersion(opts: {
-  orgId: string;
-  flowId: string;
-  definition: unknown;
-  userId?: string;
-}) {
+export async function ensureFlowVersion(opts: { orgId: string; flowId: string; definition: unknown; userId?: string }) {
   const hash = definitionHash(opts.definition);
-  // First try exact hash match
-  const existingRows = await query<{ id: string }>(
-    `SELECT id FROM flow_versions WHERE flow_id = $1 AND definition_hash = $2`,
-    [opts.flowId, hash],
-  );
-  if (existingRows[0]) return existingRows[0].id;
+  const exact = await queryOne<{ id: string }>(`SELECT id FROM flow_versions WHERE flow_id=$1 AND definition_hash=$2`, [opts.flowId, hash]);
+  if (exact) return exact.id;
 
-  // Fallback: use the latest version for this flow (avoids hash mismatches from normalization)
-  const latestRows = await query<{ id: string }>(
-    `SELECT id FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
-    [opts.flowId],
-  );
-  if (latestRows[0]) return latestRows[0].id;
-
-  // Last resort: insert a new version
-  const last = await queryOne<{ version_number: number }>(
-    `SELECT version_number FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
-    [opts.flowId],
-  );
+  const last = await queryOne<{ version_number: number }>(`SELECT version_number FROM flow_versions WHERE flow_id=$1 ORDER BY version_number DESC LIMIT 1`, [opts.flowId]);
+  const next = (last?.version_number ?? 0) + 1;
   await query(
     `INSERT INTO flow_versions (org_id, flow_id, definition, definition_hash, version_number, published_by)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (flow_id, definition_hash) DO NOTHING`,
-    [
-      opts.orgId,
-      opts.flowId,
-      JSON.stringify(opts.definition),
-      hash,
-      (last?.version_number ?? 0) + 1,
-      opts.userId ?? null,
-    ],
+     VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (flow_id, definition_hash) DO NOTHING`,
+    [opts.orgId, opts.flowId, JSON.stringify(opts.definition), hash, next, opts.userId ?? null],
   );
-  const insertedRows = await query<{ id: string }>(
-    `SELECT id FROM flow_versions WHERE flow_id = $1 ORDER BY version_number DESC LIMIT 1`,
-    [opts.flowId],
-  );
-  return insertedRows[0]!.id;
+  const inserted = await queryOne<{ id: string }>(`SELECT id FROM flow_versions WHERE flow_id=$1 AND definition_hash=$2`, [opts.flowId, hash]);
+  if (!inserted) throw new Error("FLOW_VERSION_CREATE_FAILED");
+  return inserted.id;
 }
 
 export async function loadConnectionSecret(connectionId: string | null | undefined, orgId: string) {
   if (!connectionId) return null;
-  // OAuth connections get proactive token refresh here — executions and step
-  // tests always see a valid access token (or a needs_attention connection).
   try {
     const { ensureFreshToken } = await import("./oauth-refresh");
-    const piece = await queryOne<{ piece_name: string }>(
-      `SELECT piece_name FROM connections WHERE id = $1 AND org_id = $2`,
-      [connectionId, orgId],
-    );
+    const piece = await queryOne<{ piece_name: string }>(`SELECT piece_name FROM connections WHERE id=$1 AND org_id=$2`, [connectionId, orgId]);
     const fresh = await ensureFreshToken(connectionId, orgId, piece?.piece_name ?? "");
     if (fresh) return fresh;
-  } catch {
-    /* fall through to plain load */
-  }
-  const row = await queryOne<{ ciphertext: Buffer | null; encrypted_payload: unknown }>(
-    `SELECT ciphertext, encrypted_payload FROM connections WHERE id = $1 AND org_id = $2`,
-    [connectionId, orgId],
-  );
+  } catch { /* fall through */ }
+  const row = await queryOne<{ ciphertext: Buffer | null; encrypted_payload: unknown }>(`SELECT ciphertext, encrypted_payload FROM connections WHERE id=$1 AND org_id=$2`, [connectionId, orgId]);
   if (!row) return null;
   if (row.ciphertext) return decryptJson(row.ciphertext, orgId);
   if (row.encrypted_payload && typeof row.encrypted_payload === "object") {
@@ -148,8 +71,7 @@ export async function loadConnectionSecret(connectionId: string | null | undefin
 }
 
 export async function sealConnectionSecret(orgId: string, credentials: Record<string, unknown>) {
-  const buf = encryptJson(credentials, orgId);
-  return { ciphertext: buf, encrypted_payload: { _enc: buf.toString("base64") } };
+  const buf = encryptJson(credentials, orgId); return { ciphertext: buf, encrypted_payload: { _enc: buf.toString("base64") } };
 }
 
 function stepTypeOf(node: WorkflowGraph["nodes"][number]) {
@@ -167,26 +89,35 @@ function stepTypeOf(node: WorkflowGraph["nodes"][number]) {
   return "piece_action";
 }
 
-function children(graph: WorkflowGraph, nodeId: string) {
-  return graph.edges
-    .filter((e) => e.source === nodeId)
-    .map((e) => graph.nodes.find((n) => n.id === e.target))
-    .filter((n): n is WorkflowGraph["nodes"][number] => Boolean(n));
+function children(graph: WorkflowGraph, nodeId: string, handle?: string | null) {
+  return graph.edges.filter((e) => e.source === nodeId && (handle == null || e.sourceHandle === handle)).map((e) => graph.nodes.find((n) => n.id === e.target)).filter((n): n is WorkflowGraph["nodes"][number] => Boolean(n));
 }
 
-/** Resolve {{...}} step mappings the same way the canonical engine does — raw
- *  templates must never reach a provider API (a literal "{{trigger.row[0]}}"
- *  used to be sent to Google Calendar and fail with an opaque 400). */
-function resolveStepInput(
-  node: WorkflowGraph["nodes"][number],
-  ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown },
-) {
-  return resolveValue({ ...(node.config ?? {}) }, {
-    trigger: ctx.trigger ?? {},
-    steps: ctx.steps,
-    vars: ctx.vars ?? {},
-    item: ctx.item,
-  }) as Record<string, unknown>;
+function resolveStepInput(node: WorkflowGraph["nodes"][number], ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown }) {
+  return resolveValue({ ...(node.config ?? {}) }, { trigger: ctx.trigger ?? {}, steps: ctx.steps, vars: ctx.vars ?? {}, item: ctx.item }) as Record<string, unknown>;
+}
+
+function compareCondition(operator: string, left: unknown, right: unknown): boolean {
+  switch (operator) {
+    case "equals": case "eq": return left === right || String(left) === String(right);
+    case "not_equals": case "neq": return !(left === right || String(left) === String(right));
+    case "contains": return Array.isArray(left) ? left.includes(right) : String(left ?? "").includes(String(right ?? ""));
+    case "not_contains": return !compareCondition("contains", left, right);
+    case "starts_with": return String(left ?? "").startsWith(String(right ?? ""));
+    case "ends_with": return String(left ?? "").endsWith(String(right ?? ""));
+    case "gt": return Number(left) > Number(right); case "gte": return Number(left) >= Number(right);
+    case "lt": return Number(left) < Number(right); case "lte": return Number(left) <= Number(right);
+    case "exists": case "not_empty": return left !== undefined && left !== null && left !== "";
+    case "not_exists": case "empty": return left === undefined || left === null || left === "";
+    default: return false;
+  }
+}
+
+function graphCondition(node: WorkflowGraph["nodes"][number], ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars?: Record<string, unknown>; item?: unknown }) {
+  const cfg = node.config ?? {};
+  const left = resolveValue(cfg.left, { trigger: ctx.trigger, steps: ctx.steps, vars: ctx.vars ?? {}, item: ctx.item });
+  const right = resolveValue(cfg.right, { trigger: ctx.trigger, steps: ctx.steps, vars: ctx.vars ?? {}, item: ctx.item });
+  return compareCondition(String(cfg.operator ?? "equals"), left, right);
 }
 
 async function executeNode(opts: {
@@ -195,325 +126,209 @@ async function executeNode(opts: {
   orgId: string;
   runId: string;
   graph?: WorkflowGraph;
+  allowSamples?: boolean;
 }) {
   const { node, ctx, orgId, runId } = opts;
-  if (node.type === "trigger" || !node.operation) {
-    return { ok: true as const, output: { ...(ctx.trigger ?? {}), appSlug: node.appSlug, operation: node.operation }, input: { ...(node.config ?? {}) } as Record<string, unknown> };
-  }
-  const app = getApp(node.appSlug);
-  const op = app?.operations.find((o) => o.key === node.operation);
+  if (node.type === "trigger" || !node.operation) return { ok: true as const, output: { ...(ctx.trigger ?? {}), appSlug: node.appSlug, operation: node.operation }, input: { ...(node.config ?? {}) } as Record<string, unknown> };
+  const app = getApp(node.appSlug); const op = app?.operations.find((o) => o.key === node.operation);
   const auth = await loadConnectionSecret(node.connectionId, orgId);
   const input = resolveStepInput(node, ctx);
-  // Fan-in nodes (aggregator) receive the live graph + step outputs so they
-  // can merge their incoming branches. Underscore-prefixed keys are engine
-  // context, never part of the user-visible config.
-  if (node.appSlug === "aggregator") {
-    input.__nodeId = node.id;
-    input.__steps = ctx.steps;
-    if (opts.graph) {
-      input.__graph = { nodes: opts.graph.nodes.map((n) => ({ id: n.id })), edges: opts.graph.edges.map((e) => ({ source: e.source, target: e.target })) };
-    }
-  }
+  if (node.appSlug === "aggregator") { input.__nodeId = node.id; input.__steps = ctx.steps; if (opts.graph) input.__graph = { nodes: opts.graph.nodes.map((n) => ({ id: n.id })), edges: opts.graph.edges.map((e) => ({ source: e.source, target: e.target, sourceHandle: e.sourceHandle })) }; }
   try {
-    const result = await runAdapter({
-      appSlug: node.appSlug,
-      operation: node.operation,
-      input,
-      auth,
-      workspaceId: orgId,
-      executionId: runId,
-      connectionId: node.connectionId ?? undefined,
-    });
+    const result = await runAdapter({ appSlug: node.appSlug, operation: node.operation, input, auth, workspaceId: orgId, executionId: runId, connectionId: node.connectionId ?? undefined });
     return { ok: true as const, output: result.output ?? {}, input };
   } catch (err) {
-    if (op?.outputSample && /No live adapter/.test(err instanceof Error ? err.message : "")) {
-      return { ok: true as const, output: { ...(op.outputSample as Record<string, unknown>), _sample: true }, input };
-    }
+    if (opts.allowSamples && op?.outputSample && /No live adapter/.test(err instanceof Error ? err.message : "")) return { ok: true as const, output: { ...(op.outputSample as Record<string, unknown>), _sample: true }, input };
     throw err;
   }
 }
 
-export async function testFlowStep(opts: {
-  orgId: string;
-  flowId: string;
-  nodeId: string;
-  graph: unknown;
-}) {
-  const graph = loadBuilderGraph(opts.graph);
-  const node = graph.nodes.find((n) => n.id === opts.nodeId);
-  if (!node) throw new Error("Step not found");
-  const ctx = { trigger: {}, steps: {} as Record<string, Record<string, unknown>> };
+type GraphCtx = { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars: Record<string, unknown>; item?: unknown };
+
+/** Execute the active builder path. The graph is still the authoring format, but
+ * control-flow decisions are interpreted explicitly; we never DFS every outgoing
+ * edge of a branch/router as if all edges were sequential actions. */
+async function executeGraph(opts: { graph: WorkflowGraph; startId: string; targetId?: string; ctx: GraphCtx; orgId: string; runId: string; allowSamples?: boolean; stopAfterTarget?: boolean; visited?: Set<string>; onStep?: (node: WorkflowGraph["nodes"][number], result: { output: Record<string, unknown>; input: Record<string, unknown> }) => Promise<void> }): Promise<{ reachedTarget: boolean }> {
+  const { graph, startId, targetId, ctx, orgId, runId } = opts;
+  const visited = opts.visited ?? new Set<string>();
+  const node = graph.nodes.find((n) => n.id === startId);
+  if (!node) return { reachedTarget: false };
+  if (targetId && node.id === targetId) return { reachedTarget: true };
+  if (visited.has(node.id)) return { reachedTarget: false };
+  visited.add(node.id);
+
+  if (node.type === "trigger") {
+    const next = children(graph, node.id);
+    for (const child of next) { const r = await executeGraph({ ...opts, startId: child.id, visited }); if (r.reachedTarget) return r; }
+    return { reachedTarget: false };
+  }
+
+  if (node.appSlug === "filter") {
+    if (!graphCondition(node, ctx)) return { reachedTarget: false };
+  }
+
+  if (node.appSlug === "paths" && node.operation === "branch") {
+    const handle = graphCondition(node, ctx) ? "true" : "false";
+    const next = children(graph, node.id, handle);
+    for (const child of next) { const r = await executeGraph({ ...opts, startId: child.id, visited }); if (r.reachedTarget) return r; }
+    return { reachedTarget: false };
+  }
+
+  if (node.appSlug === "paths") {
+    // Router definitions may provide explicit path conditions in config.paths.
+    // Otherwise the first configured path is used and path-b is the default.
+    const cfg = node.config ?? {};
+    const paths = Array.isArray(cfg.paths) ? cfg.paths as Array<{ id?: string; handle?: string; condition?: Record<string, unknown>; default?: boolean }> : [];
+    let handle: string | null = null;
+    for (const path of paths) {
+      const pass = path.condition ? compareCondition(String(path.condition.operator ?? "equals"), resolveValue(path.condition.left, ctx), resolveValue(path.condition.right, ctx)) : false;
+      if (pass) { handle = String(path.handle ?? path.id ?? "path-a"); break; }
+    }
+    if (!handle) handle = String(paths.find((p) => p.default)?.handle ?? paths.find((p) => p.default)?.id ?? "path-b");
+    let next = children(graph, node.id, handle);
+    if (!next.length) next = children(graph, node.id).filter((n) => n.id === targetId);
+    for (const child of next) { const r = await executeGraph({ ...opts, startId: child.id, visited }); if (r.reachedTarget) return r; }
+    return { reachedTarget: false };
+  }
+
+  if (node.appSlug === "loop") {
+    const input = resolveStepInput(node, ctx); const items = Array.isArray(input.items) ? input.items : [];
+    const next = children(graph, node.id);
+    for (let i = 0; i < items.length; i++) {
+      const loopCtx = { ...ctx, item: items[i], vars: { ...ctx.vars, loop: { item: items[i], index: i, total: items.length } } };
+      for (const child of next) { const r = await executeGraph({ ...opts, startId: child.id, ctx: loopCtx, visited: new Set<string>() }); if (r.reachedTarget) return r; }
+    }
+    return { reachedTarget: false };
+  }
+
+  const result = await executeNode({ node, ctx, orgId, runId, graph, allowSamples: opts.allowSamples });
+  ctx.steps[node.id] = result.output;
+  await opts.onStep?.(node, { output: result.output, input: result.input });
+  if (targetId && node.id === targetId) return { reachedTarget: true };
+
+  const next = children(graph, node.id);
+  for (const child of next) { const r = await executeGraph({ ...opts, startId: child.id, visited }); if (r.reachedTarget) return r; }
+  return { reachedTarget: false };
+}
+
+export async function testFlowStep(opts: { orgId: string; flowId: string; nodeId: string; graph: unknown; inputs?: Record<string, unknown> }) {
+  const graph = loadBuilderGraph(opts.graph); const node = graph.nodes.find((n) => n.id === opts.nodeId); if (!node) throw new Error("Step not found");
+  const triggerNode = graph.nodes.find((n) => n.type === "trigger");
+  const triggerSample = (triggerNode?.config?.sampleOutput ?? triggerNode?.config?.testData ?? {}) as Record<string, unknown>;
+  const ctx: GraphCtx = { trigger: { ...triggerSample, ...(opts.inputs ?? {}) }, steps: {}, vars: {} };
   const started = Date.now();
   try {
-    const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: opts.flowId, graph });
-    return { ok: true, output: result.output, error: undefined, duration_ms: Date.now() - started, status: "succeeded" };
+    const result = await executeGraph({ graph, startId: triggerNode?.id ?? graph.nodes[0]?.id ?? opts.nodeId, targetId: opts.nodeId, ctx, orgId: opts.orgId, runId: `test:${opts.flowId}:${opts.nodeId}:${Date.now()}`, allowSamples: true });
+    if (!result.reachedTarget) return { ok: false, output: undefined, error: "Unable to reach target step from trigger using the current workflow path", duration_ms: Date.now() - started, status: "failed" };
+    return { ok: true, output: ctx.steps[opts.nodeId], error: undefined, duration_ms: Date.now() - started, status: "succeeded" };
   } catch (err) {
-    return {
-      ok: false,
-      output: undefined,
-      error: err instanceof Error ? err.message : "Step failed",
-      duration_ms: Date.now() - started,
-      status: "failed",
-    };
+    return { ok: false, output: undefined, error: err instanceof Error ? err.message : "Step failed", duration_ms: Date.now() - started, status: "failed" };
   }
 }
 
 export async function createAndRunFlow(opts: {
-  orgId: string;
-  flowId: string;
-  userId: string;
-  payload?: Record<string, unknown>;
-  graph?: unknown;
-  triggerKind?: string;
-  eventId?: string | null;
-  idempotencyKey?: string | null;
-  receivedAt?: string;
-  /** Replay-from-step: seed these step outputs into context so upstream steps never re-run. */
-  replaySteps?: Record<string, Record<string, unknown>>;
+  orgId: string; flowId: string; userId: string; payload?: Record<string, unknown>; graph?: unknown; triggerKind?: string;
+  eventId?: string | null; idempotencyKey?: string | null; receivedAt?: string; replaySteps?: Record<string, Record<string, unknown>>;
   onStepComplete?: (step: { stepId: string; status: string; output?: unknown; error?: string; durationMs?: number }) => void;
 }) {
   await ensureRunPartition();
-  const flow = await queryOne<{ id: string; project_id: string; draft_definition: unknown; published_version_id: string | null }>(
-    `SELECT id, project_id, draft_definition, published_version_id FROM flows WHERE id = $1 AND org_id = $2`,
-    [opts.flowId, opts.orgId],
-  );
+  const flow = await queryOne<{ id: string; project_id: string; draft_definition: unknown; published_version_id: string | null }>(`SELECT id, project_id, draft_definition, published_version_id FROM flows WHERE id=$1 AND org_id=$2`, [opts.flowId, opts.orgId]);
   if (!flow) throw new Error("Flow not found");
-  const draft = persistBuilderDraft(opts.graph ?? loadBuilderGraph(flow.draft_definition));
-  const versionId = await ensureFlowVersion({
-    orgId: opts.orgId,
-    flowId: flow.id,
-    definition: draft,
-    userId: opts.userId,
-  });
-  const graph = loadBuilderGraph(draft);
-  const triggerEnvelope = buildTriggerEnvelope({
-    workspaceId: opts.orgId,
-    organizationId: opts.orgId,
-    automationId: flow.id,
-    versionId,
-    triggerType: opts.triggerKind ?? "test",
-    payload: opts.payload ?? { ping: true },
-    eventId: opts.eventId,
-    idempotencyKey: opts.idempotencyKey,
-    receivedAt: opts.receivedAt,
-  });
-  // Ensure project_id exists — create one if the flow doesn't have one
+
+  const mode = opts.triggerKind === "test" || opts.triggerKind === "manual_test" ? "test" : "production";
+  let definition: any;
+  let versionId: string;
+  if (mode === "production") {
+    if (!flow.published_version_id) throw new Error("FLOW_NOT_PUBLISHED");
+    const version = await queryOne<{ id: string; definition: unknown }>(`SELECT id, definition FROM flow_versions WHERE id=$1 AND flow_id=$2`, [flow.published_version_id, flow.id]);
+    if (!version) throw new Error("PUBLISHED_FLOW_VERSION_NOT_FOUND");
+    versionId = version.id; definition = version.definition;
+  } else {
+    definition = persistBuilderDraft(opts.graph ?? loadBuilderGraph(flow.draft_definition));
+    versionId = await ensureFlowVersion({ orgId: opts.orgId, flowId: flow.id, definition, userId: opts.userId });
+  }
+  const graph = loadBuilderGraph(definition);
+  const triggerEnvelope = buildTriggerEnvelope({ workspaceId: opts.orgId, organizationId: opts.orgId, automationId: flow.id, versionId, triggerType: opts.triggerKind ?? "test", payload: opts.payload ?? { ping: true }, eventId: opts.eventId, idempotencyKey: opts.idempotencyKey, receivedAt: opts.receivedAt });
+
   let projectId = flow.project_id;
   if (!projectId) {
-    const proj = await queryOne<{ id: string }>(
-      `SELECT id FROM projects WHERE org_id = $1 LIMIT 1`,
-      [opts.orgId],
-    );
+    const proj = await queryOne<{ id: string }>(`SELECT id FROM projects WHERE org_id=$1 LIMIT 1`, [opts.orgId]);
     projectId = proj?.id;
-    if (!projectId) {
-      const created = await queryOne<{ id: string }>(
-        `INSERT INTO projects (org_id, name, slug) VALUES ($1, 'Default', 'default') RETURNING id`,
-        [opts.orgId],
-      );
-      projectId = created!.id;
-    }
-    // Update the flow with the project_id
-    await query(`UPDATE flows SET project_id = $1 WHERE id = $2`, [projectId, flow.id]).catch(() => undefined);
+    if (!projectId) { const created = await queryOne<{ id: string }>(`INSERT INTO projects (org_id,name,slug) VALUES ($1,'Default','default') RETURNING id`, [opts.orgId]); projectId = created!.id; }
+    await query(`UPDATE flows SET project_id=$1 WHERE id=$2`, [projectId, flow.id]);
   }
-  const run = await withTransaction(async (client) => {
+
+  const claimed = await withTransaction(async (client) => {
     if (triggerEnvelope.idempotencyKey) {
       const claim = await client.query<{ flow_run_id: string | null }>(
-        `INSERT INTO trigger_events
-          (org_id, workspace_id, automation_id, version_id, event_id, trigger_type, received_at, idempotency_key, payload)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (org_id, idempotency_key) DO NOTHING
-         RETURNING flow_run_id`,
+        `INSERT INTO trigger_events (org_id,workspace_id,automation_id,version_id,event_id,trigger_type,received_at,idempotency_key,payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (org_id,idempotency_key) DO NOTHING RETURNING flow_run_id`,
         [opts.orgId, opts.orgId, flow.id, versionId, triggerEnvelope.eventId, triggerEnvelope.triggerType, triggerEnvelope.receivedAt, triggerEnvelope.idempotencyKey, JSON.stringify(triggerEnvelope.payload)],
       );
       if (!claim.rows[0]) {
-        const existing = await client.query<{ flow_run_id: string | null }>(
-          `SELECT flow_run_id FROM trigger_events WHERE org_id=$1 AND idempotency_key=$2 FOR UPDATE`,
-          [opts.orgId, triggerEnvelope.idempotencyKey],
-        );
-        if (existing.rows[0]?.flow_run_id) return { id: existing.rows[0].flow_run_id, created_at: new Date() };
+        const existing = await client.query<{ flow_run_id: string | null }>(`SELECT flow_run_id FROM trigger_events WHERE org_id=$1 AND idempotency_key=$2 FOR UPDATE`, [opts.orgId, triggerEnvelope.idempotencyKey]);
+        if (existing.rows[0]?.flow_run_id) return { duplicate: true, id: existing.rows[0].flow_run_id };
         throw new Error("TRIGGER_EVENT_CLAIM_INCOMPLETE");
       }
     }
-
     const inserted = await client.query<{ id: string; created_at: Date }>(
-      `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, trigger_event_id, idempotency_key, status, context)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8) RETURNING id, created_at`,
+      `INSERT INTO flow_runs (org_id,project_id,flow_id,flow_version_id,trigger_kind,trigger_event_id,idempotency_key,status,context)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8) RETURNING id,created_at`,
       [opts.orgId, projectId, flow.id, versionId, triggerEnvelope.triggerType, triggerEnvelope.eventId, triggerEnvelope.idempotencyKey, JSON.stringify({ trigger: triggerEnvelope.payload })],
     );
-    const created = inserted.rows[0];
-    if (!created) throw new Error("Failed to create execution run record.");
-    if (triggerEnvelope.idempotencyKey) {
-      await client.query(
-        `UPDATE trigger_events SET flow_run_id=$1 WHERE org_id=$2 AND idempotency_key=$3`,
-        [created.id, opts.orgId, triggerEnvelope.idempotencyKey],
-      );
-    }
-    return created;
+    const created = inserted.rows[0]; if (!created) throw new Error("Failed to create execution run record.");
+    if (triggerEnvelope.idempotencyKey) await client.query(`UPDATE trigger_events SET flow_run_id=$1 WHERE org_id=$2 AND idempotency_key=$3`, [created.id, opts.orgId, triggerEnvelope.idempotencyKey]);
+    return { duplicate: false, id: created.id };
   });
-  if (!run) throw new Error("Failed to create execution run record.");
-  // run_steps.run_created_at must equal flow_runs.created_at exactly — the FK
-  // targets the monthly partition keyed on (run_id, created_at, org_id), and a
-  // JS round-trip drops microseconds so the value never matches. Fetch the
-  // exact stored timestamp from PostgreSQL instead of trusting RETURNING.
-  const exact = await queryOne<{ created_at: string }>(
-    `SELECT created_at::text AS created_at FROM flow_runs WHERE id = $1`,
-    [run.id],
-  );
-  const runCreatedAt = exact?.created_at ?? String(run.created_at);
-  const ctx: { trigger: Record<string, unknown>; steps: Record<string, Record<string, unknown>>; vars: Record<string, unknown>; item?: unknown } = { trigger: triggerEnvelope.payload, steps: {}, vars: {} };
-  // Replay-from-step: previously-succeeded step outputs are pre-seeded so the
-  // walk marks them done and only downstream steps actually execute.
-  if (opts.replaySteps) {
-    for (const [stepId, output] of Object.entries(opts.replaySteps)) {
-      ctx.steps[stepId] = output;
-    }
-  }
-  const ordered: WorkflowGraph["nodes"] = [];
-  const seen = new Set<string>();
-  const walk = (node: WorkflowGraph["nodes"][number]) => {
-    if (seen.has(node.id)) return;
-    seen.add(node.id);
-    ordered.push(node);
-    for (const child of children(graph, node.id)) walk(child);
-  };
-  const trigger = graph.nodes.find((n) => n.type === "trigger") ?? graph.nodes[0];
-  if (trigger) walk(trigger);
+  if (claimed.duplicate) return { id: claimed.id, duplicate: true };
 
-  let failed: string | null = null;
-  let seq = 0;
-  for (const node of ordered) {
+  const runId = claimed.id;
+  const exact = await queryOne<{ created_at: string }>(`SELECT created_at::text AS created_at FROM flow_runs WHERE id=$1`, [runId]);
+  const runCreatedAt = exact?.created_at ?? new Date().toISOString();
+  const ctx: GraphCtx = { trigger: triggerEnvelope.payload, steps: {}, vars: {} };
+  if (opts.replaySteps) for (const [stepId, output] of Object.entries(opts.replaySteps)) ctx.steps[stepId] = output;
+
+  let seq = 0; let failed: string | null = null; let handledError = false;
+  const persistStep = async (node: WorkflowGraph["nodes"][number], status: string, input: unknown, output?: unknown, error?: string) => {
     seq += 1;
-    const started = new Date();
-    // Replay-from-step: pre-seeded steps are recorded as succeeded without executing.
-    if (opts.replaySteps && node.id in opts.replaySteps) {
-      const seeded = ctx.steps[node.id];
-      await query(
-        `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, output_json, started_at, finished_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,now(),now())`,
-        [
-          run!.id,
-          runCreatedAt,
-          opts.orgId,
-          node.id,
-          stepTypeOf(node),
-          seq,
-          JSON.stringify(redact(node.config ?? {})),
-          JSON.stringify(seeded),
-        ],
-      );
-      opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: seeded, durationMs: 0 });
-      continue;
+    await query(
+      `INSERT INTO run_steps (run_id,run_created_at,org_id,step_id,step_type,sequence_no,status,input_json,output_json,error_json,started_at,finished_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())`,
+      [runId, runCreatedAt, opts.orgId, node.id, stepTypeOf(node), seq, status, JSON.stringify(redact(input ?? {})), output === undefined ? null : JSON.stringify(redact(output)), error ? JSON.stringify({ message: error }) : null],
+    );
+  };
+
+  const onStep = async (node: WorkflowGraph["nodes"][number], result: { output: Record<string, unknown>; input: Record<string, unknown> }) => {
+    if (opts.replaySteps && node.id in opts.replaySteps) return;
+    await persistStep(node, "succeeded", result.input, result.output);
+    opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: result.output });
+  };
+
+  try {
+    const trigger = graph.nodes.find((n) => n.type === "trigger");
+    if (!trigger) throw new Error("WORKFLOW_TRIGGER_MISSING");
+    if (opts.replaySteps) for (const [stepId, output] of Object.entries(opts.replaySteps)) { const n = graph.nodes.find((x) => x.id === stepId); if (n) await persistStep(n, "succeeded", n.config ?? {}, output); }
+    const result = await executeGraph({ graph, startId: trigger.id, ctx, orgId: opts.orgId, runId, allowSamples: false, onStep });
+    if (!result.reachedTarget && graph.nodes.length > 1) {
+      // reachedTarget is only meaningful when a target is supplied; the normal
+      // execution walker still completed all active reachable nodes here.
     }
-    try {
-      const result = await executeNode({ node, ctx, orgId: opts.orgId, runId: run!.id, graph });
-      ctx.steps[node.id] = result.output;
-      // Persist the RESOLVED input ({{...}} templates already substituted) —
-      // the run explorer shows what actually reached the provider, so a bad
-      // mapping like To=row[0] is visible in the step input immediately.
-      await query(
-        `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, output_json, started_at, finished_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'succeeded',$7,$8,now(),now())`,
-        [
-          run!.id,
-          runCreatedAt,
-          opts.orgId,
-          node.id,
-          stepTypeOf(node),
-          seq,
-          JSON.stringify(redact(result.input ?? node.config ?? {})),
-          JSON.stringify(result.output),
-        ],
-      );
-      opts.onStepComplete?.({ stepId: node.id, status: "succeeded", output: result.output, durationMs: Date.now() - started.getTime() });
-    } catch (err) {
-      failed = err instanceof Error ? err.message : "step_failed";
-      // Persist the resolved input on failure too — for steps that throw in
-      // resolveValue itself (bad template path) the resolved input is whatever
-      // substituted before the throw; otherwise it mirrors the provider call.
-      let failedInput: Record<string, unknown> = {};
-      try {
-        failedInput = resolveStepInput(node, ctx);
-      } catch {
-        failedInput = { ...(node.config ?? {}) } as Record<string, unknown>;
-      }
-      await query(
-        `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, sequence_no, status, input_json, error_json, started_at, finished_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'failed',$7,$8,now(),now())`,
-        [
-          run!.id,
-          runCreatedAt,
-          opts.orgId,
-          node.id,
-          stepTypeOf(node),
-          seq,
-          JSON.stringify(redact(failedInput)),
-          JSON.stringify({ message: failed }),
-        ],
-      );
-      opts.onStepComplete?.({ stepId: node.id, status: "failed", error: failed, durationMs: Date.now() - started.getTime() });
-      // Per-step error policy — mirrors the canonical engine: a step with
-      // onError continue/fallback records the failure but keeps the run going
-      // (auth failures always stop; a broken connection can't be papered over).
-      const policy = parseErrorPolicy((node.config ?? {}).onError) ?? "stop";
-      if (!isAuthError(err) && policy !== "stop") {
-        const fallbackValue = policy === "fallback"
-          ? resolveValue((node.config ?? {}).fallbackValue, { trigger: ctx.trigger, steps: ctx.steps, vars: ctx.vars ?? {}, item: ctx.item })
-          : { error: failed };
-        ctx.steps[node.id] = typeof fallbackValue === "object" && fallbackValue !== null
-          ? (fallbackValue as Record<string, unknown>)
-          : { error: failed };
-        failed = null; // the run itself is no longer failing
-        continue;
-      }
-      break;
-    }
+  } catch (err) {
+    failed = err instanceof Error ? err.message : "step_failed";
+    opts.onStepComplete?.({ stepId: "workflow", status: "failed", error: failed });
   }
 
-  // The run-level error surfaces from the first failed step's error_json
-  // (see mapRunToExecution) — never a generic "Run failed".
-  const finalStatus = failed ? "failed" : "succeeded";
-  await query(
-    `UPDATE flow_runs SET status = $2, finished_at = now(), context = $3, steps_billable = $4 WHERE id = $1 AND org_id = $5`,
-    [run!.id, finalStatus, JSON.stringify(ctx), Math.max(0, seq - 1), opts.orgId],
-  );
-  return { id: run!.id };
+  const finalStatus = failed ? "failed" : handledError ? "handled_error" : "succeeded";
+  await query(`UPDATE flow_runs SET status=$2,finished_at=now(),context=$3,steps_billable=$4 WHERE id=$1 AND org_id=$5`, [runId, finalStatus, JSON.stringify(ctx), Math.max(0, seq), opts.orgId]);
+  return { id: runId };
 }
 
 export function mapRunToExecution(row: Record<string, unknown>, steps: Array<Record<string, unknown>> = []) {
-  // Surface the real first-failed-step message on the run — the legacy
-  // generic "Run failed" gave users nothing to act on.
   const firstFailed = steps.find((s) => s.status === "failed");
-  const runError = typeof firstFailed?.error_json === "object" && firstFailed?.error_json
-    ? firstFailed.error_json
-    : firstFailed?.error_json
-      ? { message: String(firstFailed.error_json) }
-      : { message: "Run failed" };
+  const runError = typeof firstFailed?.error_json === "object" && firstFailed?.error_json ? firstFailed.error_json : firstFailed?.error_json ? { message: String(firstFailed.error_json) } : { message: "Run failed" };
   return {
-    execution: {
-      id: row.id,
-      status: row.status,
-      automation_name: row.flow_name,
-      automation_id: row.flow_id,
-      trigger_type: row.trigger_kind,
-      created_at: row.created_at,
-      finished_at: row.finished_at,
-      error: row.status === "failed" ? runError : undefined,
-    },
-    steps: steps.map((s) => ({
-      id: s.id,
-      step_id: s.step_id,
-      name: s.step_id,
-      status: s.status,
-      duration_ms: s.duration_ms,
-      error: typeof s.error_json === "object" && s.error_json
-        ? s.error_json
-        : s.error_json
-          ? { message: String(s.error_json) }
-          : undefined,
-      output: s.output_json,
-      input: s.input_json,
-      app_slug: s.step_type,
-    })),
+    execution: { id: row.id, status: row.status, automation_name: row.flow_name, automation_id: row.flow_id, trigger_type: row.trigger_kind, created_at: row.created_at, finished_at: row.finished_at, error: row.status === "failed" ? runError : undefined },
+    steps: steps.map((s) => ({ id: s.id, step_id: s.step_id, name: s.step_id, status: s.status, duration_ms: s.duration_ms, error: typeof s.error_json === "object" && s.error_json ? s.error_json : s.error_json ? { message: String(s.error_json) } : undefined, output: s.output_json, input: s.input_json, app_slug: s.step_type })),
     logs: [],
   };
 }
