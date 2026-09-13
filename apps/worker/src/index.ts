@@ -12,15 +12,24 @@ if (!databaseUrl) throw new Error("DATABASE_URL is required for the worker");
 const db = new Db(databaseUrl);
 const transitionQueue = new Queue("flow-steps", { connection });
 const engineDb = createEngineDb(db);
-const executor = new Executor(engineDb, { flowStep: transitionQueue }, new Map([
-  ["piece_action", adapterStepHandler],
-]));
+
+// Every executable canonical leaf type must resolve through the same adapter
+// bridge. Keeping only piece_action here caused valid http/code/ai/agent/table
+// definitions to fail with NO_HANDLER on the durable worker path.
+const canonicalLeafTypes = [
+  "piece_action",
+  "http",
+  "code",
+  "ai",
+  "agent",
+  "data_table",
+];
+const handlers = new Map(canonicalLeafTypes.map((type) => [type, adapterStepHandler] as const));
+const executor = new Executor(engineDb, { flowStep: transitionQueue }, handlers);
 
 const flowWorker = new Worker(
   "flow-steps",
   async (job) => {
-    // Delayed resume jobs re-activate the paused run at its stored cursor;
-    // normal transition jobs continue an already-running run.
     if (job.data.kind === "resume") {
       await executor.resume(String(job.data.runId));
       return;
