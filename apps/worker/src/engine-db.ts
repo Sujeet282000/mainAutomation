@@ -1,6 +1,10 @@
 import type { Db } from "@algoverge/db";
 import { redact } from "../../api/src/crypto";
 
+<<<<<<< HEAD
+=======
+/** Maps SQL rows to the runtime contract expected by the canonical executor. */
+>>>>>>> c298d930765427168369af23480a60a1107e9f9a
 export function createEngineDb(db: Db) {
   return {
     flowRuns: {
@@ -35,7 +39,14 @@ export function createEngineDb(db: Db) {
         return row ? { id: row.id, orgId: row.org_id, flowId: row.flow_id, versionNumber: row.version_number, definition: row.definition } : null;
       },
       async currentPublished(flowId: string) {
+<<<<<<< HEAD
         const result = await db.service.query(`SELECT v.* FROM flow_versions v JOIN flows f ON f.published_version_id = v.id WHERE f.id = $1 LIMIT 1`, [flowId]);
+=======
+        const result = await db.service.query(
+          `SELECT v.* FROM flow_versions v JOIN flows f ON f.published_version_id = v.id WHERE f.id = $1 LIMIT 1`,
+          [flowId],
+        );
+>>>>>>> c298d930765427168369af23480a60a1107e9f9a
         const row = result.rows[0];
         return row ? { id: row.id, orgId: row.org_id, flowId: row.flow_id, versionNumber: row.version_number, definition: row.definition } : null;
       },
@@ -47,15 +58,45 @@ export function createEngineDb(db: Db) {
         return row ? { outputJson: row.output_json ?? {} } : null;
       },
       async insert(input: any) {
+<<<<<<< HEAD
         // Always obtain the exact partition key from PostgreSQL. A JS Date can
         // lose sub-millisecond precision and break the composite FK.
         const meta = await db.service.query(`SELECT created_at, org_id FROM flow_runs WHERE id = $1 LIMIT 1`, [input.runId]);
+=======
+        // The run_created_at + org_id pair is part of the partitioned FK. Do
+        // not trust a JS Date supplied by the engine: PostgreSQL owns the exact
+        // timestamp stored on the parent row.
+        const meta = await db.service.query(
+          `SELECT created_at, org_id FROM flow_runs WHERE id = $1 LIMIT 1`,
+          [input.runId],
+        );
+>>>>>>> c298d930765427168369af23480a60a1107e9f9a
         const run = meta.rows[0];
         if (!run) throw new Error("FLOW_RUN_NOT_FOUND_FOR_STEP");
         const result = await db.service.query(
           `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, output_json, error_class, error_code, error_json, attempt, duration_ms, finished_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,
+<<<<<<< HEAD
           [input.runId, run.created_at, run.org_id, input.stepId, input.stepType, input.operationId ?? null, input.effectKey ?? null, input.status, input.inputJson ? JSON.stringify(redact(input.inputJson)) : null, input.outputJson ? JSON.stringify(redact(input.outputJson)) : null, input.errorClass ?? null, input.errorCode ?? null, input.errorJson ? JSON.stringify(redact(input.errorJson)) : null, input.attempt ?? 1, input.durationMs ?? null],
+=======
+          [
+            input.runId,
+            run.created_at,
+            run.org_id,
+            input.stepId,
+            input.stepType,
+            input.operationId ?? null,
+            input.effectKey ?? null,
+            input.status,
+            input.inputJson ? JSON.stringify(redact(input.inputJson)) : null,
+            input.outputJson ? JSON.stringify(redact(input.outputJson)) : null,
+            input.errorClass ?? null,
+            input.errorCode ?? null,
+            input.errorJson ? JSON.stringify(redact(input.errorJson)) : null,
+            input.attempt ?? 1,
+            input.durationMs ?? null,
+          ],
+>>>>>>> c298d930765427168369af23480a60a1107e9f9a
         );
         return result.rows[0];
       },
@@ -71,6 +112,21 @@ export function createEngineDb(db: Db) {
         return mapRun(row);
       },
     },
+    // Sub-flow fire-and-forget needs the same flow_runs table as the parent
+    // engine. It must start queued so the first transition is atomically
+    // claimed by the durable worker rather than executing in the API process.
+    runs: {
+      async create(input: { orgId: string; projectId?: string; flowId: string; flowVersionId: string; triggerKind: string; context: Record<string, unknown> }) {
+        const result = await db.service.query(
+          `INSERT INTO flow_runs (org_id, project_id, flow_id, flow_version_id, trigger_kind, status, context)
+           VALUES ($1,$2,$3,$4,$5,'queued',$6) RETURNING *`,
+          [input.orgId, input.projectId ?? null, input.flowId, input.flowVersionId, input.triggerKind, JSON.stringify(input.context)],
+        );
+        const row = result.rows[0];
+        if (!row) throw new Error("FLOW_RUN_CREATE_FAILED");
+        return mapRun(row);
+      },
+    },
     todos: {
       async create(orgId: string, runId: string, runCreatedAt: string, stepId: string, title: string, payload: Record<string, unknown>) {
         await db.service.query(`INSERT INTO todos (org_id, run_id, run_created_at, step_id, title, payload_json, status) VALUES ($1,$2,$3,$4,$5,$6,'pending')`, [orgId, runId, runCreatedAt, stepId, title, JSON.stringify(payload)]);
@@ -81,5 +137,23 @@ export function createEngineDb(db: Db) {
 
 function mapRun(row: any) {
   const context = row.context ?? {};
+<<<<<<< HEAD
   return { id: row.id, createdAt: row.created_at, orgId: row.org_id, projectId: row.project_id, flowId: row.flow_id, flowVersionId: row.flow_version_id, triggerKind: row.trigger_kind, status: row.status, contextJson: context, context, transitionEpoch: row.transition_epoch, cursor: row.cursor };
+=======
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    orgId: row.org_id,
+    projectId: row.project_id,
+    flowId: row.flow_id,
+    flowVersionId: row.flow_version_id,
+    triggerKind: row.trigger_kind,
+    status: row.status,
+    context,
+    // Executor reads contextJson; keep context as an alias for compatibility.
+    contextJson: context,
+    transitionEpoch: row.transition_epoch,
+    cursor: row.cursor,
+  };
+>>>>>>> c298d930765427168369af23480a60a1107e9f9a
 }

@@ -13,9 +13,16 @@ const db = new Db(databaseUrl);
 const transitionQueue = new Queue("flow-steps", { connection });
 const engineDb = createEngineDb(db);
 
+<<<<<<< HEAD
 // Every executable canonical leaf type must resolve through the same adapter
 // bridge. Keeping only piece_action here caused valid http/code/ai/agent/table
 // definitions to fail with NO_HANDLER on the durable worker path.
+=======
+// The canonical FlowDefinition contains both piece_action and schema-native
+// leaf steps. Every leaf must resolve to the same adapter bridge; otherwise a
+// valid HTTP/Code/AI/Agent/Table workflow can reach the durable worker and fail
+// with NO_HANDLER while the interactive runtime succeeds.
+>>>>>>> c298d930765427168369af23480a60a1107e9f9a
 const canonicalLeafTypes = [
   "piece_action",
   "http",
@@ -43,9 +50,8 @@ const flowWorker = new Worker(
   { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10) },
 );
 
-// Compatibility worker: existing UI/API executions continue to work while
-// automations are migrated to flow_runs. It can be removed only after the
-// migration is complete and no callers enqueue the legacy queue.
+// Compatibility worker remains only for the legacy executions queue. New
+// flow_runs must always execute through the canonical durable Executor above.
 const legacyWorker = new Worker(
   "executions",
   async (job) => {

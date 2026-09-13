@@ -7,5 +7,5 @@ export { evaluateFlowCondition as evaluateCondition } from "./resolver";
 export {
   coerceWorkflowGraph,
   flowDefinitionToGraph,
-  graphToFlowDefinition,
 } from "./graph-bridge";
+export { graphToFlowDefinition } from "./graph-bridge-fixes";
