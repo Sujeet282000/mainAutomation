@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { expandConfiguredRouters } from "@algoverge/core";
+import { expandConfiguredRouters } from "../../core/src/router-compiler";
 
 test("router expansion preserves all configured paths", () => {
   const definition: any = {
