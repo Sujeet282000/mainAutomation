@@ -1,24 +1,45 @@
 import { graphToFlowDefinition as compileGraph } from "./graph-bridge";
+import { normalizeWorkflowGraph } from "@algoverge/shared";
 import type { TFlowDefinition, Step } from "./flow-schema";
 
 /**
  * The React Flow graph is a UI representation; the engine consumes the
  * canonical FlowDefinition. Keep compatibility aliases out of the canonical
- * schema and fail fast on unsupported graph cycles instead of compiling a
- * cycle into a fake successful filter.
+ * schema and fail fast on unsupported graph cycles/implicit joins instead of
+ * compiling a graph whose runtime semantics differ from the builder.
  */
-function assertAcyclicGraph(raw: unknown): void {
-  if (!raw || typeof raw !== "object") return;
-  const graph = raw as { nodes?: Array<{ id?: string; type?: string }>; edges?: Array<{ source?: string; target?: string }> };
+function assertAcyclicAndUnambiguousGraph(raw: unknown): unknown {
+  const normalized = normalizeWorkflowGraph(raw);
+  if (!normalized || typeof normalized !== "object") return normalized;
+  const graph = normalized as { nodes?: Array<{ id?: string; appSlug?: string }>; edges?: Array<{ source?: string; target?: string }> };
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
   const outgoing = new Map<string, string[]>();
-  for (const node of nodes) if (typeof node.id === "string") outgoing.set(node.id, []);
+  const incoming = new Map<string, number>();
+  const nodeById = new Map<string, { appSlug?: string }>();
+  for (const node of nodes) {
+    if (typeof node.id === "string") {
+      outgoing.set(node.id, []);
+      incoming.set(node.id, 0);
+      nodeById.set(node.id, node);
+    }
+  }
   for (const edge of edges) {
     if (typeof edge.source === "string" && typeof edge.target === "string") {
       outgoing.get(edge.source)?.push(edge.target);
+      incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1);
     }
   }
+
+  // A normal node has one upstream path. If multiple branches reconnect,
+  // require an explicit aggregator/merge node so the runtime has deterministic
+  // semantics instead of silently compiling the same node twice.
+  for (const [id, count] of incoming) {
+    if (count > 1 && nodeById.get(id)?.appSlug !== "aggregator") {
+      throw new Error(`WORKFLOW_GRAPH_JOIN_REQUIRES_AGGREGATOR:${id}`);
+    }
+  }
+
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string): void => {
@@ -30,6 +51,7 @@ function assertAcyclicGraph(raw: unknown): void {
     visited.add(id);
   };
   for (const id of outgoing.keys()) visit(id);
+  return normalized;
 }
 
 function normalizeStep(step: Step): Step {
@@ -52,8 +74,8 @@ function normalizeStep(step: Step): Step {
 }
 
 export function graphToFlowDefinition(raw: unknown): TFlowDefinition {
-  assertAcyclicGraph(raw);
-  const compiled = compileGraph(raw) as TFlowDefinition;
+  const normalized = assertAcyclicAndUnambiguousGraph(raw);
+  const compiled = compileGraph(normalized) as TFlowDefinition;
   return {
     ...compiled,
     steps: compiled.steps.map(normalizeStep),
