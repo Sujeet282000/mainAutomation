@@ -1,12 +1,11 @@
-import { coerceWorkflowGraph, definitionHash, graphToFlowDefinition, resolveValue } from "@algoverge/core";
+import { coerceWorkflowGraph, definitionHash, graphToFlowDefinition } from "@algoverge/core";
 import type { WorkflowGraph } from "@algoverge/shared";
-import { runAdapter } from "./adapters";
-import { getApp } from "./catalog/catalog";
 import { encryptJson, decryptJson } from "./crypto";
 import { query, queryOne, withTransaction } from "./db";
 import { queues } from "./queue";
 import { buildTriggerEnvelope } from "./trigger-envelope";
 
+/** Draft persistence is lossless: invalid graphs throw instead of becoming fake zero-step definitions. */
 export function persistBuilderDraft(graph: unknown) {
   const def = graphToFlowDefinition(graph);
   return { ...def, builderGraph: graph };
@@ -20,16 +19,7 @@ export async function ensureFlowVersion(opts: { orgId: string; flowId: string; d
 export async function loadConnectionSecret(connectionId: string | null | undefined, orgId: string) { if (!connectionId) return null; try { const { ensureFreshToken } = await import("./oauth-refresh"); const piece = await queryOne<{ piece_name: string }>(`SELECT piece_name FROM connections WHERE id=$1 AND org_id=$2`, [connectionId,orgId]); const fresh = await ensureFreshToken(connectionId,orgId,piece?.piece_name ?? ""); if (fresh) return fresh; } catch {} const row = await queryOne<{ ciphertext: Buffer | null; encrypted_payload: unknown }>(`SELECT ciphertext,encrypted_payload FROM connections WHERE id=$1 AND org_id=$2`, [connectionId,orgId]); if (!row) return null; if (row.ciphertext) return decryptJson(row.ciphertext,orgId); if (row.encrypted_payload && typeof row.encrypted_payload === "object") { const blob = row.encrypted_payload as { _enc?: string }; if (blob._enc) return decryptJson(Buffer.from(blob._enc,"base64"),orgId); return row.encrypted_payload as Record<string,unknown>; } return null; }
 export async function sealConnectionSecret(orgId: string, credentials: Record<string, unknown>) { const buf = encryptJson(credentials,orgId); return { ciphertext: buf, encrypted_payload: { _enc: buf.toString("base64") } }; }
 
-function stepTypeOf(node: WorkflowGraph["nodes"][number]) { if (node.appSlug === "filter") return "filter"; if (node.appSlug === "paths") return node.operation === "branch" ? "branch" : "router"; if (node.appSlug === "loop") return "loop"; if (node.appSlug === "delay") return "delay"; if (node.appSlug === "approval") return "approval"; if (node.appSlug === "code") return "code"; if (node.appSlug === "http") return "http"; if (["openai","anthropic","gemini","ai"].includes(node.appSlug)) return "ai"; if (node.appSlug === "agents") return "agent"; if (node.appSlug === "tables") return "data_table"; if (node.appSlug === "subflow") return "sub_flow"; return "piece_action"; }
-function children(graph: WorkflowGraph,nodeId: string,handle?: string|null) { return graph.edges.filter((e) => e.source === nodeId && (handle == null || e.sourceHandle === handle)).map((e) => graph.nodes.find((n) => n.id === e.target)).filter((n): n is WorkflowGraph["nodes"][number] => Boolean(n)); }
-function resolveStepInput(node: WorkflowGraph["nodes"][number],ctx:{trigger:Record<string,unknown>;steps:Record<string,Record<string,unknown>>;vars?:Record<string,unknown>;item?:unknown}) { return resolveValue({...(node.config ?? {})},{trigger:ctx.trigger ?? {},steps:ctx.steps,vars:ctx.vars ?? {},item:ctx.item}) as Record<string,unknown>; }
-function compareCondition(operator:string,left:unknown,right:unknown): boolean { switch(operator) { case "equals":case "eq":return left===right||String(left)===String(right); case "not_equals":case "neq":return !(left===right||String(left)===String(right)); case "contains":return Array.isArray(left)?left.includes(right):String(left ?? "").includes(String(right ?? "")); case "not_contains":return !compareCondition("contains",left,right); case "starts_with":return String(left ?? "").startsWith(String(right ?? "")); case "ends_with":return String(left ?? "").endsWith(String(right ?? "")); case "gt":return Number(left)>Number(right); case "gte":return Number(left)>=Number(right); case "lt":return Number(left)<Number(right); case "lte":return Number(left)<=Number(right); case "exists":case "not_empty":return left!==undefined&&left!==null&&left!==""; case "not_exists":case "empty":return left===undefined||left===null||left===""; default:return false; } }
-function graphCondition(node:WorkflowGraph["nodes"][number],ctx:{trigger:Record<string,unknown>;steps:Record<string,Record<string,unknown>>;vars?:Record<string,unknown>;item?:unknown}) { const cfg=node.config ?? {}; const scope={trigger:ctx.trigger,steps:ctx.steps,vars:ctx.vars ?? {},item:ctx.item}; return compareCondition(String(cfg.operator ?? "equals"),resolveValue(cfg.left,scope),resolveValue(cfg.right,scope)); }
-
-async function executeNode(opts:{node:WorkflowGraph["nodes"][number];ctx:{trigger:Record<string,unknown>;steps:Record<string,Record<string,unknown>>;vars?:Record<string,unknown>;item?:unknown};orgId:string;runId:string;graph?:WorkflowGraph;allowSamples?:boolean}) { const {node,ctx,orgId,runId}=opts; if(node.type==="trigger"||!node.operation)return {output:{...(ctx.trigger ?? {}),appSlug:node.appSlug,operation:node.operation},input:{...(node.config ?? {})} as Record<string,unknown>}; const app=getApp(node.appSlug); const op=app?.operations.find((o)=>o.key===node.operation); const auth=await loadConnectionSecret(node.connectionId,orgId); const input=resolveStepInput(node,ctx); try { const result=await runAdapter({appSlug:node.appSlug,operation:node.operation,input,auth,workspaceId:orgId,executionId:runId,connectionId:node.connectionId ?? undefined}); return {output:result.output ?? {},input}; } catch(err) { if(opts.allowSamples&&op?.outputSample&&/No live adapter/.test(err instanceof Error?err.message:""))return {output:{...(op.outputSample as Record<string,unknown>),_sample:true},input}; throw err; } }
-
-/** Canonical Test Step: the API creates a durable test run and the worker's
- * production Executor performs the step. The engine stops at the target node. */
+/** Test Step uses the exact durable production path and stops the canonical Executor at the requested node. */
 export async function testFlowStep(opts:{orgId:string;flowId:string;nodeId:string;graph:unknown;inputs?:Record<string,unknown>}) {
   const graph = loadBuilderGraph(opts.graph);
   if (!graph.nodes.some((n) => n.id === opts.nodeId)) throw new Error("Step not found");
