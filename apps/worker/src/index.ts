@@ -13,39 +13,59 @@ const db = new Db(databaseUrl);
 const transitionQueue = new Queue("flow-steps", { connection });
 const engineDb = createEngineDb(db);
 
-// The canonical FlowDefinition contains both piece_action and schema-native
-// leaf steps. Every leaf must resolve to the same adapter bridge; otherwise a
-// valid HTTP/Code/AI/Agent/Table workflow can reach the durable worker and fail
-// with NO_HANDLER while the interactive runtime succeeds.
-const canonicalLeafTypes = [
-  "piece_action",
-  "http",
-  "code",
-  "ai",
-  "agent",
-  "data_table",
-];
+const canonicalLeafTypes = ["piece_action", "http", "code", "ai", "agent", "data_table"];
 const handlers = new Map(canonicalLeafTypes.map((type) => [type, adapterStepHandler] as const));
 const executor = new Executor(engineDb, { flowStep: transitionQueue }, handlers);
+
+async function recoverQueuedRuns() {
+  const result = await db.service.query(
+    `SELECT id, cursor, transition_epoch FROM flow_runs
+     WHERE status = 'queued'
+     ORDER BY created_at ASC
+     LIMIT 100`,
+  );
+  for (const row of result.rows) {
+    try {
+      await transitionQueue.add(
+        "transition",
+        { runId: String(row.id), cursor: Number(row.cursor ?? 0), epoch: Number(row.transition_epoch ?? 0) },
+        { jobId: `recover-${row.id}-${row.cursor ?? 0}-${row.transition_epoch ?? 0}`, removeOnComplete: 1000, removeOnFail: 5000 },
+      );
+    } catch (error) {
+      console.error(`Unable to recover queued flow ${row.id}`, error);
+    }
+  }
+}
 
 const flowWorker = new Worker(
   "flow-steps",
   async (job) => {
-    if (job.data.kind === "resume") {
-      await executor.resume(String(job.data.runId));
-      return;
+    const runId = String(job.data.runId);
+    try {
+      if (job.data.kind === "resume") {
+        await executor.resume(runId);
+        return;
+      }
+      await executor.transition(
+        runId,
+        Number(job.data.cursor ?? 0),
+        Number(job.data.epoch ?? 0),
+      );
+    } catch (error) {
+      // The Executor owns normal state transitions. This boundary handles
+      // unexpected infrastructure/contract failures so a run can never remain
+      // permanently queued/running merely because the BullMQ job failed.
+      try {
+        await engineDb.flowRuns.fail(runId, error);
+      } catch (failError) {
+        console.error(`Unable to persist failure for flow ${runId}`, failError);
+      }
+      throw error;
     }
-    await executor.transition(
-      String(job.data.runId),
-      Number(job.data.cursor ?? 0),
-      Number(job.data.epoch ?? 1),
-    );
   },
   { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10) },
 );
 
-// Compatibility worker remains only for the legacy executions queue. New
-// flow_runs must always execute through the canonical durable Executor above.
 const legacyWorker = new Worker(
   "executions",
   async (job) => {
@@ -62,9 +82,16 @@ legacyWorker.on("completed", (job) => console.log(`Legacy execution ${job.data.e
 legacyWorker.on("failed", (job, err) => console.error(`Legacy execution ${job?.data?.executionId ?? "unknown"} failed`, err));
 legacyWorker.on("error", (err) => console.error("Legacy worker error", err));
 
+// DB commit and Redis enqueue are intentionally separate operations. This
+// lightweight sweeper closes that failure window: if the API commits a queued
+// run but crashes before enqueueing, the worker discovers and enqueues it.
+const recoveryTimer = setInterval(() => void recoverQueuedRuns(), 10_000);
+void recoverQueuedRuns();
+
 console.log("Worker listening on flow-steps and executions queues");
 
 const shutdown = async () => {
+  clearInterval(recoveryTimer);
   await Promise.all([flowWorker.close(), legacyWorker.close(), transitionQueue.close()]);
   await connection.quit();
   await db.close();
