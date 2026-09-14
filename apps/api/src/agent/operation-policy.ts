@@ -1,4 +1,4 @@
-import type { AgentOperation } from "../agent-operation-applier";
+import type { AgentOperation } from "./operations";
 
 export type AgentOperationRisk = "safe" | "confirmation" | "external";
 

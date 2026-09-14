@@ -42,6 +42,13 @@ function rawJsonWhenPost(req: express.Request, res: express.Response, next: expr
   return express.raw({ type: "application/json" })(req, res, () => captureRawJson(req, res, next));
 }
 
+// HMAC verification signs the ORIGINAL request bytes. Buffer them for every
+// webhook ingress route before express.json() consumes the stream.
+function rawJsonInbound(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (req.method !== "POST") return next();
+  return express.raw({ type: "*/*" })(req, res, () => captureRawJson(req, res, next));
+}
+
 function schedulerAuthorized(req: express.Request) {
   const configured = process.env.SCHEDULER_SECRET;
   if (!configured) return false;
@@ -51,8 +58,7 @@ function schedulerAuthorized(req: express.Request) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-app.use("/api/v1/webhooks/stripe", rawJsonWhenPost);
-app.use("/api/v1/webhooks/whatsapp", rawJsonWhenPost);
+app.use("/api/v1/webhooks/inbound", rawJsonInbound);
 app.use(express.json({ limit: "2mb" }));
 app.use(health);
 app.use("/mcp", mcpHttp);

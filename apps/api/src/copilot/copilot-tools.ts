@@ -12,7 +12,8 @@ import { persistBuilderDraft, loadBuilderGraph } from "../flow-runtime";
 import { pickForCopilot } from "../connections";
 import { pieceRegistry } from "../pieces/registry";
 import { validateWorkflowGraph } from "../workflow-validation";
-import { applyAgentOperations, type AgentOperation } from "../agent-operation-applier";
+import { applyAgentOperations } from "../agent-operation-applier";
+import type { AgentOperation } from "../agent/operations";
 
 export interface CopilotToolContext {
   workspaceId: string;

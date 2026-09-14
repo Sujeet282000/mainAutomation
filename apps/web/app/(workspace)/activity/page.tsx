@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { Activity, Ban, CheckCircle2, ChevronDown, ChevronUp, Clock3, LayoutGrid, List, RefreshCw, Search, XCircle } from "lucide-react";
@@ -37,7 +37,10 @@ function duration(r: Run) {
 
 const CANCELLABLE = new Set(["queued", "running", "paused", "waiting"]);
 
-export default function ActivityPage() {
+// useSearchParams() in a client page requires a Suspense boundary, otherwise
+// Next 15 static prerendering fails with "useSearchParams should be wrapped in
+// a suspense boundary" and `next build` exits non-zero.
+function ActivityInner() {
   const qc = useQueryClient();
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
@@ -295,5 +298,13 @@ export default function ActivityPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ActivityPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-sm text-ink-muted">Loading activity…</div>}>
+      <ActivityInner />
+    </Suspense>
   );
 }

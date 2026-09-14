@@ -2,9 +2,10 @@
 // Orchestra Part 6 — Webhook Ingress
 // Source of truth: Part 6 § "Webhook ingress on Fastify"
 //
-// Authenticates raw payload before JSON parsing (providers sign original bytes).
-// Looks up opaque token, enforces org bucket, rejects replayed events,
-// acknowledges after one Redis enqueue. Never runs a flow inline.
+// The ONE production webhook execution path. Authenticates the raw payload
+// (providers sign original bytes), looks up the opaque token, rejects replayed
+// events, durably claims a flow_run via createAndRunFlow, then acknowledges.
+// Never runs a flow inline and never double-writes to another queue.
 // =============================================================================
 
 import { Router, type Request, type Response } from "express";
@@ -69,6 +70,13 @@ async function isDuplicate(eventId: string): Promise<boolean> {
   return isDuplicateMemory(eventId);
 }
 
+/** Length-safe constant-time hex comparison (timingSafeEqual throws on length mismatch). */
+function safeEqualHex(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
 // POST /v1/webhooks/inbound/:token
 webhookRouter.post("/v1/webhooks/inbound/:token", async (req: Request, res: Response) => {
   const token = String(req.params.token);
@@ -101,20 +109,25 @@ webhookRouter.post("/v1/webhooks/inbound/:token", async (req: Request, res: Resp
       return res.status(429).json({ error: "rate_limited" });
     }
 
-    // 3. Optional HMAC signature verification
+    // 3. Optional HMAC signature verification against the stored secret.
+    // The secret is persisted (base64) in webhook_secret_hash by the
+    // activation service; providers sign the ORIGINAL bytes, which index.ts
+    // preserves on req.rawBody for this route.
     if (trigger.webhook_secret_hash) {
-      const signature = req.headers["x-webhook-signature"] as string | undefined;
+      const signature = String(req.headers["x-webhook-signature"] ?? "").replace(/^sha256=/i, "");
       if (!signature) {
         return res.status(401).json({ error: "missing_signature" });
       }
 
-      const rawBody = String((req as any).rawBody ?? JSON.stringify(req.body));
+      const rawBody = req.rawBody?.length
+        ? req.rawBody
+        : Buffer.from(JSON.stringify(req.body ?? {}));
       const expected = crypto
         .createHmac("sha256", trigger.webhook_secret_hash)
         .update(rawBody)
         .digest("hex");
 
-      if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+      if (!safeEqualHex(expected, signature)) {
         return res.status(401).json({ error: "invalid_signature" });
       }
     }
@@ -124,73 +137,59 @@ webhookRouter.post("/v1/webhooks/inbound/:token", async (req: Request, res: Resp
       (req.headers["x-webhook-id"] as string) ||
       (req.headers["x-event-id"] as string) ||
       (req.headers["x-github-delivery"] as string) ||
-      (req.headers["stripe-signature"] as string) ||
       null;
 
     if (eventId && (await isDuplicate(eventId))) {
-      // Already processed — return 200 to prevent retries
+      // Already processed — return 200 so the provider stops retrying.
       return res.status(200).json({ ok: true, deduplicated: true });
     }
 
-    // 5. Enqueue the event for processing
-    // In production, this publishes to a BullMQ queue
-    const payload = {
-      triggerId: trigger.id,
-      orgId: trigger.org_id,
-      flowId: trigger.flow_id,
-      flowVersionId: trigger.flow_version_id,
-      pieceName: trigger.piece_name,
-      operationId: trigger.operation_id,
-      connectionId: trigger.connection_id,
-      eventId,
-      body: req.body,
-      headers: {
-        "content-type": req.headers["content-type"],
-        "user-agent": req.headers["user-agent"],
-      },
-      receivedAt: new Date().toISOString(),
-    };
-
-    // Publish to Redis for worker pickup
-    // Enqueue via DB fallback (production uses Redis/BullMQ)
-    await query(
-      `INSERT INTO queue_jobs (queue_name, payload, status, org_id)
-       VALUES ('webhook-ingest', $1, 'pending', $2)`,
-      [JSON.stringify(payload), trigger.org_id],
+    // 5. Dispatch through the ONE canonical execution path. createAndRunFlow
+    // durably claims the run (trigger_events idempotency + flow_runs row)
+    // before this handler acknowledges; the worker owns execution. No
+    // secondary queue write — the flow-steps enqueue happens inside
+    // createAndRunFlow.
+    const payload = (req.body && typeof req.body === "object" ? req.body : { body: req.body }) as Record<string, unknown>;
+    const member = await queryOne<{ user_id: string }>(
+      `SELECT user_id FROM org_members WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+      [trigger.org_id],
     );
+    if (!member) {
+      console.error(`Webhook ingress: no member found for org ${trigger.org_id}`);
+      return res.status(500).json({ error: "org_unconfigured" });
+    }
 
     try {
       const { createAndRunFlow } = await import("../flow-runtime");
-      const member = await queryOne<{ user_id: string }>(
-        `SELECT user_id FROM org_members WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
-        [trigger.org_id],
-      );
-      if (member) {
-        await createAndRunFlow({
-          orgId: trigger.org_id,
-          flowId: trigger.flow_id,
-          userId: member.user_id,
-          payload: (req.body && typeof req.body === "object" ? req.body : { body: req.body }) as Record<string, unknown>,
-          triggerKind: "webhook",
-          eventId,
-          idempotencyKey: eventId ? `webhook:${trigger.flow_id}:${eventId}` : undefined,
-          receivedAt: payload.receivedAt,
-        });
-      }
+      await createAndRunFlow({
+        orgId: trigger.org_id,
+        flowId: trigger.flow_id,
+        userId: member.user_id,
+        payload,
+        triggerKind: "webhook",
+        eventId,
+        idempotencyKey: eventId ? `webhook:${trigger.flow_id}:${eventId}` : undefined,
+        receivedAt: new Date().toISOString(),
+      });
     } catch (err) {
-      console.error("Webhook run error:", err);
+      const message = err instanceof Error ? err.message : "dispatch_failed";
+      // Duplicate idempotency claims are success (the run already exists).
+      if (message === "TRIGGER_EVENT_CLAIM_INCOMPLETE") throw err;
+      const duplicate = message.includes("duplicate key") && message.includes("trigger_events");
+      if (duplicate) {
+        const ackMs = Date.now() - startTime;
+        return res.status(200).json({ ok: true, deduplicated: true, ackMs });
+      }
+      throw err;
     }
 
-    // 6. Acknowledge immediately (before downstream processing)
+    // 6. Acknowledge with 202: accepted, execution is asynchronous.
     const ackMs = Date.now() - startTime;
-
-    // Record webhook ack metric (Part 12)
-    // In production: webhookAck.observe({ piece: trigger.piece_name }, ackMs / 1000);
-
-    res.status(202).json({ ok: true, eventId });
+    return res.status(202).json({ ok: true, eventId, ackMs });
   } catch (err) {
     console.error("Webhook ingress error:", err);
-    // Return 200 to prevent provider retries on our internal errors
-    res.status(200).json({ ok: true, internal_error: true });
+    // 5xx so the provider retries. Idempotent handling (event dedup + the
+    // trigger_events claim) makes those retries safe.
+    return res.status(500).json({ error: "internal_error" });
   }
 });

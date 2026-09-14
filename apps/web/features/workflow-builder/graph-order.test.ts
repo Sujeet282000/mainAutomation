@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Edge, Node } from "reactflow";
-import { executionOrderIds, orderNodesByGraph } from "./graph-order";
+import { executionOrderIds, orderNodesByGraph, stepNumbers, nodeStepNumber } from "./graph-order";
 import type { StepData } from "./store";
 
 function node(id: string, kind: StepData["kind"] = "action"): Node<StepData> {
@@ -34,5 +34,37 @@ describe("workflow graph ordering", () => {
     const nodes = [node("trigger", "trigger"), node("a"), node("b")];
     const edges = [edge("trigger", "a"), edge("a", "b"), edge("b", "a")];
     expect(executionOrderIds(nodes, edges)).toEqual(["trigger", "a", "b"]);
+  });
+
+  it("assigns 1..N step numbers from edges, independent of array order", () => {
+    const nodes = [node("trigger", "trigger"), node("e"), node("c"), node("b"), node("a")];
+    const edges = [edge("trigger", "a"), edge("a", "b"), edge("b", "c"), edge("c", "e")];
+    const numbers = stepNumbers(nodes, edges);
+    expect(numbers.get("trigger")).toBe(1);
+    expect(numbers.get("a")).toBe(2);
+    expect(numbers.get("b")).toBe(3);
+    expect(numbers.get("c")).toBe(4);
+    expect(numbers.get("e")).toBe(5);
+    expect(nodeStepNumber("e", nodes, edges)).toBe(5);
+  });
+
+  it("numbers inserted nodes in graph order, not append order", () => {
+    // Trigger → a → b, then insert X between them.
+    const nodes = [node("trigger", "trigger"), node("a"), node("b"), node("x")];
+    const edges = [edge("trigger", "a"), edge("a", "x"), edge("x", "b")];
+    const numbers = stepNumbers(nodes, edges);
+    expect(numbers.get("trigger")).toBe(1);
+    expect(numbers.get("a")).toBe(2);
+    expect(numbers.get("x")).toBe(3);
+    expect(numbers.get("b")).toBe(4);
+  });
+
+  it("numbers parallel branch children deterministically", () => {
+    const nodes = [node("trigger", "trigger"), node("filter"), node("left"), node("right")];
+    const edges = [edge("trigger", "filter"), edge("filter", "left"), edge("filter", "right")];
+    const numbers = stepNumbers(nodes, edges);
+    expect(numbers.get("trigger")).toBe(1);
+    expect(numbers.get("filter")).toBe(2);
+    expect(numbers.get("left")).toBeLessThan(numbers.get("right")!);
   });
 });

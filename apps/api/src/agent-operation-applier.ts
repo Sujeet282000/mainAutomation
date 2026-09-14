@@ -45,7 +45,34 @@ function insertRelative(graph: WorkflowGraph, node: GraphNode, afterNodeId?: str
     if (incoming.length !== 1) throw new Error("beforeNodeId must have exactly one incoming edge; use edgeId for a branch");
     return insertOnEdge(graph, node, incoming[0]);
   }
-  return { ...graph, nodes: [...graph.nodes, node] };
+  // No anchor: chain the node onto the graph instead of leaving it floating.
+  // An unconnected node is unreachable from the trigger and the compiler
+  // rejects it at save time (WORKFLOW_GRAPH_UNREACHABLE_NODE), which used to
+  // turn a whole Copilot plan into a 400.
+  if (graph.nodes.length === 0) return { ...graph, nodes: [node] };
+  const hasIncoming = (id: string) => graph.edges.some((edge) => edge.target === id);
+  const hasOutgoing = (id: string) => graph.edges.some((edge) => edge.source === id);
+  const link = (source: string, target: string): WorkflowGraph => ({
+    ...graph,
+    nodes: [...graph.nodes, node],
+    edges: [...graph.edges, { id: randomUUID(), source, target, sourceHandle: null, condition: null }],
+  });
+  if (node.type === "trigger") {
+    // A new trigger becomes the graph's root: trigger → current root(s).
+    const roots = graph.nodes.map((candidate) => candidate.id).filter((id) => !hasIncoming(id));
+    if (!roots.length) return { ...graph, nodes: [...graph.nodes, node] };
+    return {
+      ...graph,
+      nodes: [...graph.nodes, node],
+      edges: [...graph.edges, ...roots.map((root) => ({ id: randomUUID(), source: node.id, target: root, sourceHandle: null, condition: null }))],
+    };
+  }
+  // Actions append after the first terminal node (no outgoing edges), walking
+  // in declaration order so repeated add_node ops build a linear chain.
+  const terminal = graph.nodes.find((candidate) => candidate.type !== "trigger" && !hasOutgoing(candidate.id))
+    ?? graph.nodes.find((candidate) => !hasOutgoing(candidate.id));
+  if (!terminal) return { ...graph, nodes: [...graph.nodes, node] };
+  return link(terminal.id, node.id);
 }
 
 function addNode(graph: WorkflowGraph, args: Record<string, unknown>): WorkflowGraph {

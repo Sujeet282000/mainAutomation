@@ -59,3 +59,19 @@ export function orderNodesByGraph(nodes: Node<StepData>[], edges: Edge[]): Node<
   const byId = new Map(nodes.map((node) => [node.id, node]));
   return ids.map((id) => byId.get(id)!).filter(Boolean);
 }
+
+/**
+ * Step numbers derived from graph edges (1-based execution position), not the
+ * nodes[] storage order. Numbering and execution must share one source of
+ * truth: the canvas, the test sweep and the inspector all read this map.
+ */
+export function stepNumbers(nodes: Node<StepData>[], edges: Edge[]): Map<string, number> {
+  const ids = executionOrderIds(nodes, edges);
+  const numbers = new Map<string, number>();
+  ids.forEach((id, i) => numbers.set(id, i + 1));
+  return numbers;
+}
+
+export function nodeStepNumber(nodeId: string, nodes: Node<StepData>[], edges: Edge[]): number | undefined {
+  return stepNumbers(nodes, edges).get(nodeId);
+}

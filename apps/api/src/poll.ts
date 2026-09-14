@@ -86,7 +86,7 @@ async function pollTrigger(trigger: Claimed): Promise<number> {
     return 0;
   }
 
-  const cursor = trigger.poll_cursor ?? {};
+  const cursor = (trigger.poll_cursor ?? {}) as Record<string, unknown>;
   const result = await runAdapter({
     appSlug,
     operation,
@@ -97,25 +97,46 @@ async function pollTrigger(trigger: Claimed): Promise<number> {
     connectionId: trigger.connection_id ?? undefined,
   });
 
-  const seen = String((cursor as Record<string, unknown>).lastId ?? "");
-  const id = String((result.output as Record<string, unknown>)?.id ?? (result.output as Record<string, unknown>)?.messageId ?? "");
+  const output = (result.output ?? {}) as Record<string, unknown>;
+  const seen = String(cursor.lastId ?? "");
+  // Adapters can return either a single event ({ id }) or a batch
+  // ({ id: newestId, items: [...] }). Fire one run per unseen event so
+  // messages that arrive between two polls are not collapsed/lost.
+  const batch = Array.isArray(output.items) && output.items.length ? (output.items as Array<Record<string, unknown>>) : [output];
+  const events = batch
+    .map((item) => ({
+      id: String(item?.id ?? item?.messageId ?? ""),
+      item,
+    }))
+    .filter((event) => event.id && event.id !== seen);
+  // Oldest first so downstream runs execute in the order the events happened.
+  events.reverse();
+
   let fired = 0;
-  if (id && id !== seen) {
-    if (seen) {
-      await createAndRunFlow({
-        orgId: trigger.org_id,
-        flowId: trigger.flow_id,
-        userId: "scheduler",
-        triggerKind: "polling",
-        payload: result.output as Record<string, unknown>,
-        idempotencyKey: `poll:${trigger.flow_id}:${id}`,
-      });
-      fired += 1;
-    }
+  const seenIds = new Set<string>(seen ? [seen] : []);
+  for (const event of events) {
+    // Skip ids already fired by a previous poll (belt-and-braces; createAndRunFlow
+    // also dedupes via the trigger_events idempotency claim).
+    if (seenIds.has(event.id)) continue;
+    seenIds.add(event.id);
+    // The very first poll only primes the cursor — a brand-new trigger should
+    // not replay the provider's entire history.
+    if (!seen) break;
+    await createAndRunFlow({
+      orgId: trigger.org_id,
+      flowId: trigger.flow_id,
+      userId: "scheduler",
+      triggerKind: "polling",
+      payload: event.item,
+      idempotencyKey: `poll:${trigger.flow_id}:${event.id}`,
+    });
+    fired += 1;
   }
+
+  const newestId = String(output.id ?? events[events.length - 1]?.id ?? seen);
   await query(
     `UPDATE triggers_registry SET poll_cursor = $2::jsonb, updated_at = now() WHERE id = $1`,
-    [trigger.id, JSON.stringify({ lastId: id || seen, polledAt: new Date().toISOString() })],
+    [trigger.id, JSON.stringify({ lastId: newestId || seen, polledAt: new Date().toISOString() })],
   );
   return fired;
 }

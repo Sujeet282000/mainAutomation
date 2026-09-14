@@ -3,7 +3,8 @@ import { z } from "zod";
 import { coerceWorkflowGraph } from "@algoverge/core";
 import { query, queryOne } from "../db";
 import { authMiddleware, orgMiddleware, requireRole } from "../auth";
-import { applyAgentOperations, type AgentOperation } from "../agent-operation-applier";
+import { applyAgentOperations } from "../agent-operation-applier";
+import type { AgentOperation } from "../agent/operations";
 import { persistBuilderDraft, loadBuilderGraph } from "../flow-runtime";
 
 export const copilotApprovalRouter = Router();

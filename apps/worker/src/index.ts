@@ -1,7 +1,6 @@
 import { Queue, Worker } from "bullmq";
 import { Db } from "@algoverge/db";
 import { Executor } from "@algoverge/engine";
-import { runExecution } from "../../api/src/engine";
 import { connection } from "./redis";
 import { adapterStepHandler } from "./adapter-handler";
 import { createEngineDb } from "./engine-db";
@@ -66,21 +65,9 @@ const flowWorker = new Worker(
   { connection, concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10) },
 );
 
-const legacyWorker = new Worker(
-  "executions",
-  async (job) => {
-    const executionId = String(job.data.executionId);
-    await runExecution(executionId);
-  },
-  { connection, concurrency: Number(process.env.LEGACY_WORKER_CONCURRENCY ?? 5) },
-);
-
 flowWorker.on("completed", (job) => console.log(`Flow run ${job.data.runId} transition completed`));
 flowWorker.on("failed", (job, err) => console.error(`Flow run ${job?.data?.runId ?? "unknown"} failed`, err));
 flowWorker.on("error", (err) => console.error("Flow worker error", err));
-legacyWorker.on("completed", (job) => console.log(`Legacy execution ${job.data.executionId} completed`));
-legacyWorker.on("failed", (job, err) => console.error(`Legacy execution ${job?.data?.executionId ?? "unknown"} failed`, err));
-legacyWorker.on("error", (err) => console.error("Legacy worker error", err));
 
 // DB commit and Redis enqueue are intentionally separate operations. This
 // lightweight sweeper closes that failure window: if the API commits a queued
@@ -88,11 +75,11 @@ legacyWorker.on("error", (err) => console.error("Legacy worker error", err));
 const recoveryTimer = setInterval(() => void recoverQueuedRuns(), 10_000);
 void recoverQueuedRuns();
 
-console.log("Worker listening on flow-steps and executions queues");
+console.log("Worker listening on flow-steps queue");
 
 const shutdown = async () => {
   clearInterval(recoveryTimer);
-  await Promise.all([flowWorker.close(), legacyWorker.close(), transitionQueue.close()]);
+  await Promise.all([flowWorker.close(), transitionQueue.close()]);
   await connection.quit();
   await db.close();
 };

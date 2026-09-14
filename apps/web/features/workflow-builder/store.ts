@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { Edge, Node } from "reactflow";
 import { orderNodesByGraph } from "./graph-order";
+import { wouldCreateCycle } from "./graph-validation";
 
 export type StepData = {
   label: string;
@@ -25,6 +26,8 @@ type BuilderState = {
   setGraph: (nodes: Node<StepData>[], edges: Edge[], pushHistory?: boolean) => void;
   updateNode: (id: string, patch: Partial<StepData>) => void;
   removeNode: (id: string) => void;
+  insertNodeAfterNode: (afterNodeId: string, data: StepData) => string | null;
+  connectNodes: (source: string, target: string, sourceHandle?: string | null) => boolean;
   undo: () => void;
   redo: () => void;
   markSaved: () => void;
@@ -101,6 +104,53 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
 
     cur.setGraph(nodes, edges);
     if (cur.selectedId === id) get().setSelected(nodes[0]?.id ?? null);
+  },
+  insertNodeAfterNode: (afterNodeId, data) => {
+    const cur = get();
+    const after = cur.nodes.find((n) => n.id === afterNodeId);
+    if (!after) return null;
+
+    const id = `${data.appSlug || "step"}-${Date.now()}`;
+    const node: Node<StepData> = { id, type: "step", position: { x: 0, y: 0 }, data };
+    const outgoing = cur.edges.filter((e) => e.source === afterNodeId);
+
+    let nextEdges: Edge[];
+    if (outgoing.length) {
+      // A → B becomes A → NEW → B for the first successor; multi-branch nodes
+      // keep their other handles untouched (each handle splices its own edge).
+      const first = outgoing[0];
+      nextEdges = cur.edges
+        .filter((e) => e.id !== first.id)
+        .concat([
+          { id: `e-${afterNodeId}-${id}`, source: afterNodeId, target: id, sourceHandle: first.sourceHandle, type: "plus" },
+          { id: `e-${id}-${first.target}`, source: id, target: first.target, type: "plus" }
+        ]);
+    } else {
+      // Terminal node: just append A → NEW.
+      nextEdges = [...cur.edges, { id: `e-${afterNodeId}-${id}`, source: afterNodeId, target: id, type: "plus" }];
+    }
+
+    cur.setGraph([...cur.nodes, node], nextEdges);
+    return id;
+  },
+  connectNodes: (source, target, sourceHandle) => {
+    const cur = get();
+    if (source === target) return false;
+    if (!cur.nodes.some((n) => n.id === source) || !cur.nodes.some((n) => n.id === target)) return false;
+    const edge: Edge = {
+      id: `e-${source}-${target}${sourceHandle ? `-${sourceHandle}` : ""}`,
+      source,
+      target,
+      ...(sourceHandle ? { sourceHandle } : {}),
+      type: "plus"
+    };
+    const key = `${edge.source}->${edge.target}:${edge.sourceHandle ?? ""}`;
+    if (cur.edges.some((e) => `${e.source}->${e.target}:${e.sourceHandle ?? ""}` === key)) return false;
+    // Structural edits must never build a cyclic graph: the compiler rejects
+    // cycles at save time, so reject them here where the user is still looking.
+    if (wouldCreateCycle(cur.edges, source, target)) return false;
+    cur.setGraph(cur.nodes, [...cur.edges, edge]);
+    return true;
   },
   undo: () => {
     const past = get().past;

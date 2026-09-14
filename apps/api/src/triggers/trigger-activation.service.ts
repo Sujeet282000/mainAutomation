@@ -107,10 +107,23 @@ export class TriggerActivationService {
         ? randomBytes(32).toString("base64url")
         : null;
 
+    // Webhook HMAC secret: generated once per trigger and persisted (base64 in
+    // the webhook_secret_hash BYTEA column). The ingress verifies
+    // x-webhook-signature = HMAC_SHA256(secret, rawBody). On republish the
+    // existing secret is kept so provider-side configuration survives.
+    const webhookSecret =
+      trigger.type === "webhook" ? randomBytes(32).toString("base64") : null;
+
+    // Schedule triggers honor the user's configured timezone (fallback UTC);
+    // the scheduler computes next_poll_at from the registry's cron + timezone.
+    const timezone = typeof trigger.props?.timezone === "string" && trigger.props.timezone.trim()
+      ? trigger.props.timezone.trim()
+      : "UTC";
+
     // Upsert trigger registration
     await query(
-      `INSERT INTO triggers_registry (org_id, flow_id, flow_version_id, kind, operation_id, connection_id, piece_name, webhook_token, cron_expr, timezone, enabled, status, next_poll_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, 'active', $11)
+      `INSERT INTO triggers_registry (org_id, flow_id, flow_version_id, kind, operation_id, connection_id, piece_name, webhook_token, webhook_secret_hash, cron_expr, timezone, enabled, status, next_poll_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, 'active', $12)
        ON CONFLICT (flow_id) WHERE status = 'active'
        DO UPDATE SET flow_version_id = EXCLUDED.flow_version_id,
                      operation_id = EXCLUDED.operation_id,
@@ -131,8 +144,9 @@ export class TriggerActivationService {
         trigger.connectionId ?? null,
         trigger.piece?.name ?? null,
         webhookToken,
+        webhookSecret ? Buffer.from(webhookSecret, "utf8") : null,
         trigger.props?.expression ?? null,
-        "UTC",
+        timezone,
         trigger.type === "schedule" ? new Date() : null,
       ],
     );

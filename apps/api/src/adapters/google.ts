@@ -121,30 +121,38 @@ export async function testGoogleConnection(auth: Record<string, unknown>, connec
 }
 
 registerAdapter("gmail", "new_email", async (ctx) => {
+  // Poll a window of messages (newest first). The polling dispatcher fires one
+  // run per unseen message, so emails that arrive between two polls are no
+  // longer collapsed into just the newest one.
   const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
-  url.searchParams.set("maxResults", "1");
+  url.searchParams.set("maxResults", "10");
   url.searchParams.set("q", String(ctx.input.query ?? ""));
   const listing = await googleFetch(ctx, url.toString(), { method: "GET" }, "Gmail poll");
-  const messageId = String((listing.messages as Array<{ id?: string }> | undefined)?.[0]?.id ?? "");
-  if (!messageId) return { output: {} };
-  const message = await googleFetch(
-    ctx,
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
-    { method: "GET" },
-    "Gmail message"
-  );
-  const headers = (message.payload as { headers?: Array<{ name?: string; value?: string }> } | undefined)?.headers ?? [];
-  const header = (name: string) => headers.find((item) => item.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
-  return {
-    output: {
+  const listed = (listing.messages as Array<{ id?: string }> | undefined) ?? [];
+  const items: Array<Record<string, unknown>> = [];
+  for (const entry of listed) {
+    const messageId = String(entry.id ?? "");
+    if (!messageId) continue;
+    const message = await googleFetch(
+      ctx,
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
+      { method: "GET" },
+      "Gmail message"
+    );
+    const headers = (message.payload as { headers?: Array<{ name?: string; value?: string }> } | undefined)?.headers ?? [];
+    const header = (name: string) => headers.find((item) => item.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
+    items.push({
       id: String(message.id ?? messageId),
       threadId: String(message.threadId ?? ""),
       from: header("from"),
       subject: header("subject"),
       snippet: String(message.snippet ?? ""),
       receivedAt: String(message.internalDate ?? "")
-    }
-  };
+    });
+  }
+  // Newest-first as returned by Gmail; `id` stays the newest message id for
+  // single-message consumers.
+  return { output: { id: items[0]?.id ?? "", items } };
 });
 registerAdapter("gmail", "send_email", async (ctx) => {
   const to = requireValue(ctx.input, "to", "To");

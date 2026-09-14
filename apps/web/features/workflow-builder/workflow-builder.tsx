@@ -8,11 +8,14 @@ import ReactFlow, {
   BackgroundVariant,
   MarkerType,
   ReactFlowProvider,
-  addEdge,
+  applyEdgeChanges,
+  applyNodeChanges,
   useReactFlow,
   type Connection,
   type Edge,
-  type Node
+  type EdgeChange,
+  type Node,
+  type NodeChange
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
@@ -40,6 +43,7 @@ import { SearchableEventList, SearchableValuePicker } from "./searchable-value-p
 import { type RunState } from "./step-node";
 import { PlusEdge } from "./plus-edge";
 import { layoutFlow } from "./layout-flow";
+import { orderNodesByGraph, stepNumbers } from "./graph-order";
 import { useBuilderStore, type StepData } from "./store";
 import { normalizeGraph } from "@/lib/normalize-graph";
 import { AppPickerModal, type PickerTab } from "./app-picker-modal";
@@ -163,6 +167,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const setGraph = useBuilderStore((s) => s.setGraph);
   const updateNode = useBuilderStore((s) => s.updateNode);
   const removeNode = useBuilderStore((s) => s.removeNode);
+  const insertNodeAfterNode = useBuilderStore((s) => s.insertNodeAfterNode);
+  const connectNodes = useBuilderStore((s) => s.connectNodes);
   const undo = useBuilderStore((s) => s.undo);
   const redo = useBuilderStore((s) => s.redo);
   const markSaved = useBuilderStore((s) => s.markSaved);
@@ -196,7 +202,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const testResultRef = useRef(testResult);
   testResultRef.current = testResult;
   const [runStates, setRunStates] = useState<Record<string, RunState>>({});
-  const [appPicker, setAppPicker] = useState<{ kind: "trigger" | "action"; nodeId?: string; edgeId?: string } | null>(null);
+  const [appPicker, setAppPicker] = useState<{ kind: "trigger" | "action"; nodeId?: string; edgeId?: string; afterNodeId?: string } | null>(null);
   const [testedSteps, setTestedSteps] = useState<Record<string, boolean>>({});
   /* Per-step error messages + link target for the run detail page (/activity/[id]).
      Filled from the run SSE stream; cleared when a new test starts. */
@@ -424,8 +430,46 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   }, [automationId, dirty, edges, nodes, title]);
 
   const onConnect = useCallback(
-    (c: Connection) => commit(nodes, addEdge({ ...c, type: "plus" }, edges)),
-    [commit, edges, nodes]
+    (c: Connection) => {
+      if (!c.source || !c.target) return;
+      // Structural connects go through the store, which validates the edge and
+      // rejects cycles before they can reach save/publish.
+      if (!connectNodes(c.source, c.target, c.sourceHandle)) {
+        setMsg("This connection would create a loop. Loops are not supported — use Paths for branching.");
+      }
+    },
+    [connectNodes]
+  );
+
+  /* React Flow controlled-state handlers: selection/hover/position changes
+     flow through here. Structural edits (add/remove/connect) go through the
+     store's graph operations; position-only changes never re-layout and never
+     push history until the drag ends. */
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      if (!changes.length) return;
+      setGraph(applyNodeChanges(changes, nodes), edges, false);
+    },
+    [setGraph, nodes, edges]
+  );
+
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      if (!changes.length) return;
+      setGraph(nodes, applyEdgeChanges(changes, edges), false);
+    },
+    [setGraph, nodes, edges]
+  );
+
+  const onNodeDragStop = useCallback(
+    (_: unknown, dragged: Node) => {
+      setGraph(
+        nodes.map((n) => (n.id === dragged.id ? { ...n, position: dragged.position } : n)),
+        edges,
+        true
+      );
+    },
+    [setGraph, nodes, edges]
   );
 
   const tokens: DataToken[] = useMemo(() => {
@@ -452,9 +496,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     return out;
   }, [apps, nodes, selected]);
 
-  function openPicker(kind: "trigger" | "action", nodeId?: string, edgeId?: string, tab: PickerTab = "home") {
+  function openPicker(kind: "trigger" | "action", nodeId?: string, edgeId?: string, tab: PickerTab = "home", afterNodeId?: string) {
     setPickerTab(tab);
-    setAppPicker({ kind, nodeId, edgeId });
+    setAppPicker({ kind, nodeId, edgeId, afterNodeId });
   }
 
   function insertOnEdge(edgeId: string, data: StepData) {
@@ -555,6 +599,18 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       setAppPicker(null);
       return;
     }
+    if (appPicker?.afterNodeId) {
+      // "Add step" on a node inserts AFTER that node (splicing its first
+      // outgoing edge), never relative to the nodes[] array.
+      const newId = insertNodeAfterNode(appPicker.afterNodeId, data);
+      if (newId) {
+        setSelected(newId);
+        setInspectorTab("setup");
+      }
+      setTestResult(null);
+      setAppPicker(null);
+      return;
+    }
     const targetId =
       appPicker?.nodeId ??
       nodes.find((n) =>
@@ -580,7 +636,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     }
     const id = `${app.slug}-${opKey(op)}-${Date.now()}`;
     const node: Node<StepData> = { id, type: "step", position: { x: 0, y: 0 }, data };
-    const last = nodes[nodes.length - 1];
+    // Append after the graph's LAST node in execution order, not the array's.
+    const ordered = orderNodesByGraph(nodes, edges);
+    const last = ordered[ordered.length - 1] ?? nodes[nodes.length - 1];
     const nextEdges = last
       ? [...edges, { id: `e-${last.id}-${id}`, source: last.id, target: id, type: "plus" } as Edge]
       : edges;
@@ -617,15 +675,21 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     return apps.find((app) => app.slug === slug);
   }
 
+  /* Canonical execution order derived from edges — the single source of truth
+     for step numbers, the test sweep and inspector navigation. The nodes[]
+     array is a storage/rendering collection only. */
+  const orderedNodes = useMemo(() => orderNodesByGraph(nodes, edges), [nodes, edges]);
+  const stepIndex = useMemo(() => stepNumbers(nodes, edges), [nodes, edges]);
+
   const displayNodes = useMemo(
     () =>
-      nodes.map((n, i) => ({
+      nodes.map((n) => ({
         ...n,
         type: "step",
         hidden: false,
         data: {
           ...n.data,
-          index: i + 1,
+          index: stepIndex.get(n.id) ?? undefined,
           empty: !n.data.operation,
           runState: runStates[n.id] ?? "idle",
           runError: stepErrors[n.id],
@@ -644,10 +708,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             setConnectReplaceId(null);
             setConnectOpen(true);
           },
-          onAddStep: () => openPicker("action", undefined, undefined)
+          onAddStep: () => openPicker("action", undefined, undefined, "home", n.id)
         }
       })),
-    [edges, nodes, runStates, stepErrors, lastRunId, setSelected]
+    [edges, nodes, runStates, stepErrors, lastRunId, setSelected, stepIndex]
   );
 
   const displayEdges = useMemo(
@@ -704,7 +768,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
 
   async function testWorkflow() {
     setBusy("test");
-    const ordered = layoutFlow(nodes, edges);
+    // The test sweep must walk the same execution order the engine will use:
+    // graph edges, not the visual layout function.
+    const ordered = orderNodesByGraph(nodes, edges);
     /* Reset all nodes to idle first, then animate step by step */
     setRunStates({});
     setStepErrors({});
@@ -1010,20 +1076,21 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       ? "To continue, connect an account"
       : "Continue";
   const firstHumanAction = (() => {
-    for (const [i, node] of nodes.entries()) {
+    for (const node of orderedNodes) {
+      const stepNo = stepIndex.get(node.id) ?? "?";
       const app = apps.find((a) => a.slug === node.data.appSlug);
       if (!node.data.appSlug || !node.data.operation) {
-        return `Choose an app and event on step ${i + 1}.`;
+        return `Choose an app and event on step ${stepNo}.`;
       }
       if (app && needsConnection(app) && !node.data.connectionId) {
-        return `Connect ${app.name} on step ${i + 1}. Copilot cannot create that account.`;
+        return `Connect ${app.name} on step ${stepNo}. Copilot cannot create that account.`;
       }
       const op = app?.operations.find((o) => opKey(o) === node.data.operation);
       const missing = (op ? opFields(op) : []).filter((f) => f.required && !String(node.data.config[fieldKey(f)] ?? "").trim());
       const picks = missing.filter((f) => /spreadsheet|worksheet|drive|calendar|channel|event/i.test(f.label));
-      if (picks.length) return `Pick ${picks.map((f) => f.label).join(", ")} in Configure on step ${i + 1}.`;
+      if (picks.length) return `Pick ${picks.map((f) => f.label).join(", ")} in Configure on step ${stepNo}.`;
     }
-    if (nodes.length) return "Test this step, then Publish yourself. Copilot cannot publish.";
+    if (orderedNodes.length) return "Test this step, then Publish yourself. Copilot cannot publish.";
     return undefined;
   })();
 
@@ -1031,7 +1098,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     const youDoFirst: string[] = [];
     const iCan: string[] = [];
     if (!selected) return { youDoFirst, iCan };
-    const idx = nodes.findIndex((n) => n.id === selected.id) + 1;
+    const idx = stepIndex.get(selected.id) ?? nodes.findIndex((n) => n.id === selected.id) + 1;
     const label = `${idx}. ${selected.data.label || "this step"}`;
     if (!selected.data.operation) youDoFirst.push(`Choose an event for ${label}.`);
     else if (selectedApp && needsConnection(selectedApp) && !selected.data.connectionId) {
@@ -1051,7 +1118,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       iCan.push("Add the next action when you say which app (Slack, Sheets, OpenAI…).");
     }
     return { youDoFirst, iCan };
-  }, [selected, selectedApp, selectedOp, configureDone, nodes]);
+  }, [selected, selectedApp, selectedOp, configureDone, nodes, stepIndex]);
 
   function askCopilot(prompt: string) {
     setCopilotOpen(true);
@@ -1428,6 +1495,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             edges={displayEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             onNodeClick={(_, n) => {
               setCtxMenu(null);
@@ -1549,7 +1619,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                   const n = nodes.find((x) => x.id === ctxMenu.nodeId);
                   setConfirmDelete({
                     id: ctxMenu.nodeId,
-                    label: n ? `${nodes.findIndex((x) => x.id === n.id) + 1}. ${n.data.label || n.data.operation || "step"}` : "this step"
+                    label: n ? `${stepIndex.get(n.id) ?? "?"}. ${n.data.label || n.data.operation || "step"}` : "this step"
                   });
                   setCtxMenu(null);
                 }}
@@ -1593,33 +1663,33 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               <div className="flex items-center gap-2 border-b border-line bg-muted/20 px-4 py-3">
                 <AppIcon slug={selected.data.appSlug || "manual"} />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[15px] font-medium">{selected.data.operation ? `${nodes.findIndex((n) => n.id === selected.id) + 1}. ${selected.data.label}` : `${selected.data.kind === "trigger" ? "1. Select the event that starts your Zap" : `${nodes.findIndex((n) => n.id === selected.id) + 1}. Select the event`}`}</div>
+                  <div className="truncate text-[15px] font-medium">{selected.data.operation ? `${stepIndex.get(selected.id) ?? 1}. ${selected.data.label}` : `${selected.data.kind === "trigger" ? "1. Select the event that starts your Zap" : `${stepIndex.get(selected.id) ?? 1}. Select the event`}`}</div>
                 </div>
                 {/* Prev step */}
-                {nodes.length > 1 && (
+                {orderedNodes.length > 1 && (
                   <button
                     type="button"
                     className="rounded-lg p-1.5 text-ink-muted hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed"
                     title="Previous step"
-                    disabled={nodes.findIndex((n) => n.id === selected.id) <= 0}
+                    disabled={orderedNodes.findIndex((n) => n.id === selected.id) <= 0}
                     onClick={() => {
-                      const idx = nodes.findIndex((n) => n.id === selected.id);
-                      if (idx > 0) setSelected(nodes[idx - 1].id);
+                      const idx = orderedNodes.findIndex((n) => n.id === selected.id);
+                      if (idx > 0) setSelected(orderedNodes[idx - 1].id);
                     }}
                   >
                     <ChevronLeft className="h-4 w-4" />
                   </button>
                 )}
                 {/* Next step */}
-                {nodes.length > 1 && (
+                {orderedNodes.length > 1 && (
                   <button
                     type="button"
                     className="rounded-lg p-1.5 text-ink-muted hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed"
                     title="Next step"
-                    disabled={nodes.findIndex((n) => n.id === selected.id) >= nodes.length - 1}
+                    disabled={orderedNodes.findIndex((n) => n.id === selected.id) >= orderedNodes.length - 1}
                     onClick={() => {
-                      const idx = nodes.findIndex((n) => n.id === selected.id);
-                      if (idx < nodes.length - 1) setSelected(nodes[idx + 1].id);
+                      const idx = orderedNodes.findIndex((n) => n.id === selected.id);
+                      if (idx < orderedNodes.length - 1) setSelected(orderedNodes[idx + 1].id);
                     }}
                   >
                     <ChevronRight className="h-4 w-4" />

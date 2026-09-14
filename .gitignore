@@ -19,3 +19,5 @@ apps/ai/.venv
 .freebuff/
 .kilo/
 .cursor/
+.act*.txt
+.req*.json

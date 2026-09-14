@@ -5,40 +5,13 @@ import { query } from "./db";
 
 export const connection = new IORedis(env.redisUrl, { maxRetriesPerRequest: null, lazyConnect: true });
 
+// One canonical execution path: createAndRunFlow() commits a flow_run row and
+// enqueues on "flow-steps"; the worker's Executor consumes that queue. The
+// retired legacy queues (executions/delay/steps/webhooks/hooks/schedules/
+// retries/ai/usage/poll) had no canonical producers or consumers.
 export const queues = {
-  flowSteps: new Queue("flow-steps", { connection }),
-  executions: new Queue("executions", { connection }),
-  exec: new Queue("executions", { connection }),
-  delay: new Queue("delay", { connection }),
-  steps: new Queue("steps", { connection }),
-  webhooks: new Queue("webhooks", { connection }),
-  hooks: new Queue("hooks", { connection }),
-  schedules: new Queue("schedules", { connection }),
-  retries: new Queue("retries", { connection }),
-  ai: new Queue("ai", { connection }),
-  usage: new Queue("usage", { connection }),
-  poll: new Queue("poll", { connection })
+  flowSteps: new Queue("flow-steps", { connection })
 };
-
-export async function enqueueExecution(data: {
-  executionId: string;
-  workspaceId: string;
-  orgId?: string;
-  delayMs?: number;
-}) {
-  await queues.executions.add(
-    "run",
-    { executionId: data.executionId, workspaceId: data.workspaceId, orgId: data.orgId },
-    {
-      jobId: `${data.executionId}-${data.delayMs ? "resume" : "start"}-${Date.now()}`,
-      delay: data.delayMs,
-      attempts: 5,
-      backoff: { type: "exponential", delay: 2000 },
-      removeOnComplete: 1000,
-      removeOnFail: 5000
-    }
-  );
-}
 
 /**
  * Schedule a resume for a paused canonical (flow_runs) run through the

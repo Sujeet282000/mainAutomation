@@ -9,7 +9,8 @@ import { runEnhancedCopilot, buildPlanAtomically } from "./copilot-plan-builder"
 import { parseCopilotMode } from "./copilot-pipeline";
 import { probeAiService, signedAiJson, streamAiCopilotGenerate } from "../ai-service";
 import { listCatalogApps } from "../catalog/catalog";
-import { applyAgentOperations, type AgentOperation } from "../agent-operation-applier";
+import { applyAgentOperations } from "../agent-operation-applier";
+import type { AgentOperation } from "../agent/operations";
 
 const STAGE_FOR_DB: Record<string, string> = { connect: "connections", schema: "schemas", map: "mapping" };
 const PERSISTABLE_EVENTS = new Set(["stage", "reasoning", "proposal", "applied", "todo", "usage", "done", "error"]);
