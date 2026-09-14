@@ -35,7 +35,7 @@ export async function streamSse(
   try {
     res = await fetch(`${API_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal });
   } catch (err) {
-    if (signal?.aborted) return; // intentional abort: stream ends silently
+    if (signal?.aborted) return;
     throw new Error(`Cannot reach the Orchestra API at ${API_URL}. Start the API on port 4000 and retry.`);
   }
   if (!res.ok || !res.body) {
@@ -61,8 +61,6 @@ export async function streamSse(
     try {
       chunk = await reader.read();
     } catch (err) {
-      /* Caller-initiated abort (e.g. after a "done" event) is a normal end
-         of stream — settle the body and return instead of rejecting. */
       if (signal?.aborted) { reader.cancel().catch(() => {}); break; }
       throw err;
     }
@@ -90,8 +88,8 @@ export async function streamGetSse(
   try {
     res = await fetch(`${API_URL}${path}`, { method: "GET", headers, signal });
   } catch (err) {
-    if (signal?.aborted) return; // intentional abort: stream ends silently
-    throw new Error(`Cannot reach the API at ${API_URL}.`);
+    if (signal?.aborted) return;
+    throw new Error(`Cannot reach the Orchestra API at ${API_URL}.`);
   }
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}));
@@ -106,8 +104,6 @@ export async function streamGetSse(
     try {
       chunk = await reader.read();
     } catch (err) {
-      /* Caller-initiated abort (e.g. after a "done" event) is a normal end
-         of stream — settle the body and return instead of rejecting. */
       if (signal?.aborted) { reader.cancel().catch(() => {}); break; }
       throw err;
     }
@@ -122,13 +118,28 @@ export async function streamGetSse(
       for (const line of lines) {
         if (line.startsWith("event: ")) eventType = line.slice(7).trim();
         if (line.startsWith("data: ")) dataLine = line.slice(6);
-        if (line.startsWith(": ")) continue; // heartbeat comment
+        if (line.startsWith(": ")) continue;
       }
       if (dataLine) {
         try { onEvent(eventType, JSON.parse(dataLine)); } catch { /* ignore */ }
       }
     }
   }
+}
+
+function executionFailureMessage(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const body = data as Record<string, unknown>;
+  if (body.ok !== false || typeof body.runId !== "string") return null;
+  const status = typeof body.status === "string" ? body.status : "";
+  if (status !== "failed" && status !== "cancelled" && status !== "filtered") return null;
+  const error = body.error;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object") {
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return status === "filtered" ? "Workflow stopped before the target step" : "Workflow execution failed";
 }
 
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
@@ -147,14 +158,24 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
     throw new Error(`Cannot reach the Orchestra API at ${API_URL}. Start the API on port 4000 and retry.`);
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
+  const executionFailure = executionFailureMessage(data);
+  if (!res.ok || executionFailure) {
     if (res.status === 401 && typeof window !== "undefined" && !path.startsWith("/auth/")) {
       clearSession();
       if (!window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/register")) {
         window.location.href = "/login";
       }
     }
-    throw new Error(data.hint ?? data.message ?? data.error ?? res.statusText);
+    if (executionFailure) throw new Error(executionFailure);
+    const error = data && typeof data === "object" ? data as Record<string, unknown> : {};
+    const nested = error.error && typeof error.error === "object" ? error.error as Record<string, unknown> : null;
+    throw new Error(
+      (typeof error.hint === "string" && error.hint) ||
+      (typeof error.message === "string" && error.message) ||
+      (typeof error.error === "string" && error.error) ||
+      (typeof nested?.message === "string" && nested.message) ||
+      res.statusText
+    );
   }
   return data as T;
 }
