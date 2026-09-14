@@ -152,6 +152,17 @@ DECISION QUALITY:
 SUPPORTED OPERATIONS:
 add_node, remove_node, update_node, connect_nodes, disconnect_nodes, configure_node, map_field, validate_workflow, test_action, explain_run.
 
+OPERATION ARGUMENT CONTRACT (validated by the Node control plane — deviating
+arguments are rejected and the workflow will not build):
+- add_node: {"appSlug": "<catalog slug>", "operation": "<catalog operation key>", "nodeId": "<stable id>", "label": "<display name>"}. appSlug and operation MUST be copied verbatim from the supplied catalog (slug + operation key). NEVER use keys like "app", "action", "trigger", "node_type", or "cron_expression" — they are invalid.
+- connect_nodes: {"source": "<source nodeId>", "target": "<target nodeId>"}. source/target MUST reference nodeIds you created in add_node.
+- configure_node: {"nodeId": "<nodeId from add_node>", "config": {<catalog field>: <value>}}. All trigger/action configuration goes through config (e.g. {"cron": "0 8 * * *"}, {"channel": "#general"}); never as top-level arguments.
+
+Example — build a scheduled Slack digest:
+{"kind":"add_node","arguments":{"appSlug":"schedule","operation":"cron","nodeId":"n_trigger","label":"Schedule"}}
+{"kind":"add_node","arguments":{"appSlug":"slack","operation":"send_channel_message","nodeId":"n_slack","label":"Send digest"}}
+{"kind":"connect_nodes","arguments":{"source":"n_trigger","target":"n_slack"}}
+
 Return JSON matching AgentReply exactly."""
 
 
@@ -218,6 +229,42 @@ return a helpful message with no operations and intent=EXPLAIN.
 """
 
 
+def _anchor_trigger(reply: AgentReply, request_text: str) -> AgentReply:
+    """Deterministic guard against trigger drift.
+
+    LLMs tend to anchor on the last-mentioned app ("...save to Sheets" →
+    Sheets trigger) instead of the request's opening "When a new lead arrives".
+    The trigger app detected from the request's first segment is authoritative;
+    fix the first add_node when the LLM disagreed with it.
+    """
+    from orchestra_ai.copilot.orchestrator import _detect_trigger
+
+    anchor = _detect_trigger(request_text)
+    if anchor is None:
+        return reply
+    anchor_slug, anchor_phrase = anchor
+    first_add = next((op for op in reply.operations if op.kind == "add_node"), None)
+    if first_add is None:
+        return reply
+    args = dict(first_add.arguments or {})
+    if str(args.get("appSlug", "")) == anchor_slug:
+        return reply
+    # Is the anchored app's trigger in the catalog the model was given? Find it
+    # via the reply's own plan context — the orchestrator's map lists the
+    # canonical trigger key per app; look up in the catalog passed to chat is
+    # not available here, so use the canonical key map.
+    from orchestra_ai.copilot.orchestrator import _TRIGGER_MAP
+    key = next((k for _kw, slug, k, _s in _TRIGGER_MAP if slug == anchor_slug), None)
+    if key is None:
+        return reply
+    args["appSlug"] = anchor_slug
+    args["operation"] = key
+    args.setdefault("nodeId", "trigger")
+    args.setdefault("label", f"{anchor_slug} trigger")
+    first_add.arguments = args
+    return reply
+
+
 async def chat(
     gateway: ModelGateway,
     *,
@@ -243,20 +290,36 @@ async def chat(
         + "\n\nReturn JSON matching AgentReply and ground every app operation in the catalog."
         + "\n\nUnderstand the user's business intent first. Resolve natural-language references against the current graph and recent conversation, reuse existing steps when appropriate, inspect catalog capabilities, and return the smallest safe operation sequence. Ask only one concise clarification when a material ambiguity prevents a safe action."
     )
-    result, _usage = await gateway.call_json(
-        CallSpec(
-            purpose=Purpose.AGENT_LOOP,
-            system=SYSTEM,
-            messages=[Message(role="user", content=prompt)],
-            attribution=attribution,
-        ),
-        output_model=AgentReply,
-    )
+    try:
+        result, _usage = await gateway.call_json(
+            CallSpec(
+                purpose=Purpose.AGENT_LOOP,
+                system=SYSTEM,
+                messages=[Message(role="user", content=prompt)],
+                attribution=attribution,
+            ),
+            output_model=AgentReply,
+        )
+    except Exception as exc:
+        # Model plane fully unavailable (no credits, providers down). Return a
+        # structured 200 so the Node layer falls back to its own planner
+        # instead of surfacing an HTTP 500 to the user.
+        import structlog
+        structlog.get_logger().warning("copilot.chat.model_plane_unavailable", error=str(exc)[:200])
+        return AgentReply(
+            message="I could not reach the AI planning model right now. The built-in planner will prepare your workflow instead.",
+            intent="answer",
+            confidence=0.0,
+            plan=[],
+            operations=[],
+            needs_input=[],
+            risks=[],
+        )
     # Post-process: strip any leaked chain-of-thought from the message
     stripped = _strip_thinking(result.message)
     result.message = stripped or result.message  # Fall back to original if stripping removes everything
     result.plan = [_strip_thinking(p) or p for p in result.plan]
-    return result
+    return _anchor_trigger(result, message)
 
 
 def _build_catalog_summary(catalog: list[dict[str, Any]] | None) -> dict[str, Any]:

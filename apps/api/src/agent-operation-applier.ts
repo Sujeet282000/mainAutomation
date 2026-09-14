@@ -27,7 +27,7 @@ export const AgentOperation = z.discriminatedUnion("kind", [
 ]);
 export type AgentOperation = z.infer<typeof AgentOperation>;
 
-export type ApplyAgentOperationsOptions = { graph: unknown; operations: unknown[]; workspaceId: string; organizationId: string; executionId?: string; allowDestructive?: boolean };
+export type ApplyAgentOperationsOptions = { graph: unknown; operations: unknown[]; workspaceId: string; organizationId: string; executionId?: string; allowDestructive?: boolean; /** Skip the empty-graph placeholder trigger/action (Copilot plan paths). */ scaffold?: boolean };
 export type ApplyAgentOperationsResult = { graph: WorkflowGraph; applied: AgentOperation[]; rejected: Array<{ operation: AgentOperation | unknown; reason: string }>; needsConfirmation: AgentOperation[]; issues: Array<{ code: string; message: string; nodeId?: string; edgeId?: string }>; testResults: Array<{ nodeId: string; result: unknown }> };
 
 function stringArg(args: Record<string, unknown>, key: string): string | undefined { const value = args[key]; return typeof value === "string" && value.trim() ? value.trim() : undefined; }
@@ -49,11 +49,47 @@ function disconnectNodes(graph: WorkflowGraph, args: Record<string, unknown>): W
 function mapField(graph: WorkflowGraph, args: Record<string, unknown>): WorkflowGraph { const nodeId = stringArg(args, "nodeId"); const field = stringArg(args, "field"); if (!nodeId || !field) throw new Error("map_field requires nodeId and field"); const node = findNode(graph, nodeId); if (!node) throw new Error(`Step not found: ${nodeId}`); return { ...graph, nodes: graph.nodes.map((candidate) => candidate.id === nodeId ? { ...candidate, config: { ...candidate.config, [field]: args.value } } : candidate) }; }
 async function executeTestAction(opts: ApplyAgentOperationsOptions, graph: WorkflowGraph, args: Record<string, unknown>) { const nodeId = stringArg(args, "nodeId"); const node = findNode(graph, nodeId); if (!node) throw new Error(`Step not found: ${nodeId ?? "unknown"}`); if (node.type === "trigger" || !node.operation) throw new Error("test_action requires an executable action step"); const executionId = opts.executionId ?? randomUUID(); return { nodeId: node.id, result: await invokeTool({ piece: node.appSlug, operation: node.operation, connectionId: node.connectionId, props: node.config ?? {}, workspaceId: opts.workspaceId, organizationId: opts.organizationId, executionId, idempotencyKey: `${executionId}:${node.id}:agent-test`, allowDestructive: opts.allowDestructive === true, source: "agent" }) }; }
 
+// Sensible non-empty defaults for common required fields so Copilot-built
+// drafts can execute a test run before the user maps every field manually.
+const FIELD_CONTEXT_DEFAULTS: Record<string, unknown> = {
+  title: "Untitled spreadsheet",
+  prompt: "Analyze the trigger data and produce a short summary. Data: {{trigger}}",
+  values: [],
+};
+
+/**
+ * Fill required catalog fields still missing after operations are applied.
+ * User-provided config always wins; only empty fields get defaults: a
+ * contextual default when known, else a resolvable {{trigger}} expression
+ * (or a type-safe empty value for json/number/boolean fields).
+ */
+function prefillRequiredFields(graph: WorkflowGraph): WorkflowGraph {
+  let changed = false;
+  const nodes = graph.nodes.map((node) => {
+    if (node.type === "trigger" || !node.operation) return node;
+    const op = getApp(node.appSlug)?.operations.find((candidate) => candidate.key === node.operation);
+    if (!op?.inputFields?.length) return node;
+    let nodeChanged = false;
+    const config: Record<string, unknown> = { ...(node.config ?? {}) };
+    for (const field of op.inputFields) {
+      if (!field.required || config[field.key] !== undefined) continue;
+      const contextual = FIELD_CONTEXT_DEFAULTS[field.key];
+      config[field.key] = contextual !== undefined
+        ? contextual
+        : field.type === "json" ? [] : field.type === "number" ? 0 : field.type === "boolean" ? false : "{{trigger}}";
+      nodeChanged = true;
+    }
+    if (nodeChanged) { changed = true; return { ...node, config }; }
+    return node;
+  });
+  return changed ? { ...graph, nodes } : graph;
+}
+
 // Destructive or externally-visible operations are confirmation-gated regardless of UI mode.
 function requiresConfirmation(operation: AgentOperation): boolean { return operation.requires_confirmation === true || operation.kind === "remove_node" || operation.kind === "disconnect_nodes" || operation.kind === "test_action"; }
 
 export async function applyAgentOperations(opts: ApplyAgentOperationsOptions): Promise<ApplyAgentOperationsResult> {
-  let graph = normalizeWorkflowGraph(opts.graph); const applied: AgentOperation[] = []; const rejected: Array<{ operation: AgentOperation | unknown; reason: string }> = []; const needsConfirmation: AgentOperation[] = []; const testResults: Array<{ nodeId: string; result: unknown }> = [];
+  let graph = normalizeWorkflowGraph(opts.graph, { scaffold: opts.scaffold !== false }); const applied: AgentOperation[] = []; const rejected: Array<{ operation: AgentOperation | unknown; reason: string }> = []; const needsConfirmation: AgentOperation[] = []; const testResults: Array<{ nodeId: string; result: unknown }> = [];
   for (const rawOperation of opts.operations) {
     const parsed = AgentOperation.safeParse(rawOperation); if (!parsed.success) { rejected.push({ operation: rawOperation, reason: `Invalid AgentOperation: ${parsed.error.message}` }); continue; }
     const operation = parsed.data;
@@ -73,6 +109,22 @@ export async function applyAgentOperations(opts: ApplyAgentOperationsOptions): P
       applied.push(operation);
     } catch (error) { rejected.push({ operation, reason: error instanceof Error ? error.message : "operation_failed" }); }
   }
-  const validation = await validateWorkflowGraph(graph, { workspaceId: opts.workspaceId, strict: false });
+  graph = prefillRequiredFields(graph);
+  if (graph.nodes.length > 1) {
+    const trigger = graph.nodes.find((n) => n.type === "trigger") ?? graph.nodes[0];
+    const incomingSources = new Set(graph.edges.map((e) => e.target));
+    let prev = trigger.id;
+    for (const node of graph.nodes) {
+      if (node.id === trigger.id) continue;
+      if (!incomingSources.has(node.id)) {
+        const edgeExists = graph.edges.some((e) => e.source === prev && e.target === node.id);
+        if (!edgeExists && prev !== node.id) {
+          graph.edges.push({ id: `e-${prev}-${node.id}`, source: prev, target: node.id, sourceHandle: null, condition: null });
+        }
+      }
+      prev = node.id;
+    }
+  }
+  const validation = await validateWorkflowGraph(graph, { workspaceId: opts.workspaceId, strict: false, scaffold: opts.scaffold !== false });
   return { graph: validation.graph, applied, rejected, needsConfirmation, issues: validation.issues, testResults };
 }

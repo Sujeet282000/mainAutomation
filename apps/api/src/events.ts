@@ -1,37 +1,65 @@
-import { createExecution, findPublishedByTrigger } from "./engine";
 import { query, queryOne } from "./db";
+import { createAndRunFlow } from "./flow-runtime";
+
+// =============================================================================
+// Product-surface event triggers (canonical).
+//
+// Fires when a form submission, table record change, or parsed email should
+// trigger published automations. Lookup goes through triggers_registry — rows
+// written by TriggerActivationService at publish time (piece_name='tables' /
+// 'email-parser') — and dispatch goes through createAndRunFlow, the canonical
+// durable path. The previous implementation queried the legacy
+// automations/automation_versions tables AND selected a nonexistent
+// workspace_id column on data_tables, so every form/table event silently
+// failed (callers swallow errors with .catch(() => {})).
+// =============================================================================
+
+async function registeredTableTriggerFlows(orgId: string, operation: string) {
+  const rows = await query<{ flow_id: string }>(
+    `SELECT flow_id FROM triggers_registry
+     WHERE org_id = $1 AND enabled = true AND status = 'active'
+       AND piece_name = 'tables' AND operation_id = $2`,
+    [orgId, operation],
+  );
+  return rows;
+}
 
 export async function fireTableRecordEvent(opts: {
   tableId: string;
   record: Record<string, unknown>;
   operation: "new_record" | "updated_record" | "deleted_record";
 }) {
-  const table = await queryOne<{ workspace_id: string }>(`select workspace_id from data_tables where id=$1`, [
-    opts.tableId
+  const table = await queryOne<{ org_id: string }>(`select org_id from data_tables where id=$1`, [
+    opts.tableId,
   ]);
   if (!table) return;
-  const published = await findPublishedByTrigger("tables", opts.operation === "new_record" ? "new_record" : opts.operation);
-  for (const auto of published) {
-    if (auto.workspace_id !== table.workspace_id) continue;
-    const version = await queryOne<{ graph: { nodes?: Array<{ type?: string; appSlug?: string; config?: { tableId?: string } }> } }>(
-      `select v.graph from automations a join automation_versions v on v.id=a.published_version_id where a.id=$1`,
-      [auto.id]
+  const flows = await registeredTableTriggerFlows(table.org_id, opts.operation);
+  for (const flow of flows) {
+    // A trigger may pin a specific table; skip flows pointed at other tables.
+    const pinned = await queryOne<{ table_id: string | null }>(
+      `SELECT (SELECT definition->'trigger'->'props'->>'tableId' FROM flow_versions WHERE id = r.flow_version_id) AS table_id
+       FROM triggers_registry r WHERE r.flow_id = $1 AND r.status = 'active' LIMIT 1`,
+      [flow.flow_id],
     );
-    const trigger = version?.graph?.nodes?.find((n) => n.type === "trigger" && n.appSlug === "tables");
-    const configured = trigger?.config?.tableId;
-    if (configured && configured !== opts.tableId) continue;
-    await createExecution({
-      automationId: auto.id,
-      triggerType: "table",
-      triggerData: { tableId: opts.tableId, ...opts.record, _event: opts.operation }
+    if (pinned?.table_id && pinned.table_id !== opts.tableId) continue;
+    await createAndRunFlow({
+      orgId: table.org_id,
+      flowId: flow.flow_id,
+      userId: "system",
+      triggerKind: "table_event",
+      payload: { tableId: opts.tableId, _event: opts.operation, ...opts.record },
+      idempotencyKey: `table:${opts.tableId}:${opts.operation}:${opts.record.id ?? ""}`,
+    }).catch((err) => {
+      const message = err instanceof Error ? err.message : "table_event_dispatch_failed";
+      console.warn(`[events] table trigger ${flow.flow_id} dispatch failed: ${message}`);
     });
   }
 }
 
 export async function fireParserEmail(opts: { mailbox: string; subject: string; body: string; from?: string }) {
-  const parser = await queryOne<{ id: string; workspace_id: string; template: { fields?: Array<{ key: string; pattern?: string }> } }>(
-    `select id, workspace_id, template from email_parsers where mailbox=$1`,
-    [opts.mailbox]
+  const parser = await queryOne<{ id: string; organization_id: string; template: { fields?: Array<{ key: string; pattern?: string }> } }>(
+    `select id, organization_id, template from email_parsers where mailbox=$1`,
+    [opts.mailbox],
   );
   if (!parser) return null;
   const extracted: Record<string, string> = { subject: opts.subject, body: opts.body, from: opts.from ?? "" };
@@ -44,14 +72,20 @@ export async function fireParserEmail(opts: { mailbox: string; subject: string; 
       extracted[field.key] = "";
     }
   }
-  const published = await findPublishedByTrigger("email-parser", "new_email");
-  for (const auto of published) {
-    if (auto.workspace_id !== parser.workspace_id) continue;
-    await createExecution({
-      automationId: auto.id,
-      triggerType: "email_parser",
-      triggerData: extracted
-    });
+  const flows = await query<{ flow_id: string }>(
+    `SELECT flow_id FROM triggers_registry
+     WHERE org_id = $1 AND enabled = true AND status = 'active'
+       AND piece_name = 'email-parser' AND operation_id = 'new_email'`,
+    [parser.organization_id],
+  );
+  for (const flow of flows) {
+    await createAndRunFlow({
+      orgId: parser.organization_id,
+      flowId: flow.flow_id,
+      userId: "system",
+      triggerKind: "email_parser",
+      payload: extracted,
+    }).catch(() => {});
   }
   return extracted;
 }

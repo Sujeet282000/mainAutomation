@@ -67,9 +67,12 @@ class ModelRoute:
 ROUTES: dict[str, ModelRoute] = {
     # --- Reasoning / planning — Claude primary, OpenAI fallback ---
     Purpose.COPILOT_PLAN: ModelRoute("anthropic", "claude-sonnet-4-5", 0.1, 4096, "openai", "gpt-4.1"),
-    Purpose.COPILOT_REPAIR: ModelRoute("anthropic", "claude-sonnet-4-5", 0.0, 3000, "openai", "gpt-4.1"),
+    Purpose.COPILOT_REPAIR: ModelRoute("anthropic", "claude-sonnet-4-5", 0.0, 6000, "openai", "gpt-4.1"),
     Purpose.COPILOT_REFINE: ModelRoute("anthropic", "claude-sonnet-4-5", 0.2, 4096, "openai", "gpt-4.1"),
-    Purpose.AGENT_LOOP: ModelRoute("anthropic", "claude-sonnet-4-5", 0.2, 3000, "openai", "gpt-4.1"),
+    # Reasoning models (gpt-oss on Groq) spend output tokens on hidden reasoning
+    # before the JSON answer — a tight cap yields empty content and a provider
+    # json_validate error, so the planning loop gets a generous budget.
+    Purpose.AGENT_LOOP: ModelRoute("anthropic", "claude-sonnet-4-5", 0.2, 8000, "openai", "gpt-4.1"),
     # --- Structured generation — OpenAI primary, Anthropic fallback ---
     Purpose.COPILOT_MAP: ModelRoute("openai", "gpt-4.1", 0.0, 4096, "anthropic", "claude-sonnet-4-5"),
     Purpose.COPILOT_SELECT: ModelRoute("openai", "gpt-4.1-mini", 0.0, 1600, "anthropic", "claude-sonnet-4-5"),
@@ -385,6 +388,13 @@ class ModelGateway:
                 return reply, current
             except ProviderError as err:
                 last_error = err
+            except Exception as err:
+                # Network failures (httpx.ReadTimeout, connection resets, …)
+                # must degrade to the next provider, not abort the whole
+                # request with an unhandled exception. Non-retryable status so
+                # tenacity moves on instead of re-attempting the same dead
+                # provider three times.
+                last_error = ProviderError(404, f"{type(err).__name__}: {err}")
                 if current.fallback_provider and current.fallback_provider not in tried:
                     current = replace(
                         current,
@@ -418,6 +428,10 @@ class ModelGateway:
             return "gemini-3.7-flash"
         if provider == "groq":
             return "openai/gpt-oss-120b"
+        if provider == "local":
+            # Local servers (Ollama/vLLM) only have their own models — never
+            # forward a cloud model name there (404s with "model not found").
+            return "qwen2.5:3b-instruct"
         return current_model
 
     async def call(self, spec: CallSpec) -> GatewayResult:
@@ -531,7 +545,14 @@ class ModelGateway:
             try:
                 return output_model.model_validate_json(second.text), second.usage
             except (ValidationError, ValueError):
-                raise AiSchemaInvalid("AI_SCHEMA_INVALID")
+                # Structured output failed twice. Surface the model-plane
+                # failure as an HTTP-level error so callers (and the Node
+                # cascade) can fall back, instead of returning a 200 whose
+                # body callers cannot interpret.
+                raise ProviderError(
+                    502,
+                    f"AI_SCHEMA_INVALID {output_model.__name__}: {first_error}",
+                )
 
     async def stream(self, spec: CallSpec) -> AsyncIterator[str]:
         if spec.json_schema is not None or spec.cacheable:
@@ -703,17 +724,21 @@ def get_gateway() -> "ModelGateway":
             providers["anthropic"] = AnthropicAdapter(_http, anthropic_key, _settings.anthropic_base_url)
         if gemini_key:
             providers["google"] = GeminiAdapter(_http, gemini_key, _settings.gemini_base_url)
-        # Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, LocalAI)
+        # Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, LocalAI).
+        # Dedicated short-timeout client: a hung local server must never
+        # consume the full model budget of a cascade.
+        _local_http = httpx.AsyncClient(timeout=min(_settings.model_timeout_seconds, 20.0))
         providers["local"] = LocalOpenAICompatibleAdapter(
-            _http, _settings.local_api_key, _settings.local_base_url,
+            _local_http, _settings.local_api_key, _settings.local_base_url,
         )
 
         groq_key = live_secret(_settings.groq_api_key)
         if groq_key:
             # Groq exposes an OpenAI-compatible chat completions API with tool
             # calling — reuse the local adapter against Groq's base URL.
+            _groq_http = httpx.AsyncClient(timeout=_settings.model_timeout_seconds)
             providers["groq"] = LocalOpenAICompatibleAdapter(
-                _http, groq_key, _settings.groq_base_url,
+                _groq_http, groq_key, _settings.groq_base_url,
             )
 
         if not (providers.get("openai") or providers.get("anthropic") or providers.get("google") or providers.get("groq")):

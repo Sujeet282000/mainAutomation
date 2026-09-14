@@ -118,6 +118,14 @@ function friendlyReply(text: string): string {
   if (looksLikeProviderError) {
     return "The AI service is temporarily unavailable — your model provider rejected the request (quota or credentials). Check your provider API keys and billing, then try again. The built-in engine can still create and edit workflows in the meantime.";
   }
+  // Plane-status chatter ("AI plane is up…", "AI plane failed (…)…") must never
+  // appear as an assistant reply — show one honest, quiet status line instead.
+  if (INTERNAL_REASONING.test(t)) {
+    const down = /plane failed|terminated|unavailable/i.test(t);
+    return down
+      ? "The AI planning model is temporarily unavailable, so I used the built-in planner. Your workflow was still created — connect your apps and test when ready."
+      : "";
+  }
   return text;
 }
 
@@ -691,7 +699,7 @@ export function CopilotPanel({ automationId, open, modal, onOpenModal, building,
         const result = await streamChat(prompt, (ev) => {
           if (ev.type === "agent_state") { setAgentState(ev.state as AgentState); if (ev.title) setAgentTitle(ev.title as string); }
           if (ev.type === "agent_activity") { const kind = (ev.kind as AgentActivityKind) || "info"; if (ev.id) updateActivity(ev.id as string, kind, ev.detail as string | undefined); else addActivity(kind, ev.label as string, ev.detail as string | undefined); }
-          if (ev.type === "step_completed") addActivity(ev.success ? "done" : "error", ev.label as string, ev.detail as string | undefined);
+          if (ev.type === "step_ready" || ev.type === "step_completed") addActivity(ev.success ? "done" : "error", ev.label as string, ev.detail as string | undefined);
           if (ev.type === "blocking_issue") addActivity("warn", ev.title as string, ev.detail as string | undefined);
           if (ev.type === "test_result") addActivity(ev.success ? "done" : "warn", `Tested ${ev.label}`, ev.success ? "Passed" : "Failed");
           if (ev.type === "operation_card" && ev.operation) { streamingOps = [ev.operation as OperationCard]; setMsgs((m) => { const last = m[m.length - 1]; if (last && last.role === "assistant" && last.text === "") return [...m.slice(0, -1), { ...last, operations: [...streamingOps] }]; return [...m, { role: "assistant", text: "", operations: [...streamingOps] }]; }); }

@@ -18,12 +18,14 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { SkeletonCardGrid, SkeletonStatGrid } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
+type RunStats = { total: number; succeeded: number; failed: number; lastRunAt: string | null; lastStatus: string | null };
 type Auto = {
   id: string;
   name: string;
   status: string;
   updated_at?: string;
   graph?: GraphPayload;
+  runStats?: RunStats | null;
 };
 type WorkflowAction = { id: string; type: "duplicate" | "status" | "delete"; status?: string };
 type WorkflowMutation = { isPending: boolean; mutate: (variables: WorkflowAction) => void };
@@ -200,6 +202,16 @@ export default function AutomationsPage() {
                   <span>Updated {a.updated_at ? new Date(a.updated_at).toLocaleDateString() : "recently"}</span>
                   <span className="font-medium text-teal opacity-0 transition-opacity group-hover:opacity-100">Open editor →</span>
                 </div>
+                {a.runStats && a.runStats.total > 0 && (
+                  <Link href={`/activity?flow=${a.id}`} className="mt-2 flex items-center gap-2 rounded-lg bg-muted/60 px-2.5 py-1.5 text-[11px] text-ink-muted transition hover:bg-muted">
+                    <span className="font-semibold text-ink">{a.runStats.total}</span> run{a.runStats.total === 1 ? "" : "s"}
+                    <span>·</span>
+                    <span className="text-ok">{a.runStats.succeeded} ok</span>
+                    {a.runStats.failed > 0 && <><span>·</span><span className="text-danger">{a.runStats.failed} failed</span></>}
+                    <span>·</span>
+                    <span className="truncate">last: {a.runStats.lastStatus ?? "—"}{a.runStats.lastRunAt ? ` ${new Date(a.runStats.lastRunAt).toLocaleDateString()}` : ""}</span>
+                  </Link>
+                )}
               </div>
             );
           })}

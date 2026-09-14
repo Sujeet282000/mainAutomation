@@ -7,7 +7,8 @@ export function createEngineDb(db: Db) {
     flowRuns: {
       async claimTransition(runId: string, expectedCursor: number, expectedEpoch: number) {
         const result = await db.service.query(
-          `UPDATE flow_runs SET transition_epoch = transition_epoch + 1, transition_lease = now() + interval '5 minutes' WHERE id = $1 AND cursor = $2 AND transition_epoch = $3 AND status IN ('running', 'queued') RETURNING *`,
+          `UPDATE flow_runs SET transition_epoch = transition_epoch + 1, transition_lease = now() + interval '5 minutes',
+             started_at = COALESCE(started_at, now()) WHERE id = $1 AND cursor = $2 AND transition_epoch = $3 AND status IN ('running', 'queued') RETURNING *`,
           [runId, expectedCursor, expectedEpoch]
         );
         const row = result.rows[0];
@@ -22,8 +23,13 @@ export function createEngineDb(db: Db) {
         return mapRun(result.rows[0]);
       },
       async finish(runId: string, status: string, context: unknown, finishedAt: Date) {
+        // duration_ms is GENERATED ALWAYS from started_at/finished_at: an
+        // explicit assignment (even a computed one) makes Postgres throw
+        // "column \"duration_ms\" can only be updated to DEFAULT", which left
+        // every engine run stuck in queued. Setting finished_at is enough —
+        // the generated column computes the duration.
         await db.service.query(
-          `UPDATE flow_runs SET status = $2, context = $3::jsonb, finished_at = $4, duration_ms = extract(epoch from ($4 - started_at)) * 1000, steps_billable = (SELECT count(*)::int FROM run_steps WHERE run_id = $1 AND status = 'succeeded') WHERE id = $1`,
+          `UPDATE flow_runs SET status = $2, context = $3::jsonb, finished_at = $4, steps_billable = (SELECT count(*)::int FROM run_steps WHERE run_id = $1 AND status = 'succeeded') WHERE id = $1`,
           [runId, status, JSON.stringify(context), finishedAt]
         );
       },
@@ -69,21 +75,27 @@ export function createEngineDb(db: Db) {
         return row ? { outputJson: row.output_json ?? {} } : null;
       },
       async insert(input: any) {
-        // The run_created_at + org_id pair is part of the partitioned FK. Do
-        // not trust a JS Date supplied by the engine: PostgreSQL owns the exact
-        // timestamp stored on the parent row.
+        // run_steps write contract: duration_ms is GENERATED ALWAYS (computed
+        // from started_at/finished_at) so it must NOT be supplied; sequence_no
+        // is assigned by the DB trigger internal.assign_run_step_sequence and
+        // must NOT be supplied either; and the partitioned FK
+        // (run_id, run_created_at, org_id) must match the parent row exactly —
+        // PostgreSQL owns the stored timestamp, not a JS Date. The timestamp
+        // is selected TO CHAR(...) as MICROSECOND-EXACT TEXT: pg's default
+        // parse to a JS Date truncates to milliseconds, and the mismatch
+        // violates run_steps_run_id_run_created_at_org_id_fkey on every step.
         const meta = await db.service.query(
-          `SELECT created_at, org_id FROM flow_runs WHERE id = $1 LIMIT 1`,
+          `SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_text, org_id FROM flow_runs WHERE id = $1 LIMIT 1`,
           [input.runId]
         );
         const run = meta.rows[0];
         if (!run) throw new Error("FLOW_RUN_NOT_FOUND_FOR_STEP");
         const result = await db.service.query(
-          `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, output_json, error_class, error_code, error_json, attempt, duration_ms, finished_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now()) RETURNING *`,
+          `INSERT INTO run_steps (run_id, run_created_at, org_id, step_id, step_type, operation_id, effect_key, status, input_json, output_json, error_class, error_code, error_json, attempt, started_at, finished_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now()) RETURNING *`,
           [
             input.runId,
-            run.created_at,
+            run.created_at_text,
             run.org_id,
             input.stepId,
             input.stepType,
@@ -96,7 +108,6 @@ export function createEngineDb(db: Db) {
             input.errorCode ?? null,
             input.errorJson ? JSON.stringify(redact(input.errorJson)) : null,
             input.attempt ?? 1,
-            input.durationMs ?? null,
           ]
         );
         return result.rows[0];

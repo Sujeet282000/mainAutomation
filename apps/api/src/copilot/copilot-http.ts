@@ -25,7 +25,9 @@ const NO_AUTH_APPS = new Set(["webhook", "http", "manual", "schedule", "delay", 
  *
  * Also emits per-step richer events the builder UI consumes directly:
  *  - `connection_required` → connection card with a real "Connect" action
- *  - `step_completed`      → per-step done/error activity + first unconfigured step pointer
+ *  - `step_ready`          → per-step ready/error activity + first unconfigured step pointer
+ *    (configuration readiness ONLY — never execution success; the engine is
+ *    the only source of real step_succeeded/step_failed via the run SSE)
  */
 async function sendOperationCard(
   send: (event: Record<string, unknown>) => Promise<void>,
@@ -73,9 +75,11 @@ async function sendOperationCard(
         actions: [{ type: "connect_account", label: `Connect ${appName}`, appSlug: n.appSlug, stepId: n.id }],
       });
     } else if (n.appSlug && n.operation) {
-      // Only configured steps emit completion — blank steps are already shown
+      // Only configured steps emit readiness — blank steps are already shown
       // as "needs setup" in the operation card and must not render as errors.
-      await send({ type: "step_completed", stepId: n.id, label: appName, success: true, detail: n.connectionId ? undefined : "no account needed" });
+      // This is a CONFIGURATION event, not execution truth: a step is "ready",
+      // not "succeeded", until the engine actually runs it.
+      await send({ type: "step_ready", stepId: n.id, label: appName, success: true, detail: n.connectionId ? undefined : "no account needed" });
     }
   }
 }
@@ -187,7 +191,8 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
       await send({ type: "agent_started" });
       await send({ type: "agent_state", state: "inspecting", title: "Inspecting workflow" });
       await send({ type: "agent_activity", kind: "running", label: "Reading your request" });
-      await send({ type: "reasoning", text: ai.hint, stage: "intent" });
+      // ai.hint is an internal diagnostic ("AI plane is up…") — it is logged,
+      // never streamed: reasoning events surface in user activity feeds.
       let sawResult = false;
       let lastGrounded: { issues?: Array<{ code?: string }>; rejected?: unknown[]; needsConfirmation?: unknown[] } | null = null;
       for await (const ev of streamAiCopilotGenerate({ sessionId: opts.sessionId, flowId: opts.flowId || opts.sessionId, prompt: opts.prompt, orgId: opts.orgId, userEmail: opts.req.user?.email ?? "", projectId: opts.projectId || opts.orgId, autonomy: mode })) {
@@ -222,8 +227,15 @@ export async function streamCopilotSession(opts: { req: Request; res: Response; 
         await send({ type: "done", status: blocking ? "needs_attention" : "draft_ready", publishable: !blocking, note: blocking ? "Some steps need setup (connection/configuration) before this can publish." : "Review and publish. Confirmation-gated operations must be explicitly approved.", source: "python-copilot" });
         return;
       }
-    } catch (err) { await send({ type: "reasoning", text: `AI plane failed (${err instanceof Error ? err.message : "error"}); using the Node catalog engine.` }); }
-  } else await send({ type: "reasoning", text: ai.hint });
+    } catch (err) {
+      // Degradation notice stays internal: the enhanced Node pipeline below
+      // produces the same result — users get honest copy from friendlyReply
+      // if they ask why quality differed, not stack-trace chatter.
+      console.warn("[copilot] AI plane failed; using Node catalog engine:", err instanceof Error ? err.message : err);
+    }
+  } else {
+    console.warn("[copilot] AI plane down; using Node catalog engine:", ai.hint);
+  }
 
   // ── Enhanced plan pipeline (primary Node.js path) ──
   // Produces AutomationPlan IR with connection resolution, data lineage, field mapping, and validation.

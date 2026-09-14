@@ -2,7 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, ExternalLink, FileInput, Loader2, Plus, Save, Table2, Trash2, Workflow, X } from "lucide-react";
+import {
+  DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+  sortableKeyboardCoordinates,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { Check, ChevronDown, Copy, ExternalLink, FileInput, GripVertical, Loader2, Plus, Save, Table2, Trash2, Workflow, X } from "lucide-react";
 import { api, API_URL, getWorkspaceId } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -110,13 +119,19 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
     setFields(n);
   }
 
-  function moveField(i: number, dir: -1 | 1) {
-    const j = i + dir;
-    if (j < 0 || j >= fields.length) return;
-    const n = [...fields];
-    [n[i], n[j]] = [n[j], n[i]];
-    setFields(n);
+  function onFieldDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const from = fields.findIndex((f) => f.key === active.id);
+    const to = fields.findIndex((f) => f.key === over.id);
+    if (from < 0 || to < 0) return;
+    setFields(arrayMove(fields, from, to));
   }
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
   async function createTableFromFields() {
     const name = newTableName.trim() || `${form.name} submissions`;
@@ -227,102 +242,28 @@ function FormBuilder({ form, onClose }: { form: FormRow; onClose: () => void }) 
             {/* 1 · Fields */}
             <div className="border-b border-line p-4">
               <SectionHeader icon={FileInput} step={1} title="Fields" badge={String(fields.length)} color="bg-blue-500" />
-              <div className="space-y-2">
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onFieldDragEnd}>
+                <SortableContext items={fields.map((f) => f.key)} strategy={verticalListSortingStrategy}>
+                  <div className="space-y-2">
                 {fields.map((f, i) => (
-                  <div key={f.key} className="group rounded-xl border border-line bg-bg px-3 py-2.5 transition-all duration-200 hover:border-teal/30 hover:shadow-sm">
-                    <div className="flex items-center gap-1.5">
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-muted text-[10px] font-semibold text-ink-muted">{i + 1}</span>
-                      <input
-                        className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-xs font-medium transition hover:border-line focus:border-teal focus:outline-none"
-                        value={f.label}
-                        placeholder="Field label"
-                        onChange={(e) => updateField(i, { label: e.target.value })}
-                      />
-                      <div className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100">
-                        <button className="rounded p-0.5 text-ink-muted hover:bg-muted hover:text-ink disabled:opacity-30" disabled={i === 0} onClick={() => moveField(i, -1)} aria-label="Move up"><ArrowUp className="h-3 w-3" /></button>
-                        <button className="rounded p-0.5 text-ink-muted hover:bg-muted hover:text-ink disabled:opacity-30" disabled={i === fields.length - 1} onClick={() => moveField(i, 1)} aria-label="Move down"><ArrowDown className="h-3 w-3" /></button>
-                      </div>
-                      <button className="shrink-0 rounded p-0.5 text-ink-muted transition hover:bg-danger/10 hover:text-danger" onClick={() => setFields(fields.filter((_, j) => j !== i))} aria-label="Remove field"><Trash2 className="h-3 w-3" /></button>
-                    </div>
-                    <div className="mt-2 grid grid-cols-2 gap-1.5">
-                      <select
-                        className="rounded-lg border border-line bg-elevated px-1.5 py-1.5 text-[11px] transition focus:border-teal focus:outline-none"
-                        value={f.type}
-                        onChange={(e) => updateField(i, { type: e.target.value })}
-                      >
-                        {FIELD_TYPE_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                      </select>
-                      <input
-                        className="rounded-lg border border-line bg-elevated px-1.5 py-1.5 text-[11px] transition focus:border-teal focus:outline-none"
-                        placeholder="Placeholder"
-                        value={f.placeholder ?? ""}
-                        onChange={(e) => updateField(i, { placeholder: e.target.value || undefined })}
-                      />
-                    </div>
-                    {(f.type === "select" || f.type === "multiselect") && (
-                      <input
-                        className="mt-1.5 w-full rounded-lg border border-line bg-elevated px-1.5 py-1.5 text-[11px] transition focus:border-teal focus:outline-none"
-                        placeholder="Options, comma-separated"
-                        value={(f.options ?? []).join(", ")}
-                        onChange={(e) => updateField(i, { options: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
-                      />
-                    )}
-                    <div className="mt-2 flex items-center justify-between">
-                      <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-ink-muted">
-                        <input
-                          type="checkbox"
-                          className="h-3 w-3 accent-teal"
-                          checked={f.required !== false}
-                          onChange={(e) => updateField(i, { required: e.target.checked })}
-                        />
-                        Required
-                      </label>
-                      {i > 0 && (
-                        <details className="text-[10px]">
-                          <summary className="cursor-pointer text-ink-muted transition hover:text-teal">Condition…</summary>
-                          <div className="mt-1.5 grid grid-cols-3 gap-1">
-                            <select
-                              className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
-                              value={f.visibleWhen?.field ?? ""}
-                              onChange={(e) => updateField(i, { visibleWhen: e.target.value ? { field: e.target.value, op: f.visibleWhen?.op ?? "eq", value: f.visibleWhen?.value ?? "" } : undefined })}
-                            >
-                              <option value="">Always show</option>
-                              {fields.filter((_, j) => j !== i && !/^(file|button|ai|formula|linked)$/.test(fields[j].type)).map((other) => (
-                                <option key={other.key} value={other.key}>{other.label || other.key}</option>
-                              ))}
-                            </select>
-                            {f.visibleWhen && (
-                              <>
-                                <select
-                                  className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
-                                  value={f.visibleWhen.op}
-                                  onChange={(e) => updateField(i, { visibleWhen: { ...f.visibleWhen!, op: e.target.value } })}
-                                >
-                                  <option value="eq">equals</option>
-                                  <option value="neq">not equals</option>
-                                  <option value="contains">contains</option>
-                                  <option value="gt">&gt;</option>
-                                  <option value="lt">&lt;</option>
-                                  <option value="empty">is empty</option>
-                                  <option value="not_empty">is not empty</option>
-                                </select>
-                                {!/^(empty|not_empty)$/.test(f.visibleWhen.op) && (
-                                  <input
-                                    className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
-                                    placeholder="Value"
-                                    value={String(f.visibleWhen.value ?? "")}
-                                    onChange={(e) => updateField(i, { visibleWhen: { ...f.visibleWhen!, value: e.target.value } })}
-                                  />
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  </div>
+                  <SortableFieldCard
+                    key={f.key}
+                    index={i}
+                    field={f}
+                    total={fields.length}
+                    onLabel={(v) => updateField(i, { label: v })}
+                    onType={(v) => updateField(i, { type: v })}
+                    onPlaceholder={(v) => updateField(i, { placeholder: v || undefined })}
+                    onOptions={(v) => updateField(i, { options: v })}
+                    onRequired={(v) => updateField(i, { required: v })}
+                    onVisibleWhen={(v) => updateField(i, { visibleWhen: v })}
+                    onRemove={() => setFields(fields.filter((_, j) => j !== i))}
+                    otherFields={fields.filter((_, j) => j !== i)}
+                  />
                 ))}
-              </div>
+                  </div>
+                </SortableContext>
+              </DndContext>
               <button
                 className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-line px-2.5 py-2.5 text-[11px] font-medium text-ink-muted transition-all hover:border-teal hover:bg-teal/5 hover:text-teal"
                 onClick={() => setFields([...fields, { key: `field_${Date.now()}`, type: "text", label: `Field ${fields.length + 1}`, required: true }])}
@@ -613,6 +554,155 @@ export default function FormsPage() {
       </div>
 
       {open && <FormBuilder form={open} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
+/* ── Draggable field card (dnd-kit) ───────────────────────────────────── */
+
+function SortableFieldCard({
+  index,
+  field,
+  total,
+  onLabel,
+  onType,
+  onPlaceholder,
+  onOptions,
+  onRequired,
+  onVisibleWhen,
+  onRemove,
+  otherFields,
+}: {
+  index: number;
+  field: Field;
+  total: number;
+  onLabel: (v: string) => void;
+  onType: (v: string) => void;
+  onPlaceholder: (v: string) => void;
+  onOptions: (v: string[]) => void;
+  onRequired: (v: boolean) => void;
+  onVisibleWhen: (v: Field["visibleWhen"]) => void;
+  onRemove: () => void;
+  otherFields: Field[];
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: field.key });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 30 : undefined,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        "group rounded-xl border border-line bg-bg px-3 py-2.5 transition-all duration-200 hover:border-teal/30 hover:shadow-sm",
+        isDragging && "opacity-80 shadow-card ring-1 ring-teal/40",
+      )}
+    >
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          className="shrink-0 cursor-grab touch-none rounded p-0.5 text-ink-muted opacity-0 transition group-hover:opacity-100 hover:bg-muted hover:text-ink active:cursor-grabbing"
+          aria-label={`Reorder ${field.label || "field"}`}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-3.5 w-3.5" />
+        </button>
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-muted text-[10px] font-semibold text-ink-muted">{index + 1}</span>
+        <input
+          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-xs font-medium transition hover:border-line focus:border-teal focus:outline-none"
+          value={field.label}
+          placeholder="Field label"
+          onChange={(e) => onLabel(e.target.value)}
+        />
+        <button
+          type="button"
+          className="shrink-0 rounded p-0.5 text-ink-muted transition hover:bg-danger/10 hover:text-danger"
+          onClick={onRemove}
+          aria-label="Remove field"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-1.5">
+        <select
+          className="rounded-lg border border-line bg-elevated px-1.5 py-1.5 text-[11px] transition focus:border-teal focus:outline-none"
+          value={field.type}
+          onChange={(e) => onType(e.target.value)}
+        >
+          {FIELD_TYPE_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </select>
+        <input
+          className="rounded-lg border border-line bg-elevated px-1.5 py-1.5 text-[11px] transition focus:border-teal focus:outline-none"
+          placeholder="Placeholder"
+          value={field.placeholder ?? ""}
+          onChange={(e) => onPlaceholder(e.target.value)}
+        />
+      </div>
+      {(field.type === "select" || field.type === "multiselect") && (
+        <input
+          className="mt-1.5 w-full rounded-lg border border-line bg-elevated px-1.5 py-1.5 text-[11px] transition focus:border-teal focus:outline-none"
+          placeholder="Options, comma-separated"
+          value={(field.options ?? []).join(", ")}
+          onChange={(e) => onOptions(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+        />
+      )}
+      <div className="mt-2 flex items-center justify-between">
+        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-ink-muted">
+          <input
+            type="checkbox"
+            className="h-3 w-3 accent-teal"
+            checked={field.required !== false}
+            onChange={(e) => onRequired(e.target.checked)}
+          />
+          Required
+        </label>
+        {index > 0 && (
+          <details className="text-[10px]">
+            <summary className="cursor-pointer text-ink-muted transition hover:text-teal">Condition…</summary>
+            <div className="mt-1.5 grid grid-cols-3 gap-1">
+              <select
+                className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
+                value={field.visibleWhen?.field ?? ""}
+                onChange={(e) => onVisibleWhen(e.target.value ? { field: e.target.value, op: field.visibleWhen?.op ?? "eq", value: field.visibleWhen?.value ?? "" } : undefined)}
+              >
+                <option value="">Always show</option>
+                {otherFields.filter((other) => !/^(file|button|ai|formula|linked)$/.test(other.type)).map((other) => (
+                  <option key={other.key} value={other.key}>{other.label || other.key}</option>
+                ))}
+              </select>
+              {field.visibleWhen && (
+                <>
+                  <select
+                    className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
+                    value={field.visibleWhen.op}
+                    onChange={(e) => onVisibleWhen({ ...field.visibleWhen!, op: e.target.value })}
+                  >
+                    <option value="eq">equals</option>
+                    <option value="neq">not equals</option>
+                    <option value="contains">contains</option>
+                    <option value="gt">&gt;</option>
+                    <option value="lt">&lt;</option>
+                    <option value="empty">is empty</option>
+                    <option value="not_empty">is not empty</option>
+                  </select>
+                  {!/^(empty|not_empty)$/.test(field.visibleWhen.op) && (
+                    <input
+                      className="rounded border border-line bg-elevated px-1 py-1 text-[10px]"
+                      placeholder="Value"
+                      value={String(field.visibleWhen.value ?? "")}
+                      onChange={(e) => onVisibleWhen({ ...field.visibleWhen!, value: e.target.value })}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          </details>
+        )}
+      </div>
+      {total > 1 && <span className="sr-only">Drag the handle to reorder this field.</span>}
     </div>
   );
 }

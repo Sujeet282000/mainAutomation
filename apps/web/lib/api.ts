@@ -35,7 +35,7 @@ export async function streamSse(
   try {
     res = await fetch(`${API_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal });
   } catch (err) {
-    if (signal?.aborted) throw err;
+    if (signal?.aborted) return; // intentional abort: stream ends silently
     throw new Error(`Cannot reach the Orchestra API at ${API_URL}. Start the API on port 4000 and retry.`);
   }
   if (!res.ok || !res.body) {
@@ -56,13 +56,21 @@ export async function streamSse(
     }
   };
   while (true) {
-    if (signal?.aborted) { reader.cancel(); break; }
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
+    if (signal?.aborted) { reader.cancel().catch(() => {}); break; }
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (err) {
+      /* Caller-initiated abort (e.g. after a "done" event) is a normal end
+         of stream — settle the body and return instead of rejecting. */
+      if (signal?.aborted) { reader.cancel().catch(() => {}); break; }
+      throw err;
+    }
+    if (chunk.done) break;
+    buf += decoder.decode(chunk.value, { stream: true });
     const chunks = buf.split("\n\n");
     buf = chunks.pop() ?? "";
-    for (const chunk of chunks) consume(chunk);
+    for (const c of chunks) consume(c);
   }
   if (buf.trim()) consume(buf);
 }
@@ -82,7 +90,7 @@ export async function streamGetSse(
   try {
     res = await fetch(`${API_URL}${path}`, { method: "GET", headers, signal });
   } catch (err) {
-    if (signal?.aborted) throw err;
+    if (signal?.aborted) return; // intentional abort: stream ends silently
     throw new Error(`Cannot reach the API at ${API_URL}.`);
   }
   if (!res.ok || !res.body) {
@@ -93,15 +101,23 @@ export async function streamGetSse(
   const decoder = new TextDecoder();
   let buf = "";
   while (true) {
-    if (signal?.aborted) { reader.cancel(); break; }
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
+    if (signal?.aborted) { reader.cancel().catch(() => {}); break; }
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (err) {
+      /* Caller-initiated abort (e.g. after a "done" event) is a normal end
+         of stream — settle the body and return instead of rejecting. */
+      if (signal?.aborted) { reader.cancel().catch(() => {}); break; }
+      throw err;
+    }
+    if (chunk.done) break;
+    buf += decoder.decode(chunk.value, { stream: true });
     const chunks = buf.split("\n\n");
     buf = chunks.pop() ?? "";
-    for (const chunk of chunks) {
+    for (const c of chunks) {
       let eventType = "message";
-      const lines = chunk.split("\n");
+      const lines = c.split("\n");
       let dataLine = "";
       for (const line of lines) {
         if (line.startsWith("event: ")) eventType = line.slice(7).trim();

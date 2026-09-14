@@ -81,8 +81,16 @@ export default function AiPage() {
         router.push(`/automations/${flowId}/editor?idea=${encodeURIComponent(next)}`);
         return;
       }
-      // No reviewed plan → refuse to auto-build. One Copilot flow: plan → review → create.
-      setMsg("No reviewed plan to build from. Please analyze your request first.");
+      if (planData) {
+        // A plan exists but is not buildable (text-only answer, no graph).
+        setMsg("The analyzed plan isn't buildable — try rephrasing with the apps and actions you want.");
+      } else {
+        // No reviewed plan yet: analyze now and reopen review. The contract
+        // stays plan → review → build; this only removes the dead end.
+        setBuilding(false);
+        toast.info("Analyzing your request first", { description: "Review the plan, then confirm to build" });
+        await analyzeRequest();
+      }
     } catch (err) {
       setMsg(err instanceof DOMException && err.name === "AbortError" ? "Copilot took too long. Check your workflows before trying again." : err instanceof Error ? err.message : "Copilot unavailable");
     } finally {

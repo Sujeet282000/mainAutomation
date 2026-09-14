@@ -6,8 +6,8 @@ import { connectionsAreCompatible } from "./connections";
 export type WorkflowIssue = { code: string; message: string; nodeId?: string; edgeId?: string };
 
 /** Validate the persisted graph before it can become a live workflow. Drafts may stay incomplete. */
-export async function validateWorkflowGraph(raw: unknown, opts: { workspaceId: string; strict: boolean }) {
-  const graph = normalizeWorkflowGraph(raw);
+export async function validateWorkflowGraph(raw: unknown, opts: { workspaceId: string; strict: boolean; scaffold?: boolean }) {
+  const graph = normalizeWorkflowGraph(raw, { scaffold: opts.scaffold !== false });
   const issues: WorkflowIssue[] = [];
   const byId = new Map<string, (typeof graph.nodes)[number]>();
 

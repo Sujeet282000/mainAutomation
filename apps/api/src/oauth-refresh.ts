@@ -82,8 +82,10 @@ export async function ensureFreshToken(
   } catch {
     // Refresh failed (revoked grant, expired refresh token, vendor outage):
     // flag the connection instead of poisoning the run with a doomed token.
+    // DB enum connection_status is {active,expired,error,missing}; 'error'
+    // maps to the UI's "needs attention" state.
     await query(
-      `UPDATE connections SET status = 'needs_attention', updated_at = now() WHERE id = $1 AND org_id = $2`,
+      `UPDATE connections SET status = 'error', updated_at = now() WHERE id = $1 AND org_id = $2`,
       [connectionId, orgId],
     ).catch(() => undefined);
     return auth as Record<string, unknown>;

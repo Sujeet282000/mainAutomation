@@ -154,9 +154,19 @@ class CopilotOrchestrator:
 
             # ── Stage 2: Candidate retrieval ─────────────────────────────
             yield sse("stage", {"stage": Stage.RETRIEVE, "status": "start"})
+            # Deterministic trigger anchor: if the request clearly names a
+            # source app, search for that phrase so the right trigger card
+            # is even in the candidate list (LLM intent text can drift).
+            trigger_anchor = _detect_trigger(request_text)
+            trigger_query = (
+                (trigger_anchor[1] if trigger_anchor else None)
+                or spec.trigger.search_text
+                or spec.trigger.app_hint
+                or spec.summary
+            )
             try:
                 trigger_cards = await self._node.search_catalog(
-                    spec.trigger.search_text or spec.trigger.app_hint or spec.summary,
+                    trigger_query,
                     "trigger",
                 )
             except Exception:
@@ -170,6 +180,23 @@ class CopilotOrchestrator:
                     )
                 except Exception:
                     action_cards[action.order] = []
+            # Fallback when the LLM intent produced no action segments: derive
+            # actions from the request tail so plans never come back empty.
+            if not spec.actions:
+                from orchestra_ai.copilot.orchestrator import _split_actions, _enrich_action_hint  # self-import: same module
+                tail = _split_actions(request_text)[1:] if _split_actions(request_text) else []
+                derived = tail or re.findall(
+                    rf"((?:send|add|notify|create|post|append|write|analyze|analyse|summarize|summarise|classify|generate|draft|reply|log|store|save|insert|update)[^,.]{{3,120}})",
+                    request_text,
+                    flags=re.I,
+                )
+                for i, p in enumerate(derived):
+                    hint = _enrich_action_hint(p)
+                    spec.actions.append(ActionIntent(purpose=p.strip(), operation_hint=hint, order=i))
+                    try:
+                        action_cards[i] = await self._node.search_catalog(f"{hint} {p}", "action")
+                    except Exception:
+                        action_cards[i] = []
             total = len(trigger_cards) + sum(len(v) for v in action_cards.values())
             yield sse(
                 "reasoning",
@@ -183,26 +210,70 @@ class CopilotOrchestrator:
             # ── Stage 3: Constrained selection (with ranking) ──────────
             yield sse("stage", {"stage": Stage.SELECT, "status": "start"})
 
-            # Rank triggers by relevance
+            # Rank triggers by relevance — use the same anchored query used for
+            # retrieval so "when a new lead arrives" ranks CRM triggers, not the
+            # Sheets trigger the LLM drifted toward later in the sentence.
             ranked_triggers = rank_candidates(
-                spec.trigger.search_text or spec.trigger.app_hint or spec.summary,
+                trigger_query,
                 trigger_cards,
                 kind="trigger",
             )
-            selected_trigger = select_best(ranked_triggers) or (trigger_cards[0] if trigger_cards else None)
+            # normalize SelectedCards: RankedCandidate is a pydantic model while
+            # trigger_cards entries are raw dicts — downstream code calls .get()
+            # on both, which crashed with 'RankedCandidate' object has no
+            # attribute 'get' and killed the whole AI plane (COPILOT_FAILED).
+            def _card_dict(card: Any) -> dict[str, Any] | None:
+                if card is None:
+                    return None
+                if isinstance(card, dict):
+                    return card
+                if hasattr(card, "model_dump"):
+                    ranked = card.model_dump()
+                    return {
+                        "slug": ranked.get("slug", ""),
+                        "name": ranked.get("name", ""),
+                        "key": ranked.get("operation_key", ""),
+                        "op_name": ranked.get("operation_name", ""),
+                        "type": ranked.get("operation_type", "action"),
+                        "authType": ranked.get("auth_type", "none"),
+                    }
+                return None
+
+            selected_trigger = _card_dict(select_best(ranked_triggers)) or (trigger_cards[0] if trigger_cards else None)
+            # The anchor beats ranking: "when a new lead arrives ... save to
+            # Sheets" must not pick the Sheets trigger just because Sheets is
+            # mentioned later in the sentence.
+            if trigger_anchor and ranked_triggers:
+                anchored = next(
+                    (c for c in ranked_triggers if c.slug == trigger_anchor[0] and c.operation_type == "trigger"),
+                    None,
+                )
+                if anchored is not None:
+                    selected_trigger = _card_dict(anchored)
             if selected_trigger:
                 yield sse("reasoning", {
                     "stage": Stage.SELECT,
-                    "text": f"Selected trigger: {selected_trigger.name}/{selected_trigger.operation_name} (score: {selected_trigger.score:.1f}, reasons: {', '.join(selected_trigger.reasons[:3])})",
+                    "text": f"Selected trigger: {selected_trigger.get('name', '')}/{selected_trigger.get('op_name', '')}",
                 })
 
             # Rank actions by relevance
             selected_actions = []
+            seen_ops: set[tuple[str, str]] = set()
             for action in spec.actions:
                 cards = action_cards.get(action.order, [])
                 ranked = rank_candidates(f"{action.operation_hint} {action.purpose}", cards, kind="action")
-                best = select_best(ranked)
-                selected_actions.append((action, best or (cards[0] if cards else None)))
+                best = _card_dict(select_best(ranked))
+                card = best or (cards[0] if cards else None)
+                # Dedupe hallucinated overlapping steps (e.g. two "send email"
+                # variants) and cap chain length for sane plans.
+                op_id = (str((card or {}).get("slug", "")), str((card or {}).get("key", "")))
+                if card and op_id in seen_ops:
+                    continue
+                if card:
+                    seen_ops.add(op_id)
+                if len(selected_actions) >= 6:
+                    break
+                selected_actions.append((action, card))
 
             yield sse("stage", {"stage": Stage.SELECT, "status": "done"})
 
@@ -458,9 +529,15 @@ class CopilotOrchestrator:
         trigger_slug = (trigger_card or {}).get("slug") or spec.trigger.app_hint or (
             "schedule" if spec.trigger.kind == "schedule" else "webhook" if spec.trigger.kind == "webhook" else "manual"
         )
-        trigger_key = (trigger_card or {}).get("key") or (
+        kind_default = (
             "cron" if spec.trigger.kind == "schedule" else "catch_hook" if spec.trigger.kind == "webhook" else "button"
         )
+        # An action card must never become the trigger: if the card is an action
+        # (or its key is a known action), fall back to the app's real trigger key.
+        _card_type = (trigger_card or {}).get("type", "trigger")
+        trigger_key = (trigger_card or {}).get("key")
+        if not trigger_key or _card_type != "trigger" or _card_type == "action":
+            trigger_key = _TRIGGER_FALLBACK_KEYS.get(trigger_slug) or kind_default
         trigger_conn = bound.get(str(trigger_slug))
         nodes: list[dict[str, Any]] = [
             {
@@ -468,7 +545,11 @@ class CopilotOrchestrator:
                 "type": "trigger",
                 "appSlug": trigger_slug,
                 "operation": trigger_key,
-                "label": (trigger_card or {}).get("op_name") or spec.trigger.event_hint or "Trigger",
+                "label": (
+                    (trigger_card or {}).get("op_name")
+                    if _card_type == "trigger"
+                    else (spec.trigger.event_hint or f"{trigger_slug} trigger")
+                ) or "Trigger",
                 "position": {"x": 280, "y": 40},
                 "config": {},
                 "connectionId": trigger_conn.connection_id if trigger_conn else None,
@@ -529,28 +610,147 @@ class CopilotOrchestrator:
         return candidate
 
 
+def _clean_trigger_phrase(text: str) -> str:
+    """Strip filler so catalog search sees 'new lead', not 'When a new lead arrives'."""
+    t = text.strip().strip(",.;")
+    t = re.sub(r"^(?:when|whenever|every time|each time|any time|as soon as|once|after|if)\s+(?:a\s+|an\s+|the\s+|new\s+|some\s+|my\s+|our\s+)*", "", t, flags=re.I)
+    t = re.sub(r"\s+(?:arrives?|occurs?|comes?\s+in|is\s+(?:added|created|received|submitted)|happens?|triggers?|is\s+new)\s*$", "", t, flags=re.I)
+    return t.strip()
+
+
+# Keyword → (app_hint, default_trigger_key, catalog_search_text).
+# Ordered: most specific phrases first so "new lead" wins over generic "new".
+_TRIGGER_MAP: tuple[tuple[tuple[str, ...], str, str, str], ...] = (
+    (("new lead", "lead arrives", "new lead arrives", "lead"), "salesforce", "new_lead", "new lead"),
+    (("email", "inbox", "gmail"), "gmail", "new_email", "new email"),
+    (("form submission", "form response", "submission", "form"), "forms", "submitted", "new submission"),
+    (("row", "spreadsheet", "sheet"), "google-sheets", "new_row", "new row"),
+    (("calendar", "event"), "google-calendar", "new_event", "new event"),
+    (("whatsapp", "sms", "text message"), "twilio", "inbound_message", "inbound message"),
+    (("payment", "order"), "stripe", "new_payment", "new payment"),
+    (("ticket"), "zendesk", "new_ticket", "new ticket"),
+    (("deal"), "hubspot", "new_deal", "new deal"),
+    (("contact"), "hubspot", "new_contact", "new contact"),
+    (("issue", "pull request", "push"), "github", "new_issue", "new issue"),
+    (("file", "drive"), "google-drive", "new_file", "new file"),
+)
+
+# Default trigger operation per app slug, used when catalog search finds no card
+# so _assemble_definition never produces a broken slug/button combination.
+_TRIGGER_FALLBACK_KEYS: dict[str, str] = {
+    slug: key for _kw, slug, key, _s in _TRIGGER_MAP
+}
+_TRIGGER_FALLBACK_KEYS["slack"] = "new_message"
+_TRIGGER_FALLBACK_KEYS["calendly"] = "invitee_created"
+
+# Action keyword → app slug, prepended to the catalog search so phrases like
+# "analyze with AI" or "save to Sheets" resolve to real operations.
+_ACTION_APP_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("analyze", "analyse", "summarize", "summarise", "classify", "generate text", "prompt", "gpt", "openai", " ai ", "with ai"), "openai"),
+    (("sheet", "spreadsheet", "row"), "google-sheets"),
+    (("email", "gmail"), "gmail"),
+    (("slack", "notify", "alert", "message the team", "post"), "slack"),
+    (("calendar", "invite", "attendee"), "google-calendar"),
+    (("contact", "crm", "deal", "lead", "hubspot"), "hubspot"),
+    (("salesforce",), "salesforce"),
+    (("notion",), "notion"),
+    (("airtable",), "airtable"),
+    (("discord",), "discord"),
+)
+
+_ACTION_SPLIT_VERBS = (
+    "send|add|notify|create|post|append|write|analyze|analyse|summarize|summarise|"
+    "classify|translate|generate|draft|reply|log|store|save|insert|update|upload|"
+    "convert|format|assign|tag|move|copy|export|enrich|score"
+)
+
+
+def _split_actions(text: str) -> list[str]:
+    """Split a request into action phrases on 'then'/'and <verb>'/comma boundaries."""
+    segments = [
+        p.strip()
+        for p in re.split(r"\b(?:then|and then|after that|afterwards)\b", text, flags=re.I)
+        if p.strip()
+    ]
+    if len(segments) < 2:
+        segments = [
+            p.strip()
+            for p in re.split(rf"\s*,\s*(?=(?:{_ACTION_SPLIT_VERBS})\b)|\s+and\s+(?=(?:{_ACTION_SPLIT_VERBS})\b)", text, flags=re.I)
+            if p.strip()
+        ]
+    return segments
+
+
+def _enrich_action_hint(segment: str) -> str:
+    """Prepend a detected app name so 'analyze with AI' can find openai ops."""
+    lowered = f" {segment.lower()} "
+    for keywords, slug in _ACTION_APP_HINTS:
+        if any(k in lowered for k in keywords):
+            return f"{slug} {segment}"
+    return segment
+
+
+def _detect_trigger(text: str) -> tuple[str, str] | None:
+    """Detect the trigger app from the request's first segment.
+
+    Returns (slug, catalog_search_phrase) so the orchestrator can anchor
+    trigger selection deterministically instead of letting a generic
+    ranking pick whichever app's words co-occur with the request.
+    """
+    parts = _split_actions(text)
+    phrase = _clean_trigger_phrase(parts[0] if parts else text)
+    low = phrase.lower()
+    for keywords, slug, _key, mapped in _TRIGGER_MAP:
+        if any(k in low for k in keywords):
+            return slug, mapped
+    return None
+
+
 def heuristic_intent(text: str) -> IntentSpec:
     lower = text.lower()
+    parts = _split_actions(text)
+    trigger_raw = parts[0] if parts else text
+    action_parts = parts[1:] or []
+    if not action_parts:
+        for phrase in re.findall(rf"((?:{_ACTION_SPLIT_VERBS})[^,.]{{3,120}})", text, flags=re.I):
+            action_parts.append(phrase.strip())
+
+    trigger_phrase = _clean_trigger_phrase(trigger_raw)
+    trigger_lower = trigger_phrase.lower()
+
+    # Explicit time expressions beat app keywords: "every morning with my
+    # calendar events" is a schedule, not a calendar trigger.
+    has_time_expr = bool(re.search(
+        r"\b(?:cron|every (?:day|hour|week|month|morning|night|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|daily|hourly|weekly|monthly|at \d{1,2}(?::\d{2})?)\b",
+        lower,
+    ))
+
     kind = "app_event"
-    if any(w in lower for w in ("every morning", "every day", "cron", "schedule")):
-        kind = "schedule"
-    elif "webhook" in lower:
-        kind = "webhook"
-    parts = [p.strip() for p in re.split(r"\b(?:then|and then|after that)\b", text, flags=re.I) if p.strip()]
-    if len(parts) < 2:
-        parts = [p.strip() for p in re.split(r"\s*,\s*(?=send|add|notify|create|post|append|write)", text, flags=re.I) if p.strip()]
-    trigger = parts[0] if parts else text
-    actions = parts[1:] or []
-    if not actions:
-        for phrase in re.findall(r"((?:send|add|notify|create|post|append)[^.]{3,80})", text, flags=re.I):
-            actions.append(phrase.strip())
     app_hint = None
-    for name in ("gmail", "slack", "sheets", "hubspot", "typeform", "calendar"):
-        if name in lower:
-            app_hint = "google-sheets" if name == "sheets" else name
-            break
+    default_key = None
+    search_text = trigger_phrase or text[:80]
+    if has_time_expr and "when " not in lower:
+        kind = "schedule"
+        search_text = "schedule"
+    else:
+        for keywords, slug, key, phrase in _TRIGGER_MAP:
+            if any(k in trigger_lower for k in keywords):
+                app_hint = slug
+                default_key = key
+                search_text = phrase
+                break
+        if app_hint is None and re.search(r"\b(?:cron|every (?:day|hour|week|morning|monday|friday)|daily|hourly|weekly|at \d{1,2}(?::\d{2})?)\b", lower):
+            kind = "schedule"
+            search_text = "schedule"
+        elif app_hint is None and "webhook" in lower:
+            kind = "webhook"
+            search_text = "catch hook"
+
     return IntentSpec(
         summary=text[:160],
-        trigger=TriggerIntent(kind=kind, search_text=trigger, app_hint=app_hint, event_hint=trigger),
-        actions=[ActionIntent(purpose=p, operation_hint=p, order=i) for i, p in enumerate(actions)],
+        trigger=TriggerIntent(kind=kind, search_text=search_text, app_hint=app_hint, event_hint=trigger_phrase or None),
+        actions=[
+            ActionIntent(purpose=p, operation_hint=_enrich_action_hint(p), order=i)
+            for i, p in enumerate(action_parts)
+        ],
     )

@@ -206,6 +206,20 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const [injectPrompt, setInjectPrompt] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; label: string } | null>(null);
   const [flowOverviewOpen, setFlowOverviewOpen] = useState(false);
+  // Server-side analysis for the overview modal: step descriptions, structural
+  // issues, missing required config and actionable guidance + run totals.
+  const overviewQuery = useQuery({
+    queryKey: ["automation-overview", automationId],
+    enabled: flowOverviewOpen && Boolean(automationId),
+    queryFn: () => api<{ name: string; steps: Array<{ id: string; index: number; app: string; appSlug: string; action: string; label: string; type: string; description: string }>; analysis: { issues: string[]; missingConfig: string[]; guidance: string[]; nextStep: string } }>(`/automations/${automationId}/overview`),
+    retry: false,
+  });
+  const runStatsQuery = useQuery({
+    queryKey: ["automation-run-stats", automationId],
+    enabled: flowOverviewOpen && Boolean(automationId),
+    queryFn: () => api<{ totals: { total: number; succeeded: number; failed: number; avgDurationMs: number | null }; lastStatus: string | null; lastRunAt: string | null; lastFailure: { runId: string; at: string; error: unknown } | null; steps: Array<{ stepId: string; name?: string | null; executions: number; failures: number; avgMs: number | null }> }>(`/automations/${automationId}/run-stats`),
+    retry: false,
+  });
   const inspectorDrag = useRef<{ startX: number; startW: number } | null>(null);
   const inspectorWRef = useRef(inspectorW);
   inspectorWRef.current = inspectorW;
@@ -2281,7 +2295,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="space-y-2">
+            <div className="max-h-64 space-y-2 overflow-y-auto">
               {nodes.map((n, i) => {
                 const app = apps.find((a) => a.slug === n.data.appSlug);
                 return (
@@ -2307,6 +2321,68 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                 );
               })}
             </div>
+            {/* Server-side plain-language description of the flow + run totals */}
+            {overviewQuery.data && (
+              <div className="mt-4 rounded-xl border border-line bg-muted/30 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">What this workflow does</p>
+                <ol className="mt-2 space-y-1.5">
+                  {overviewQuery.data.steps.map((s) => (
+                    <li key={s.id} className="text-xs leading-relaxed text-ink">
+                      <span className="font-semibold">{s.index}. {s.app}</span> — {s.description}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+            {(overviewQuery.data?.analysis.issues.length || overviewQuery.data?.analysis.missingConfig.length) ? (
+              <div className="mt-3 rounded-xl border border-warn/30 bg-warn/5 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-warn">Fix before publishing</p>
+                <ul className="mt-1.5 space-y-1">
+                  {overviewQuery.data!.analysis.missingConfig.map((m) => <li key={m} className="text-xs text-ink">• Missing required fields — {m}</li>)}
+                  {overviewQuery.data!.analysis.issues.map((i) => <li key={i} className="text-xs text-ink">• {i}</li>)}
+                </ul>
+              </div>
+            ) : null}
+            {runStatsQuery.data && (
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-line bg-muted/30 p-3 text-xs text-ink-muted">
+                <span><b className="text-ink">{runStatsQuery.data.totals.total}</b> total runs</span>
+                <span className="text-ok">{runStatsQuery.data.totals.succeeded} succeeded</span>
+                {runStatsQuery.data.totals.failed > 0 && <span className="text-danger">{runStatsQuery.data.totals.failed} failed</span>}
+                {runStatsQuery.data.totals.avgDurationMs != null && <span>avg {(runStatsQuery.data.totals.avgDurationMs / 1000).toFixed(1)}s</span>}
+                {runStatsQuery.data.lastFailure && (
+                  <a className="font-medium text-violet-600 hover:underline" href={`/activity/${runStatsQuery.data.lastFailure.runId}`}>Inspect last failure →</a>
+                )}
+              </div>
+            )}
+            {runStatsQuery.data?.steps?.some((s) => s.executions > 0) && (
+              <div className="mt-3 rounded-xl border border-line bg-muted/30 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Step performance (real runs)</p>
+                <ul className="mt-2 space-y-1">
+                  {runStatsQuery.data.steps.filter((s) => s.executions > 0).map((s) => {
+                    const label = s.name ?? nodes.find((n) => n.id === s.stepId)?.data.label ?? s.stepId;
+                    return (
+                      <li key={s.stepId} className="flex items-center justify-between gap-2 text-xs text-ink">
+                        <span className="truncate font-medium">{label}</span>
+                        <span className="shrink-0 text-ink-muted">
+                          {s.executions} run{s.executions !== 1 ? "s" : ""}
+                          {s.failures > 0 && <span className="text-danger"> · {s.failures} failed</span>}
+                          {s.avgMs != null && ` · avg ${s.avgMs}ms`}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            {overviewQuery.data?.analysis.guidance.length ? (
+              <div className="mt-3 rounded-xl border border-line p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Actionable guidance</p>
+                <ul className="mt-1.5 space-y-1">
+                  {overviewQuery.data.analysis.guidance.map((g) => <li key={g} className="text-xs text-ink-muted">• {g}</li>)}
+                </ul>
+                <p className="mt-2 text-xs font-medium text-violet-700">Next step: {overviewQuery.data.analysis.nextStep}</p>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

@@ -157,7 +157,13 @@ export function reduceCopilotEvent(
     return appendBlock(state, { type: "test_result", stepLabel: String(ev.label ?? "Workflow step"), success: ev.success === true, fields: asRecord(ev.fields) ?? undefined, actions: actionList(ev.actions) });
   }
 
+  if (type === "step_ready") {
+    // Configuration readiness — rendered as "ready", NOT as execution success.
+    return appendBlock(state, { type: "success", title: String(ev.label ?? "Step ready"), message: typeof ev.detail === "string" ? ev.detail : undefined });
+  }
+
   if (type === "step_completed") {
+    // Legacy alias kept for older sessions; treat identically.
     return appendBlock(state, { type: "success", title: String(ev.label ?? "Step completed"), message: typeof ev.detail === "string" ? ev.detail : undefined });
   }
 

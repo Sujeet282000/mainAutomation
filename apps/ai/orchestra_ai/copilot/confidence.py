@@ -198,14 +198,24 @@ def estimate_connection_confidence(
     connections: dict[str, dict] | None = None,
     required_apps: list[str] | None = None,
 ) -> float:
-    """Estimate confidence in connection resolution."""
+    """Estimate confidence in connection resolution.
+
+    Values in `connections` may be plain dicts or ConnectionChoice pydantic
+    models — the orchestrator builds both shapes, and calling .get() on a
+    model raised AttributeError and crashed the whole generation.
+    """
     if not required_apps:
         return 1.0
 
     if not connections:
         return 0.0
 
-    resolved = sum(1 for app in required_apps if connections.get(app, {}).get("connection_id"))
+    def _conn_id(entry: object) -> str | None:
+        if isinstance(entry, dict):
+            return entry.get("connection_id")
+        return getattr(entry, "connection_id", None)
+
+    resolved = sum(1 for app in required_apps if _conn_id(connections.get(app)))
     return round(resolved / len(required_apps), 2) if required_apps else 1.0
 
 

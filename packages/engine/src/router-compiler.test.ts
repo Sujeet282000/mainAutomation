@@ -17,9 +17,9 @@ test("router expansion preserves all configured paths", () => {
         { id: "standard", label: "Standard" },
         { id: "fallback", label: "Fallback", default: true },
       ] } },
-      { id: "vip_action", type: "action", appSlug: "http", operation: "request", config: {} },
-      { id: "standard_action", type: "action", appSlug: "http", operation: "request", config: {} },
-      { id: "fallback_action", type: "action", appSlug: "http", operation: "request", config: {} },
+      { id: "vip_action", type: "action", appSlug: "http", operation: "request", config: { url: "https://example.test/vip" } },
+      { id: "standard_action", type: "action", appSlug: "http", operation: "request", config: { url: "https://example.test/standard" } },
+      { id: "fallback_action", type: "action", appSlug: "http", operation: "request", config: { url: "https://example.test/fallback" } },
     ],
     edges: [
       { source: "paths", target: "vip_action", sourceHandle: "vip" },

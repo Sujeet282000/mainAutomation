@@ -64,7 +64,7 @@ export function defaultWorkflowGraph(): WorkflowGraph {
 }
 
 /** Accepts stored graphs, React Flow docs, Zapier-like `steps`, snake_case, and JSON strings. */
-export function normalizeWorkflowGraph(raw: unknown): WorkflowGraph {
+export function normalizeWorkflowGraph(raw: unknown, opts?: { scaffold?: boolean }): WorkflowGraph {
   let parsed: unknown = raw;
   if (typeof parsed === "string") {
     try {
@@ -80,6 +80,11 @@ export function normalizeWorkflowGraph(raw: unknown): WorkflowGraph {
     : Array.isArray(inner.steps)
       ? inner.steps
       : [];
+
+  // Copilot plan paths opt out: the scaffold's placeholder trigger/action would
+  // otherwise be persisted into approved workflows (and its presence would make
+  // the LLM's real trigger op fail with "Workflow already has a trigger").
+  const injectScaffold = opts?.scaffold !== false;
 
   const nodes: GraphNode[] = list.map((item, i) => {
     const n = asRecord(item);
@@ -117,7 +122,7 @@ export function normalizeWorkflowGraph(raw: unknown): WorkflowGraph {
     };
   }).filter((e) => e.source && e.target);
 
-  if (!nodes.some((n) => n.type === "trigger")) {
+  if (injectScaffold && !nodes.some((n) => n.type === "trigger")) {
     nodes.unshift({
       id: "trigger",
       type: "trigger",
@@ -130,7 +135,7 @@ export function normalizeWorkflowGraph(raw: unknown): WorkflowGraph {
     });
   }
 
-  if (!nodes.some((n) => n.type !== "trigger")) {
+  if (injectScaffold && !nodes.some((n) => n.type !== "trigger")) {
     const trigger = nodes.find((n) => n.type === "trigger")!;
     const action = emptyActionNode();
     action.position = { x: trigger.position.x, y: trigger.position.y + 180 };

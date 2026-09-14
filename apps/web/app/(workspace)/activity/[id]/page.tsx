@@ -18,10 +18,34 @@ type Step = {
   operation?: string;
   status: string;
   duration_ms?: number;
+  attempt?: number;
+  started_at?: string;
+  finished_at?: string;
   error?: { message?: string };
   output?: unknown;
   input?: unknown;
 };
+
+function JsonBlock({ label, value }: { label: string; value: unknown }) {
+  const [open, setOpen] = useState(false);
+  if (value == null) return null;
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-muted transition hover:bg-muted hover:text-ink"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "▾" : "▸"} {label}
+      </button>
+      {open && (
+        <pre className="mt-1 max-h-56 overflow-auto rounded-xl bg-muted p-3 text-[11px] leading-relaxed">
+          {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
 
 function StepDot({ status }: { status: string }) {
   if (status === "succeeded") return <CheckCircle2 className="h-4 w-4 text-ok" />;
@@ -41,7 +65,7 @@ export default function ActivityDetailPage() {
     queryKey: ["execution", id],
     queryFn: () =>
       api<{
-        execution: { status: string; error?: { message?: string }; created_at?: string; trigger_type?: string };
+        execution: { status: string; error?: { message?: string }; created_at?: string; finished_at?: string; trigger_type?: string; automation_name?: string; automation_id?: string };
         steps?: Step[];
         logs?: Array<{ id: string; message: string; created_at: string }>;
       }>(`/executions/${id}`),
@@ -130,14 +154,26 @@ export default function ActivityDetailPage() {
   const steps = (q.data?.steps ?? []).map((s) =>
     liveStatus[s.step_id ?? s.id] ? { ...s, status: liveStatus[s.step_id ?? s.id]! } : s,
   );
+  // Total wall-clock: sum of finished steps or run-level finished_at−created_at
+  const runTotalMs =
+    ex?.created_at && ex?.finished_at
+      ? Math.max(0, new Date(ex.finished_at).getTime() - new Date(ex.created_at).getTime())
+      : steps.reduce((acc, s) => acc + (s.duration_ms ?? 0), 0);
+  const succeededCount = steps.filter((s) => s.status === "succeeded").length;
+  const failedCount = steps.filter((s) => s.status === "failed").length;
 
   return (
     <div>
       <PageHeader
-        title="Run timeline"
+        title={ex?.automation_name ?? "Run timeline"}
         description="Each box is one task: input, live API result, and errors. Retry starts a new run."
         actions={
           <div className="flex gap-2">
+            {ex?.automation_id && (
+              <Button variant="secondary" onClick={() => router.push(`/automations/${ex.automation_id}/editor`)}>
+                Open workflow
+              </Button>
+            )}
             <Button variant="secondary" onClick={() => diagnose.mutate()} disabled={diagnose.isPending}>
               <Sparkles className="h-3.5 w-3.5" /> {diagnose.isPending ? "Diagnosing…" : "Explain this failure"}
             </Button>
@@ -163,10 +199,16 @@ export default function ActivityDetailPage() {
         </div>
       )}
       {ex && (
-        <div className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-elevated px-4 py-3">
+        <div className="mb-6 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-line bg-elevated px-4 py-3">
           <StatusBadge status={ex.status} />
           <span className="text-sm text-ink-muted">{ex.trigger_type ?? "manual"} trigger</span>
           {ex.created_at && <span className="text-sm text-ink-muted">{new Date(ex.created_at).toLocaleString()}</span>}
+          {runTotalMs > 0 && <span className="text-sm text-ink-muted">Total {runTotalMs > 1000 ? `${(runTotalMs / 1000).toFixed(1)}s` : `${runTotalMs}ms`}</span>}
+          {steps.length > 0 && (
+            <span className="text-sm text-ink-muted">
+              {succeededCount}/{steps.length} steps succeeded{failedCount > 0 ? ` · ${failedCount} failed` : ""}
+            </span>
+          )}
           {ex.error?.message && <span className="text-sm text-danger">{ex.error.message}</span>}
         </div>
       )}
@@ -183,7 +225,14 @@ export default function ActivityDetailPage() {
                 <p className="text-xs text-ink-muted">
                   {[s.app_slug, s.operation].filter(Boolean).join(" · ") || "built-in"}
                   {s.duration_ms != null ? ` · ${s.duration_ms} ms` : ""}
+                  {s.attempt != null && s.attempt > 1 ? ` · attempt ${s.attempt}` : ""}
                 </p>
+                {s.started_at && (
+                  <p className="text-[10px] text-ink-muted">
+                    {new Date(s.started_at).toLocaleTimeString()}
+                    {s.finished_at ? ` → ${new Date(s.finished_at).toLocaleTimeString()}` : ""}
+                  </p>
+                )}
               </div>
               <StatusBadge status={s.status} />
             </div>
@@ -202,11 +251,8 @@ export default function ActivityDetailPage() {
                 Replay from here
               </button>
             )}
-            {s.output != null && (
-              <pre className="mt-3 max-h-48 overflow-auto rounded-xl bg-muted p-3 text-[11px] leading-relaxed">
-                {JSON.stringify(s.output, null, 2)}
-              </pre>
-            )}
+            <JsonBlock label="Output (live API result)" value={s.output} />
+            <JsonBlock label="Input (resolved fields)" value={s.input} />
           </article>
         ))}
       </div>

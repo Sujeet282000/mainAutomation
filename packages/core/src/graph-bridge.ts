@@ -49,6 +49,36 @@ function childrenOf(graph: WorkflowGraph, nodeId: string, handle?: string | null
     .filter((n): n is GraphNode => Boolean(n));
 }
 
+function isContainerNode(node: GraphNode | undefined): boolean {
+  return Boolean(node && (node.appSlug === "paths" || node.appSlug === "loop" || node.appSlug === "aggregator"));
+}
+
+/**
+ * Union of every node reachable from a container (paths/loop/aggregator).
+ * Used by top-level chaining to know which edges are container-internal body
+ * edges versus real top-level linear continuation edges. Memoized per graph
+ * object — graphToFlowDefinition clones the graph once per compile, so the
+ * cache is exact and repeated container compiles stay O(1).
+ */
+const bodyUnionCache = new WeakMap<object, Set<string>>();
+function bodyUnionOf(graph: WorkflowGraph): Set<string> {
+  const cached = bodyUnionCache.get(graph);
+  if (cached) return cached;
+  const union = new Set<string>();
+  for (const node of graph.nodes) {
+    if (!isContainerNode(node)) continue;
+    const stack = [...childrenOf(graph, node.id)];
+    while (stack.length) {
+      const n = stack.pop();
+      if (!n || union.has(n.id)) continue;
+      union.add(n.id);
+      for (const c of childrenOf(graph, n.id)) stack.push(c);
+    }
+  }
+  bodyUnionCache.set(graph, union);
+  return union;
+}
+
 function aiOperation(op: string) {
   if (op.includes("summar")) return "summarize";
   if (op.includes("classif")) return "classify";
@@ -59,7 +89,75 @@ function aiOperation(op: string) {
   return "generate";
 }
 
-function stepFromNode(graph: WorkflowGraph, node: GraphNode, visiting: Set<string>): Step {
+/**
+ * Compile a list of chain roots into the engine's FLAT sequential step list.
+ * The durable engine walks definition.steps by cursor, so a chain
+ * trigger→A→B must flatten to [A, B] — nested `next` pointers would be
+ * stripped by the zod schema and silently drop B.
+ *
+ * Scope rules:
+ * - scope=null (top level): chains follow unhandled edges; container body
+ *   members (pre-computed in bodyUnion) never terminate a top-level chain
+ *   and are excluded from fan-in counting.
+ * - inside a container body: chains follow edges within the body only; an
+ *   edge leaving the body ends the chain (the container's own top-level
+ *   continuation models "after the loop/branch").
+ * - a successor with >1 effective incoming edge is a JOIN: it must be an
+ *   aggregator (claimed once, emitted at the convergence point) or
+ *   compilation fails loudly — silent drops and fake joins are both bugs.
+ */
+function compileStepList(graph: WorkflowGraph, roots: GraphNode[], scope: Set<string> | null, bodyUnion: Set<string>, visiting: Set<string>, emitted: Set<string>, claimed: Set<string>): Step[] {
+  const out: Step[] = [];
+  const inCountFor = (id: string) => graph.edges.filter((e) => e.target === id && (scope ? scope.has(e.source) : !bodyUnion.has(e.source))).length;
+  const continuationOf = (node: GraphNode) => graph.edges
+    .filter((e) => e.source === node.id)
+    .map((e) => ({ node: graph.nodes.find((n) => n.id === e.target), handle: e.sourceHandle ?? null }))
+    .filter((x): x is { node: GraphNode; handle: string | null } => Boolean(x.node))
+    .filter((x) => !scope || scope.has(x.node.id));
+  for (const root of roots) {
+    let cur: { node: GraphNode; handle: string | null } | undefined = { node: root, handle: null };
+    while (cur) {
+      const node = cur.node; cur = undefined;
+      if (emitted.has(node.id) || claimed.has(node.id)) break;
+      const step = stepFromNode(graph, node, visiting, emitted, claimed);
+      emitted.add(node.id);
+      out.push(step);
+      let candidates = continuationOf(node);
+      if (!scope && node.appSlug === "paths") candidates = candidates.filter((c) => !c.handle);
+      if (!scope && node.appSlug === "loop") candidates = candidates.filter((c) => !bodyUnion.has(c.node.id));
+      if (candidates.length > 1) throw new Error(`WORKFLOW_GRAPH_UNSUPPORTED_FORK:${node.id}`);
+      if (candidates.length === 0) break;
+      const next = candidates[0].node;
+      if (claimed.has(next.id) || (!scope && bodyUnion.has(next.id) && next.appSlug !== "aggregator")) break;
+      if (inCountFor(next.id) > 1) {
+        if (next.appSlug === "aggregator" && !claimed.has(next.id)) {
+          claimed.add(next.id);
+          out.push(stepFromNode(graph, next, visiting, emitted, claimed));
+          emitted.add(next.id);
+          const aggCont = continuationOf(next);
+          if (aggCont.length > 1) throw new Error(`WORKFLOW_GRAPH_UNSUPPORTED_FORK:${next.id}`);
+          cur = aggCont[0] ?? undefined;
+          continue;
+        }
+        throw new Error(`WORKFLOW_GRAPH_UNSUPPORTED_JOIN:${next.id}`);
+      }
+      cur = { node: next, handle: candidates[0].handle };
+    }
+  }
+  return out;
+}
+
+function collectScope(graph: WorkflowGraph, roots: GraphNode[], acc: Set<string>): void {
+  const stack = [...roots];
+  while (stack.length) {
+    const n = stack.pop();
+    if (!n || acc.has(n.id)) continue;
+    acc.add(n.id);
+    for (const c of childrenOf(graph, n.id)) stack.push(c);
+  }
+}
+
+function stepFromNode(graph: WorkflowGraph, node: GraphNode, visiting: Set<string>, emitted: Set<string>, claimed: Set<string>): Step {
   if (visiting.has(node.id)) {
     // Do not silently turn cycles/shared joins into a fake successful filter.
     // That used to produce a definition whose runtime behavior differed from
@@ -67,6 +165,7 @@ function stepFromNode(graph: WorkflowGraph, node: GraphNode, visiting: Set<strin
     throw new Error(`WORKFLOW_GRAPH_CYCLE_OR_UNSUPPORTED_JOIN:${node.id}`);
   }
   visiting.add(node.id);
+  emitted.add(node.id);
   const props = node.config ?? {};
   const connectionId = connectionRef(node);
 
@@ -75,18 +174,24 @@ function stepFromNode(graph: WorkflowGraph, node: GraphNode, visiting: Set<strin
     return { id: node.id, name: node.label, type: "filter", condition: conditionFromNode(props), connectionId: null } as any;
   }
   if (node.appSlug === "paths" && node.operation === "branch") {
-    const result = { id: node.id, name: node.label, type: "branch", condition: conditionFromNode(props), onTrue: childrenOf(graph, node.id, "true").map((n) => stepFromNode(graph, n, visiting)), onFalse: childrenOf(graph, node.id, "false").map((n) => stepFromNode(graph, n, visiting)) } as any;
+    const bodyScope = new Set<string>();
+    collectScope(graph, [...childrenOf(graph, node.id, "true"), ...childrenOf(graph, node.id, "false")], bodyScope);
+    const result = { id: node.id, name: node.label, type: "branch", condition: conditionFromNode(props), onTrue: compileStepList(graph, childrenOf(graph, node.id, "true"), bodyScope, bodyUnionOf(graph), visiting, emitted, claimed), onFalse: compileStepList(graph, childrenOf(graph, node.id, "false"), bodyScope, bodyUnionOf(graph), visiting, emitted, claimed) } as any;
     visiting.delete(node.id); return result;
   }
   if (node.appSlug === "paths") {
+    const bodyScope = new Set<string>();
+    collectScope(graph, [...childrenOf(graph, node.id, "path-a"), ...childrenOf(graph, node.id, "path-b")], bodyScope);
     const result = { id: node.id, name: node.label, type: "router", branches: [
-      { id: "path_a", label: "Path A", condition: conditionFromNode(props), steps: childrenOf(graph, node.id, "path-a").map((n) => stepFromNode(graph, n, visiting)) },
-      { id: "path_b", label: "Default", default: true, steps: childrenOf(graph, node.id, "path-b").map((n) => stepFromNode(graph, n, visiting)) }
+      { id: "path_a", label: "Path A", condition: conditionFromNode(props), steps: compileStepList(graph, childrenOf(graph, node.id, "path-a"), bodyScope, bodyUnionOf(graph), visiting, emitted, claimed) },
+      { id: "path_b", label: "Default", default: true, steps: compileStepList(graph, childrenOf(graph, node.id, "path-b"), bodyScope, bodyUnionOf(graph), visiting, emitted, claimed) }
     ] } as any;
     visiting.delete(node.id); return result;
   }
   if (node.appSlug === "loop") {
-    const result = { id: node.id, name: node.label, type: "loop", props: { items: String(props.items ?? "{{trigger.items}}"), concurrency: Number(props.concurrency ?? 1) }, steps: childrenOf(graph, node.id).map((n) => stepFromNode(graph, n, visiting)) } as any;
+    const bodyScope = new Set<string>();
+    collectScope(graph, childrenOf(graph, node.id), bodyScope);
+    const result = { id: node.id, name: node.label, type: "loop", props: { items: String(props.items ?? "{{trigger.items}}"), concurrency: Number(props.concurrency ?? 1) }, steps: compileStepList(graph, childrenOf(graph, node.id), bodyScope, bodyUnionOf(graph), visiting, emitted, claimed) } as any;
     visiting.delete(node.id); return result;
   }
   if (node.appSlug === "aggregator") {
@@ -162,7 +267,15 @@ export function graphToFlowDefinition(raw: unknown): TFlowDefinition {
   if (!triggerNode) throw new Error("WORKFLOW_GRAPH_EMPTY");
   const roots = childrenOf(graph, triggerNode.id);
   const visiting = new Set<string>();
-  const steps = roots.map((n) => stepFromNode(graph, n, visiting));
+  const emitted = new Set<string>();
+  const claimed = new Set<string>();
+  const steps = compileStepList(graph, roots, null, bodyUnionOf(graph), visiting, emitted, claimed);
+  // No silent drops: every non-trigger node must have been compiled either at
+  // the top level or inside a container body. A node left behind means the
+  // graph encodes control flow the engine cannot represent — fail loudly.
+  for (const node of graph.nodes) {
+    if (node.id !== triggerNode.id && !emitted.has(node.id)) throw new Error(`WORKFLOW_GRAPH_UNREACHABLE_NODE:${node.id}`);
+  }
   return FlowDefinition.parse({ schemaVersion: 1, trigger: triggerFromNode(triggerNode), steps, settings: {} });
 }
 

@@ -30,7 +30,7 @@ export async function enqueueExecution(data: {
     "run",
     { executionId: data.executionId, workspaceId: data.workspaceId, orgId: data.orgId },
     {
-      jobId: `${data.executionId}:${data.delayMs ? "resume" : "start"}:${Date.now()}`,
+      jobId: `${data.executionId}-${data.delayMs ? "resume" : "start"}-${Date.now()}`,
       delay: data.delayMs,
       attempts: 5,
       backoff: { type: "exponential", delay: 2000 },
@@ -68,7 +68,7 @@ export async function enqueueFlowResume(runId: string, orgId: string): Promise<b
     { runId, orgId, kind: "resume" },
     // Timestamp in the jobId: a run can pause again later at the same step,
     // and a kept completed job must never suppress the next resume.
-    { jobId: `resume:${runId}:${Date.now()}`, removeOnComplete: 1000, removeOnFail: 5000, attempts: 3 },
+    { jobId: `resume-${runId}-${Date.now()}`, removeOnComplete: 1000, removeOnFail: 5000, attempts: 3 },
   );
   return true;
 }

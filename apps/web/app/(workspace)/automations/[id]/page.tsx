@@ -35,7 +35,7 @@ export default function AutomationOverviewPage() {
             <p className="mt-2 break-all text-xs text-ink-muted">Webhook public id {a.webhook_public_id}</p>
           )}
         </div>
-        <Link href={`/activity?automation=${id}`} className="text-sm text-teal">
+        <Link href={`/activity?flow=${id}`} className="text-sm text-teal">
           View runs
         </Link>
       </Card>

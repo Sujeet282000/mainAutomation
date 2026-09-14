@@ -1,48 +1,67 @@
-import type { WorkflowGraph } from "@algoverge/shared";
+import { query } from "./db";
+import { createAndRunFlow } from "./flow-runtime";
 import { nextCronUtc } from "./cron";
-import { query, queryOne } from "./db";
-import { createExecution } from "./engine";
 
-export async function syncScheduleFromGraph(opts: {
-  automationId: string;
-  workspaceId: string;
-  graph: WorkflowGraph;
-  enabled: boolean;
-}) {
-  const trigger = opts.graph.nodes.find((n) => n.type === "trigger" && n.appSlug === "schedule");
-  await query(`delete from automation_schedules where automation_id=$1`, [opts.automationId]);
-  if (!trigger || !opts.enabled) return;
-  const cron = String(trigger.config?.cron ?? "0 * * * *");
-  const timezone = String(trigger.config?.timezone ?? "UTC");
-  const next = nextCronUtc(cron, new Date());
-  await query(
-    `insert into automation_schedules (workspace_id, automation_id, cron, timezone, next_run_at, enabled)
-     values ($1,$2,$3,$4,$5,true)`,
-    [opts.workspaceId, opts.automationId, cron, timezone, next.toISOString()]
-  );
-}
+// =============================================================================
+// Scheduler tick (canonical).
+//
+// Schedule triggers live in triggers_registry (kind='schedule', cron_expr,
+// next_poll_at) — written by TriggerActivationService at publish time. The
+// legacy automation_schedules table is never written by the canonical publish
+// path, so ticks against it silently did nothing.
+//
+// Dispatch goes through createAndRunFlow, the ONE canonical entrypoint that
+// creates the flow_run from the PUBLISHED version and enqueues on the
+// "flow-steps" queue consumed by the durable worker. The legacy
+// createExecution() wrote rows into the dead "executions" table whose handler
+// executes against the wrong schema.
+//
+// Claim-then-dispatch: next_poll_at is advanced BEFORE dispatch so concurrent
+// tick callers (multiple API replicas) claim disjoint batches; a failed
+// dispatch leaves the trigger due again on the next tick (now + 1 min).
+// =============================================================================
 
-export async function tickSchedules() {
-  const due = await query<{ id: string; automation_id: string; cron: string; next_run_at: string }>(
-    `select id, automation_id, cron, next_run_at from automation_schedules
-     where enabled = true and next_run_at <= now()`
+const SCHEDULE_RETRY_DELAY_MS = 60_000;
+
+export async function tickSchedules(): Promise<number> {
+  const due = await query<{ id: string; org_id: string; flow_id: string; cron_expr: string; timezone: string; next_poll_at: string }>(
+    `UPDATE triggers_registry
+     SET next_poll_at = now() + make_interval(secs => $1::numeric),
+         updated_at = now()
+     WHERE id IN (
+       SELECT id FROM triggers_registry
+       WHERE enabled = true AND status = 'active' AND kind = 'schedule' AND next_poll_at <= now()
+       ORDER BY next_poll_at
+       FOR UPDATE SKIP LOCKED
+       LIMIT 50
+     )
+     RETURNING id, org_id, flow_id, cron_expr, timezone, next_poll_at`,
+    [SCHEDULE_RETRY_DELAY_MS],
   );
+
+  let fired = 0;
   for (const row of due) {
-    const next = nextCronUtc(row.cron, new Date());
-    await query(`update automation_schedules set next_run_at=$2 where id=$1`, [row.id, next.toISOString()]);
-    await createExecution({
-      automationId: row.automation_id,
-      triggerType: "schedule",
-      triggerData: { scheduledFor: new Date().toISOString() },
-      idempotencyKey: `sched:${row.automation_id}:${row.next_run_at}`
-    });
+    try {
+      await createAndRunFlow({
+        orgId: row.org_id,
+        flowId: row.flow_id,
+        userId: "scheduler",
+        triggerKind: "scheduled",
+        payload: { scheduledFor: new Date().toISOString(), cron: row.cron_expr, timezone: row.timezone },
+        idempotencyKey: `sched:${row.flow_id}:${new Date(row.next_poll_at).toISOString()}`,
+      });
+      fired += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "schedule_dispatch_failed";
+      console.warn(`[schedules] ${row.flow_id} dispatch failed: ${message}`);
+      // Leave due again: reset next_poll_at so the next tick retries promptly.
+      await query(`UPDATE triggers_registry SET next_poll_at = now(), updated_at = now() WHERE id = $1`, [row.id]).catch(() => {});
+    }
+    // Success path: advance by cron so the next occurrence is computed from now.
+    await query(`UPDATE triggers_registry SET next_poll_at = $2, updated_at = now() WHERE id = $1 AND kind = 'schedule'`, [
+      row.id,
+      nextCronUtc(row.cron_expr || "0 * * * *", new Date()).toISOString(),
+    ]).catch(() => {});
   }
-  return due.length;
-}
-
-export async function loadPublishedGraph(automationId: string) {
-  return queryOne<{ graph: WorkflowGraph }>(
-    `select v.graph from automations a join automation_versions v on v.id=a.published_version_id where a.id=$1`,
-    [automationId]
-  );
+  return fired;
 }

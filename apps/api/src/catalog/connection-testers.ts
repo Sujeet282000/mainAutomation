@@ -413,7 +413,9 @@ export async function testConnectionById(
   if (result.ok) {
     await query(`UPDATE connections SET status = 'active', updated_at = now() WHERE id = $1 AND org_id = $2`, [conn.id, orgId]);
   } else {
-    await query(`UPDATE connections SET status = 'needs_attention', updated_at = now() WHERE id = $1 AND org_id = $2`, [conn.id, orgId]);
+    // DB enum connection_status is {active,expired,error,missing}; 'error'
+    // maps to the UI's "needs attention" state (packages/contracts/connection.ts).
+    await query(`UPDATE connections SET status = 'error', updated_at = now() WHERE id = $1 AND org_id = $2`, [conn.id, orgId]);
   }
   return { ...result, appSlug, tested: true };
 }

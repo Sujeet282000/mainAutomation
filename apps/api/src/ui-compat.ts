@@ -1,11 +1,12 @@
 import type { Router, Request, Response } from "express";
 import { z } from "zod";
 import { coerceWorkflowGraph } from "@algoverge/core";
+import { normalizeWorkflowGraph } from "@algoverge/shared";
 import { APP_CATALOG, getApp, listCatalogApps } from "./catalog/catalog";
 import { authSchemaForSlug, credentialShapeError, validateAuthCredentials } from "./auth-schema";
 import { getDynamicFieldsHandler } from "./adapters";
 import { query, queryOne } from "./db";
-import { persistBuilderDraft, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
+import { persistBuilderDraft, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, resolveStepNames, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
 import { validateWorkflowGraph } from "./workflow-validation";
 import { copilotGraph, copilotChat } from "./copilot/copilot";
 import { runCopilotEngine } from "./copilot/copilot-engine";
@@ -22,6 +23,47 @@ function catalogApps() {
  * Build a plan preview from prompt heuristics for the Plan & Review modal.
  * This is the fallback when the Python AI service is unavailable.
  */
+/**
+ * Shared heuristic operation builder for plan fallbacks: derives add_node ops
+ * from the apps detected in the prompt. Used both when the Python AI service
+ * is unreachable and when it answers without operations (model plane down).
+ */
+function buildHeuristicOps(prompt: string): Array<{ kind: "add_node"; arguments: Record<string, unknown> }> {
+  const preview = _buildPlanPreview(prompt, [], []);
+  const ops: Array<{ kind: "add_node"; arguments: Record<string, unknown> }> = [];
+  const detectedApps = (preview.apps_used ?? [])
+    .map(({ slug }) => APP_CATALOG.find((a) => a.slug === slug))
+    .filter((a): a is NonNullable<typeof a> => Boolean(a));
+  // Mirror the preview's own trigger choice (steps[0] holds its app name)
+  // so the built graph always matches what the user reviewed.
+  const previewTriggerName = preview.steps[0]?.app?.toLowerCase().replace(/\s+/g, "-");
+  const previewTriggerApp = previewTriggerName
+    ? APP_CATALOG.find((a) => a.slug === previewTriggerName || a.name.toLowerCase() === previewTriggerName)
+    : undefined;
+  const triggerApp = previewTriggerApp
+    ?? detectedApps.find((a) => a.operations.some((o) => o.type === "trigger"))
+    ?? APP_CATALOG.find((a) => a.slug === "schedule");
+  if (triggerApp) {
+    const triggerOp = triggerApp.operations.find((o) => o.type === "trigger");
+    if (triggerOp) {
+      ops.push({ kind: "add_node", arguments: { appSlug: triggerApp.slug, operation: triggerOp.key, label: triggerOp.name } });
+    }
+  }
+  for (const app of detectedApps) {
+    if (app.slug === triggerApp?.slug) continue;
+    const actionOp = app.operations.find((o) => o.type !== "trigger");
+    if (actionOp) {
+      ops.push({ kind: "add_node", arguments: { appSlug: app.slug, operation: actionOp.key, label: actionOp.name } });
+    }
+  }
+  if (ops.length === 0) {
+    const httpApp = APP_CATALOG.find((a) => a.slug === "http");
+    const httpOp = httpApp?.operations.find((o) => o.type !== "trigger");
+    if (httpApp && httpOp) ops.push({ kind: "add_node", arguments: { appSlug: httpApp.slug, operation: httpOp.key, label: httpOp.name } });
+  }
+  return ops;
+}
+
 function _buildPlanPreview(
   prompt: string,
   operations: Array<{ kind: string; arguments: Record<string, unknown> }> = [],
@@ -42,6 +84,7 @@ function _buildPlanPreview(
     { re: /calendar|meeting/i, slug: "google-calendar" },
     { re: /slack/i, slug: "slack" },
     { re: /hubspot|crm/i, slug: "hubspot" },
+    { re: /salesforce|new lead|lead arrives|new prospect/i, slug: "salesforce" },
     { re: /whatsapp/i, slug: "whatsapp" },
     { re: /openai|chatgpt|ai/i, slug: "openai" },
     { re: /webhook|http post/i, slug: "webhook" },
@@ -53,14 +96,26 @@ function _buildPlanPreview(
   ];
 
   const detectedSlugs = new Set<string>();
+  const slugOrder = new Map<string, number>();
   for (const hint of appHints) {
-    if (hint.re.test(lower) && !detectedSlugs.has(hint.slug)) {
+    const m = hint.re.exec(lower);
+    if (m && !detectedSlugs.has(hint.slug)) {
       const app = apps.find((a) => a.slug === hint.slug);
       if (app) {
         detectedSlugs.add(hint.slug);
+        slugOrder.set(hint.slug, m.index);
         usedApps.push({ name: app.name, slug: app.slug });
       }
     }
+  }
+
+  // The trigger lives in the request's opening segment: "When a new lead
+  // arrives, … save to Sheets" must anchor on the lead source, not on apps
+  // merely mentioned in the action tail.
+  const triggerSegment = lower.split(/,| then | and then /)[0] ?? lower;
+  const triggerSegmentSlugs = new Set<string>();
+  for (const hint of appHints) {
+    if (hint.re.test(triggerSegment)) triggerSegmentSlugs.add(hint.slug);
   }
 
   // Detect trigger type
@@ -71,24 +126,28 @@ function _buildPlanPreview(
   } else if (/form|typeform|submitted/i.test(lower)) {
     steps.push({ label: "Form Submission", type: "trigger", app: "typeform" });
   } else {
-    // Find the first app with a trigger
-    const triggerApp = detectedSlugs.size > 0 ? [...detectedSlugs][0] : "manual";
-    const app = apps.find((a) => a.slug === triggerApp);
+    // Prefer an app detected in the opening segment that actually has a
+    // trigger operation; otherwise fall back to first detected app.
+    const triggerSlug =
+      [...triggerSegmentSlugs].find((s) => apps.find((a) => a.slug === s)?.operations.some((o) => o.type === "trigger"))
+      ?? [...detectedSlugs][0]
+      ?? "manual";
+    const app = apps.find((a) => a.slug === triggerSlug);
     const triggerOp = app?.operations.find((o) => o.type === "trigger");
     steps.push({
-      label: triggerOp?.name ?? `${app?.name ?? triggerApp} Trigger`,
+      label: triggerOp?.name ?? `${app?.name ?? triggerSlug} Trigger`,
       type: "trigger",
-      app: app?.name ?? triggerApp,
+      app: app?.name ?? triggerSlug,
     });
   }
 
-  // Add actions for detected apps (skip the first one which is the trigger)
-  let actionIndex = 0;
-  for (const slug of detectedSlugs) {
-    if (actionIndex === 0 && steps[0]?.app === slug) {
-      actionIndex++;
-      continue;
-    }
+  // Add actions for the remaining apps, ordered by where they appear in the
+  // request so "analyze with AI and save to Sheets" plans AI before storage.
+  const triggerStepApp = steps[0]?.app?.toLowerCase().replace(/\s+/g, "-");
+  const actionSlugs = [...detectedSlugs]
+    .filter((slug) => slug !== triggerStepApp)
+    .sort((a, b) => (slugOrder.get(a) ?? 0) - (slugOrder.get(b) ?? 0));
+  for (const slug of actionSlugs) {
     const app = apps.find((a) => a.slug === slug);
     if (!app) continue;
     const actionOp = app.operations.find((o) => o.type !== "trigger");
@@ -97,7 +156,6 @@ function _buildPlanPreview(
       type: "action" as const,
       app: app.name,
     });
-    actionIndex++;
   }
 
   // If no steps detected, add generic ones
@@ -268,7 +326,8 @@ export function registerUiCompat(authed: Router) {
        ORDER BY s.sequence_no ASC`,
       [run.id],
     );
-    res.json(mapRunToExecution(run as any, steps as any));
+    const stepNames = await resolveStepNames(run.flow_version_id as string | null | undefined);
+    res.json(mapRunToExecution(run as any, steps as any, stepNames));
   });
 
   /** SSE stream: real-time step-by-step execution updates */
@@ -302,7 +361,7 @@ export function registerUiCompat(authed: Router) {
       [runId],
     );
     lastStepCount = initialSteps.length;
-    sendEvent("snapshot", mapRunToExecution(run as any, initialSteps as any));
+    sendEvent("snapshot", mapRunToExecution(run as any, initialSteps as any, await resolveStepNames((run.flow_version_id as string | null | undefined))));
 
     // Poll for new steps every 200ms until terminal status
     const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "timeout"]);
@@ -650,7 +709,10 @@ export function registerUiCompat(authed: Router) {
       try {
         const definition = body.graph ? persistBuilderDraft(body.graph) : {};
         const planResult = await signedAiJson<{
+          message?: string;
           reply?: string;
+          plan?: string[];
+          confidence?: number;
           preview?: {
             summary: string;
             steps: Array<{ label: string; type: string; app: string }>;
@@ -662,7 +724,10 @@ export function registerUiCompat(authed: Router) {
           operations?: Array<{ kind: string; arguments: Record<string, unknown> }>;
           needs_input?: string[];
         }>(
-          "/copilot/plan",
+          // The Python agent exposes /copilot/chat (agent_routes.py) — /copilot/plan
+          // never existed, so every plan request 404'd and silently degraded to
+          // the generic template planner, dropping most planned steps.
+          "/copilot/chat",
           {
             message: body.prompt,
             workflow: definition,
@@ -679,18 +744,47 @@ export function registerUiCompat(authed: Router) {
           90000,
         );
         if (planResult) {
+          // AgentReply contract (Python): message/plan[]/operations/confidence 0-1.
+          const planSteps: Array<{ label: string; type: string; app: string }> = (planResult.plan ?? [])
+            .filter((s): s is string => typeof s === "string")
+            .slice(0, 12)
+            .map((line) => ({ label: line, type: "action", app: "" }));
+          const normalizedPreview = planSteps.length
+            ? {
+                // Internal fallback notes ("AI plane failed…; using the Node
+                // catalog engine") must never become the user-facing summary.
+                summary: /ai plane|catalog engine|terminated|heuristic planner/i.test(planResult.message ?? "")
+                  ? (planResult.preview?.summary ?? planSteps.map((s) => s.label).join(" → "))
+                  : planResult.message ?? "",
+                steps: planSteps,
+                apps_used: planResult.preview?.apps_used ?? [],
+                missing_connections: planResult.preview?.missing_connections ?? [],
+                missing_information: planResult.preview?.missing_information ?? [],
+                confidence: Math.round((planResult.confidence ?? 0.7) * 100) / 100,
+              }
+            : planResult.preview;
           const rawOps = planResult.operations ?? [];
 
           // ── Ground operations through the same boundary as /generate ──
           // This ensures every operation is validated against the real catalog
           // and the resulting graph is a valid WorkflowGraph.
-          let groundedGraph: any = body.graph ? (() => { try { return coerceWorkflowGraph(body.graph); } catch { return { nodes: [], edges: [] }; } })() : { nodes: [], edges: [] };
+          // Start from the RAW graph (no scaffold injection): the empty-graph
+          // placeholder trigger/action that coerceWorkflowGraph adds would get
+          // persisted into the approved workflow and fail every run.
+          let groundedGraph: any = body.graph ? (() => { try { return normalizeWorkflowGraph(body.graph); } catch { return { nodes: [], edges: [] }; } })() : { nodes: [], edges: [] };
           let groundedApplied: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
           let groundedRejected: Array<{ operation: unknown; reason: string }> = [];
           let groundedNeedsConfirmation: unknown[] = [];
           let groundedIssues: Array<{ code: string; message: string }> = [];
           let groundedOperations = rawOps;
 
+          // Model plane answered but produced no operations (e.g. providers
+          // down and the graceful fallback returned): keep the preview fall-
+          // through consistent by deriving heuristic ops so Approve still
+          // builds a real workflow matching the shown plan.
+          if (rawOps.length === 0) {
+            rawOps.push(...buildHeuristicOps(body.prompt));
+          }
           if (rawOps.length > 0) {
             try {
               const { applyAgentOperations } = await import("./agent-operation-applier");
@@ -700,6 +794,7 @@ export function registerUiCompat(authed: Router) {
                 workspaceId: req.orgId!,
                 organizationId: req.orgId!,
                 allowDestructive: false, // plan mode — no destructive ops auto-applied
+                scaffold: false, // never persist the empty-graph placeholder trigger/action into approved plans
               });
               groundedGraph = result.graph;
               groundedApplied = result.applied;
@@ -718,7 +813,7 @@ export function registerUiCompat(authed: Router) {
 
           // Build the preview from grounded operations — same source of truth
           // that the builder will use when the user approves.
-          const preview = planResult.preview ?? _buildPlanPreview(
+          const preview = normalizedPreview ?? _buildPlanPreview(
             body.prompt,
             groundedOperations.map((op) => ({ kind: op.kind, arguments: op.arguments })),
             planResult.needs_input ?? [],
@@ -747,28 +842,27 @@ export function registerUiCompat(authed: Router) {
             ],
           );
 
-          // Build structured clarification questions from needs_input +
-          // missing_connections. These become interactive questions in
-          // Plan & Review rather than flat text warnings.
+          // Build structured clarification questions from needs_input.
+          // missing_connections intentionally stay OUT of clarificationQuestions:
+          // they are connection setup tasks, not questions the user can answer
+          // with text — gating Approve on "Connect Gmail account" forced the
+          // broken "Type your answer…" UX. They surface in the modal's
+          // "Needs your attention" list instead.
           const clarificationQuestions: Array<{
             question: string;
             options?: string[];
             required: boolean;
           }> = [];
           for (const input of planResult.needs_input ?? []) {
+            // Skip connection-instruction phrasing that leaked into needs_input
+            if (/^connect\b/i.test(input)) continue;
             clarificationQuestions.push({ question: input, required: true });
-          }
-          for (const conn of preview.missing_connections ?? []) {
-            // Avoid duplicating needs_input entries
-            if (!clarificationQuestions.some((q) => q.question === conn)) {
-              clarificationQuestions.push({ question: conn, required: true });
-            }
           }
 
           res.json({
             requestId,
             sessionId,
-            reply: planResult.reply ?? preview.summary,
+            reply: planResult.message ?? planResult.reply ?? preview.summary,
             preview,
             graph: groundedGraph,
             operations: groundedOperations,
@@ -795,30 +889,7 @@ export function registerUiCompat(authed: Router) {
 
     // Emit add_node operations from the detected apps — same catalog the
     // preview describes, so the grounded graph matches the shown plan.
-    const heuristicOps: Array<{ kind: "add_node"; arguments: Record<string, unknown> }> = [];
-    const detectedApps = (preview.apps_used ?? [])
-      .map(({ slug }) => APP_CATALOG.find((a) => a.slug === slug))
-      .filter((a): a is NonNullable<typeof a> => Boolean(a));
-    const triggerApp = detectedApps.find((a) => a.operations.some((o) => o.type === "trigger"))
-      ?? APP_CATALOG.find((a) => a.slug === "schedule");
-    if (triggerApp) {
-      const triggerOp = triggerApp.operations.find((o) => o.type === "trigger");
-      if (triggerOp) {
-        heuristicOps.push({ kind: "add_node", arguments: { appSlug: triggerApp.slug, operation: triggerOp.key, label: triggerOp.name } });
-      }
-    }
-    for (const app of detectedApps) {
-      if (app.slug === triggerApp?.slug) continue;
-      const actionOp = app.operations.find((o) => o.type !== "trigger");
-      if (actionOp) {
-        heuristicOps.push({ kind: "add_node", arguments: { appSlug: app.slug, operation: actionOp.key, label: actionOp.name } });
-      }
-    }
-    if (heuristicOps.length === 0) {
-      const httpApp = APP_CATALOG.find((a) => a.slug === "http");
-      const httpOp = httpApp?.operations.find((o) => o.type !== "trigger");
-      if (httpApp && httpOp) heuristicOps.push({ kind: "add_node", arguments: { appSlug: httpApp.slug, operation: httpOp.key, label: httpOp.name } });
-    }
+    const heuristicOps = buildHeuristicOps(body.prompt);
 
     let groundedGraph: unknown = { nodes: [], edges: [] };
     let groundedApplied: Array<{ kind: string; arguments: Record<string, unknown> }> = [];
@@ -829,6 +900,7 @@ export function registerUiCompat(authed: Router) {
         workspaceId: req.orgId!,
         organizationId: req.orgId!,
         allowDestructive: false,
+        scaffold: false,
       });
       groundedGraph = result.graph;
       groundedApplied = result.applied;
@@ -865,7 +937,7 @@ export function registerUiCompat(authed: Router) {
       needs_confirmation: [],
       issues: [],
       needs_input: [],
-      clarificationQuestions: (preview.missing_connections ?? []).map((conn) => ({ question: conn, required: true })),
+      clarificationQuestions: [],
       confidence: preview.confidence ?? 0.5,
     });
   });
@@ -950,6 +1022,223 @@ export function registerUiCompat(authed: Router) {
     await query(`UPDATE organizations SET settings = $2, updated_at = now() WHERE id = $1`, [req.orgId, JSON.stringify(next)]);
     res.json({ ok: true, settings: next });
   });
+
+/**
+ * Per-workflow run analytics: total runs, success/failure split, timing and
+ * last failure — the "how much did this workflow run and what happened" view.
+ */
+authed.get("/automations/:id/run-stats", async (req, res) => {
+  const id = req.params.id;
+  const totals = await queryOne<{
+    total: string; succeeded: string; failed: string; running: string; waiting: string; cancelled: string;
+    avg_ms: string | null; last_run_at: string | null; last_status: string | null;
+    last_success_at: string | null; last_failure_at: string | null;
+  }>(
+    `SELECT
+       COUNT(*)::text AS total,
+       COUNT(*) FILTER (WHERE status = 'succeeded')::text AS succeeded,
+       COUNT(*) FILTER (WHERE status = 'failed')::text AS failed,
+       COUNT(*) FILTER (WHERE status = 'running')::text AS running,
+       COUNT(*) FILTER (WHERE status IN ('waiting','paused'))::text AS waiting,
+       COUNT(*) FILTER (WHERE status = 'cancelled')::text AS cancelled,
+       ROUND(AVG(duration_ms))::text AS avg_ms,
+       MAX(created_at)::text AS last_run_at,
+       (SELECT status FROM flow_runs WHERE flow_id = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 1) AS last_status,
+       MAX(created_at) FILTER (WHERE status = 'succeeded')::text AS last_success_at,
+       MAX(created_at) FILTER (WHERE status = 'failed')::text AS last_failure_at
+     FROM flow_runs WHERE flow_id = $1 AND org_id = $2`,
+    [id, req.orgId],
+  );
+  // Slowest + most failure-prone steps across all runs of this workflow
+  const stepStats = await query(
+    `SELECT rs.step_id, rs.operation_id, rs.step_type,
+            COUNT(*)::int AS executions,
+            COUNT(*) FILTER (WHERE rs.status = 'failed')::int AS failures,
+            ROUND(AVG(rs.duration_ms))::int AS avg_ms,
+            MAX(rs.duration_ms)::int AS max_ms
+     FROM run_steps rs
+     JOIN flow_runs fr ON fr.id = rs.run_id
+     WHERE fr.flow_id = $1 AND fr.org_id = $2
+     GROUP BY rs.step_id, rs.operation_id, rs.step_type
+     ORDER BY executions DESC
+     LIMIT 20`,
+    [id, req.orgId],
+  );
+  // Human-readable step names from the most recently executed version —
+  // run_steps stores raw step ids which would otherwise render as UUIDs.
+  const latestVersion = await queryOne<{ flow_version_id: string | null }>(
+    `SELECT flow_version_id FROM flow_runs
+     WHERE flow_id = $1 AND org_id = $2 AND flow_version_id IS NOT NULL
+     ORDER BY created_at DESC LIMIT 1`,
+    [id, req.orgId],
+  );
+  const stepNames = await resolveStepNames(latestVersion?.flow_version_id);
+  const lastFailure = await queryOne<{ id: string; created_at: string; error_json: unknown }>(
+    `SELECT r.id, r.created_at::text, s.error_json
+     FROM flow_runs r
+     JOIN run_steps s ON s.run_id = r.id AND s.status = 'failed'
+     WHERE r.flow_id = $1 AND r.org_id = $2
+     ORDER BY r.created_at DESC LIMIT 1`,
+    [id, req.orgId],
+  );
+  res.json({
+    totals: {
+      total: Number(totals?.total ?? 0),
+      succeeded: Number(totals?.succeeded ?? 0),
+      failed: Number(totals?.failed ?? 0),
+      running: Number(totals?.running ?? 0),
+      waiting: Number(totals?.waiting ?? 0),
+      cancelled: Number(totals?.cancelled ?? 0),
+      avgDurationMs: totals?.avg_ms ? Number(totals.avg_ms) : null,
+    },
+    lastRunAt: totals?.last_run_at ?? null,
+    lastStatus: totals?.last_status ?? null,
+    lastSuccessAt: totals?.last_success_at ?? null,
+    lastFailure: lastFailure
+      ? { runId: lastFailure.id, at: lastFailure.created_at, error: lastFailure.error_json }
+      : null,
+    steps: (stepStats ?? []).map((s: Record<string, unknown>) => ({
+      stepId: s.step_id,
+      name: stepNames[s.step_id as string] ?? null,
+      operation: s.operation_id,
+      type: s.step_type,
+      executions: s.executions,
+      failures: s.failures,
+      avgMs: s.avg_ms,
+      maxMs: s.max_ms,
+    })),
+  });
+});
+
+/**
+ * Deterministic workflow overview: what each step is (app · action · plain-
+ * language description), the flow edges, and actionable guidance. Always
+ * available — no model plane required.
+ */
+authed.get("/automations/:id/overview", async (req, res) => {
+  const flow = await queryOne(
+    `SELECT f.*, fv.definition as published_definition
+     FROM flows f
+     LEFT JOIN flow_versions fv ON fv.id = f.published_version_id
+     WHERE f.id = $1 AND f.org_id = $2`,
+    [req.params.id, req.orgId],
+  );
+  if (!flow) return res.status(404).json({ error: "not_found" });
+  const graph = applyAutomationGraphShape(flow as any).graph as {
+    nodes: Array<{ id: string; type: string; appSlug: string; operation?: string; label?: string; config?: Record<string, unknown> }>;
+    edges: Array<{ source: string; target: string }>;
+  };
+  const order: string[] = [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  // Walk edges from the trigger for a stable execution order.
+  const trigger = graph.nodes.find((n) => n.type === "trigger");
+  const visited = new Set<string>();
+  const queue: string[] = trigger ? [trigger.id] : graph.nodes.slice(0, 1).map((n) => n.id);
+  while (queue.length) {
+    const nid = queue.shift()!;
+    if (visited.has(nid)) continue;
+    visited.add(nid);
+    order.push(nid);
+    for (const e of graph.edges.filter((e) => e.source === nid)) queue.push(e.target);
+  }
+  for (const n of graph.nodes) if (!visited.has(n.id)) order.push(n.id);
+
+  const appNames: Record<string, string> = {};
+  for (const node of graph.nodes) {
+    if (!appNames[node.appSlug]) {
+      const app = APP_CATALOG.find((a) => a.slug === node.appSlug);
+      appNames[node.appSlug] = app?.name ?? node.appSlug;
+    }
+  }
+  const humanOp = (slug: string, op?: string): string => {
+    if (!op) return "built-in step";
+    const app = APP_CATALOG.find((a) => a.slug === slug);
+    const found = app?.operations.find((o) => o.key === op);
+    return found?.name ?? op;
+  };
+  const describe = (n: (typeof graph.nodes)[number], i: number): string => {
+    const label = n.label || humanOp(n.appSlug, n.operation);
+    if (n.type === "trigger") {
+      return `Starts the workflow when ${describeTrigger(n)}. Its payload (fields from ${appNames[n.appSlug] ?? n.appSlug}) is passed to the next step.`;
+    }
+    const appLabel = appNames[n.appSlug] ?? n.appSlug;
+    const opName = humanOp(n.appSlug, n.operation);
+    if (n.appSlug === "openai" || n.appSlug === "anthropic" || n.appSlug === "gemini" || n.appSlug === "ai") {
+      return `Step ${i} runs an AI prompt (${opName}) using data from earlier steps. Map fields like {{trigger.subject}} into the prompt, and reference the AI output in later steps.`;
+    }
+    if (n.appSlug === "filter") return `Step ${i} stops the flow unless its condition matches (filter: ${JSON.stringify(n.config ?? {}).slice(0, 120)}).`;
+    return `Step ${i} runs ${appLabel} — ${opName}. Configure its required fields, mapping data from earlier steps (e.g. {{trigger.subject}}).`;
+  };
+  const steps = order.map((nid, i) => {
+    const n = byId.get(nid)!;
+    return {
+      id: n.id,
+      index: i + 1,
+      app: appNames[n.appSlug] ?? n.appSlug,
+      appSlug: n.appSlug,
+      action: n.type === "trigger" ? `Trigger — ${humanOp(n.appSlug, n.operation)}` : humanOp(n.appSlug, n.operation),
+      label: n.label ?? humanOp(n.appSlug, n.operation),
+      type: n.type,
+      description: describe(n, i + 1),
+    };
+  });
+  const issues: string[] = [];
+  const stepIds = new Set(graph.nodes.map((n) => n.id));
+  for (const e of graph.edges) {
+    if (!stepIds.has(e.source) || !stepIds.has(e.target)) issues.push(`Edge ${e.source} → ${e.target} references a missing step.`);
+  }
+  if (!trigger) issues.push("No trigger step — this workflow can never start.");
+  const unconnected = graph.nodes.filter((n) => n.type !== "trigger" && !graph.edges.some((e) => e.target === n.id));
+  if (unconnected.length) issues.push(`${unconnected.length} step(s) are not reachable from the trigger: ${unconnected.map((n) => n.label ?? humanOp(n.appSlug, n.operation)).join(", ")}.`);
+  const missingConfig: string[] = [];
+  for (const n of graph.nodes) {
+    if (n.type === "trigger") continue;
+    const app = APP_CATALOG.find((a) => a.slug === n.appSlug);
+    const op = app?.operations.find((o) => o.key === n.operation);
+    const reqs = (op?.inputFields ?? []).filter((f: { required?: boolean }) => f.required);
+    const blank = reqs.filter((f: { key: string }) => {
+      const v = (n.config ?? {})[f.key];
+      return v === undefined || v === null || v === "";
+    });
+    if (blank.length) missingConfig.push(`${n.label ?? humanOp(n.appSlug, n.operation)}: ${blank.map((f: { key: string }) => f.key).join(", ")}`);
+  }
+  res.json({
+    name: (flow as any).name,
+    status: (flow as any).status,
+    steps,
+    edges: graph.edges,
+    analysis: {
+      issues,
+      missingConfig,
+      guidance: [
+        ...missingConfig.map((m) => `Open the editor and fill the required fields — ${m}.`),
+        ...(issues.length ? issues.map((i) => `Fix structure: ${i}`) : []),
+        `Use “Test workflow” to run it once end-to-end, then check Runs → this run for per-step logs and outputs.`,
+        `Publish only after a successful test — published workflows run on their real triggers (email, schedule, webhook).`,
+      ],
+      nextStep: missingConfig.length
+        ? "Fill the highlighted required fields in the editor, then run a test."
+        : issues.length
+          ? "Fix the structural issues above, then run a test."
+          : "Run a test workflow; if it succeeds, publish to go live.",
+    },
+  });
+});
+
+function describeTrigger(n: { appSlug: string; operation?: string; config?: Record<string, unknown> }): string {
+  const app = APP_CATALOG.find((a) => a.slug === n.appSlug);
+  const op = app?.operations.find((o) => o.key === n.operation);
+  const name = op?.name ?? "trigger";
+  switch (n.appSlug) {
+    case "schedule": return `its schedule fires${n.config && "cron" in n.config ? ` (cron: ${String(n.config.cron)})` : ""}`;
+    case "webhook": return "a webhook payload arrives";
+    case "gmail": return `a new email arrives (${name})`;
+    case "forms": return "a form is submitted";
+    case "manual": return "you press Run";
+    default: return `${app?.name ?? n.appSlug} reports ${name}`;
+  }
+}
+
 }
 
 export function applyAutomationGraphShape(row: any) {

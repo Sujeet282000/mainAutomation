@@ -2,7 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpDown, Bot, Calculator, Database, Download, Eye, Filter, Grid3X3, Link2, MoreHorizontal, Plus, Search, Settings2, Trash2, Upload, Zap } from "lucide-react";
+import {
+  DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+  sortableKeyboardCoordinates, horizontalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ArrowUpDown, Bot, Calculator, Database, Download, Eye, Filter, Grid3X3, GripVertical, Link2, MoreHorizontal, Plus, Search, Settings2, Trash2, Upload, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { api, getToken, getWorkspaceId, API_URL } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -75,8 +84,7 @@ function TableCard({ table, onOpen, onDelete }: { table: Table; onOpen: () => vo
 function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) {
   const qc = useQueryClient();
   const [fields, setFields] = useState<TableField[]>(table.schema_json?.fields?.length ? table.schema_json.fields : []);
-  const [records, setRecords] = useState<RecordRow[]>([]);
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [records, setRecords] = useState<RecordRow[]>([]);  const [draft, setDraft] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<"grid" | "form">("grid");
   const [aiGenerating, setAiGenerating] = useState<Record<string, boolean>>({});
@@ -200,12 +208,52 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
     setEditFieldConfig({ ...fields[index] });
   }
 
+  // Field drag-and-drop (persisted via Save fields)
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  function onFieldDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const from = fields.findIndex((f) => f.key === active.id);
+    const to = fields.findIndex((f) => f.key === over.id);
+    if (from < 0 || to < 0) return;
+    setFields(arrayMove(fields, from, to));
+  }
+
   function saveFieldConfig() {
     if (editingField === null) return;
     const n = [...fields];
     n[editingField] = { ...n[editingField], ...editFieldConfig } as TableField;
     setFields(n);
     setEditingField(null);
+  }
+
+  // Record row drag-and-drop: persist manual order server-side.
+  const rowDndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  function onToggleAll(checked: boolean) {
+    setSelectedIds(checked ? new Set(records.map((r) => r.id)) : new Set());
+  }
+
+  async function onRowDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const from = records.findIndex((r) => r.id === active.id);
+    const to = records.findIndex((r) => r.id === over.id);
+    if (from < 0 || to < 0) return;
+    const next = arrayMove(records, from, to);
+    setRecords(next);
+    try {
+      await api(`/tables/${table.id}/records/reorder`, { method: "POST", body: JSON.stringify({ ids: next.map((r) => r.id) }) });
+    } catch (err) {
+      toast.error("Couldn't save row order", { description: err instanceof Error ? err.message : "Unknown error" });
+      loadRecords();
+    }
   }
 
   return (
@@ -221,20 +269,20 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
         </div>
         <div className="flex-1 overflow-y-auto p-3">
           <p className="mb-2 text-[10px] font-semibold uppercase text-ink-muted">Fields ({fields.length})</p>
-          {fields.map((f, i) => (
-            <div
-              key={f.key}
-              className={cn("mb-1.5 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs cursor-pointer transition", editingField === i ? "border-teal bg-teal/5" : "border-line hover:border-teal/40")}
-              onClick={() => openFieldEditor(i)}
-            >
-              <span className="flex-1 truncate">{f.label ?? f.key}</span>
-              <FieldTypeBadge type={f.type} />
-              <button
-                className="text-ink-muted hover:text-danger"
-                onClick={(e) => { e.stopPropagation(); const n = [...fields]; n.splice(i, 1); setFields(n); setEditingField(null); }}
-              >×</button>
-            </div>
-          ))}
+          <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={onFieldDragEnd}>
+            <SortableContext items={fields.map((f) => f.key)} strategy={verticalListSortingStrategy}>
+              {fields.map((f, i) => (
+                <SortableFieldRow
+                  key={f.key}
+                  field={f}
+                  index={i}
+                  active={editingField === i}
+                  onOpen={() => openFieldEditor(i)}
+                  onRemove={() => { const n = [...fields]; n.splice(i, 1); setFields(n); setEditingField(null); }}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
 
           {/* Field editor panel */}
           {editingField !== null && editFieldConfig && (
@@ -381,7 +429,7 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                       <input
                         type="checkbox"
                         checked={records.length > 0 && selectedIds.size === records.length}
-                        onChange={(e) => setSelectedIds(e.target.checked ? new Set(records.map((r) => r.id)) : new Set())}
+                        onChange={(e) => onToggleAll(e.target.checked)}
                         className="h-3 w-3"
                       />
                     </th>
@@ -418,22 +466,29 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                         return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
                       });
                     }
-                    return viewRows.map((r) => (
-                    <tr key={r.id} className="border-b border-line/50 hover:bg-muted/30">
-                      <td className="px-3 py-2 text-ink-muted">
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(r.id)}
-                          onChange={(e) => {
-                            const next = new Set(selectedIds);
-                            if (e.target.checked) next.add(r.id); else next.delete(r.id);
-                            setSelectedIds(next);
-                          }}
-                          className="h-3 w-3"
-                        />
-                      </td>
-                      {fields.map((f) => (
-                        <td key={f.key} className="px-3 py-2">
+                    // Drag reorder only makes sense on the unsorted, unsearched view.
+                    const canDrag = !sort && !q;
+                    const body = viewRows.map((r) => (
+                      <SortableRecordRow
+                        key={r.id}
+                        record={r}
+                        fields={fields}
+                        selected={selectedIds.has(r.id)}
+                            onToggle={(checked) => {
+                          const next = new Set(selectedIds);
+                          if (checked) next.add(r.id); else next.delete(r.id);
+                          setSelectedIds(next);
+                        }}
+                        onDelete={async () => {
+                          try {
+                            await api(`/tables/${table.id}/records/${r.id}`, { method: "DELETE" });
+                            loadRecords();
+                            toast.success("Record deleted");
+                          } catch (err) {
+                            toast.error("Failed to delete record", { description: err instanceof Error ? err.message : "Unknown error" });
+                          }
+                        }}
+                        renderCell={(f) => (
                           <TableCellRenderer
                             field={f}
                             value={r.data?.[f.key]}
@@ -447,21 +502,16 @@ function TableEditor({ table, onClose }: { table: Table; onClose: () => void }) 
                             onButtonRun={handleButtonRun}
                             onLinkedSelect={handleLinkedSelect}
                           />
-                        </td>
-                      ))}
-                      <td>
-                        <button className="text-ink-muted hover:text-danger" onClick={async () => {
-                          try {
-                            await api(`/tables/${table.id}/records/${r.id}`, { method: "DELETE" });
-                            loadRecords();
-                            toast.success("Record deleted");
-                          } catch (err) {
-                            toast.error("Failed to delete record", { description: err instanceof Error ? err.message : "Unknown error" });
-                          }
-                        }}><Trash2 className="h-3 w-3" /></button>
-                      </td>
-                    </tr>
-                  ));
+                        )}
+                      />
+                    ));
+                    return canDrag ? (
+                      <DndContext sensors={rowDndSensors} collisionDetection={closestCenter} onDragEnd={onRowDragEnd}>
+                        <SortableContext items={viewRows.map((r) => r.id)} strategy={verticalListSortingStrategy}>
+                          {body}
+                        </SortableContext>
+                      </DndContext>
+                    ) : body;
                   })()}
                 </tbody>
               </table>
@@ -685,5 +735,105 @@ export default function TablesPage() {
 
       {open && <TableEditor table={open} onClose={() => setOpen(null)} />}
     </div>
+  );
+}
+
+/* ── Draggable field row (dnd-kit) ────────────────────────────────────── */
+
+function SortableFieldRow({
+  field,
+  index,
+  active,
+  onOpen,
+  onRemove,
+}: {
+  field: TableField;
+  index: number;
+  active: boolean;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: field.key });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 30 : undefined }}
+      className={cn(
+        "mb-1.5 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition",
+        active ? "border-teal bg-teal/5" : "border-line hover:border-teal/40",
+        isDragging && "opacity-80 shadow-card ring-1 ring-teal/40",
+      )}
+    >
+      <button
+        type="button"
+        className="cursor-grab touch-none text-ink-muted opacity-0 transition group-hover:opacity-100 hover:text-ink"
+        aria-label={`Reorder ${field.label ?? field.key}`}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-3 w-3" />
+      </button>
+      <button type="button" className="flex flex-1 items-center gap-2 truncate text-left" onClick={onOpen}>
+        <span className="flex-1 truncate">{field.label ?? field.key}</span>
+        <FieldTypeBadge type={field.type} />
+      </button>
+      <button type="button" className="text-ink-muted hover:text-danger" onClick={onRemove} aria-label="Remove field">×</button>
+      <span className="sr-only">Field {index + 1}</span>
+    </div>
+  );
+}
+
+/* ── Draggable record row (dnd-kit) ───────────────────────────────────── */
+
+function SortableRecordRow({
+  record,
+  fields,
+  selected,
+  onToggle,
+  onDelete,
+  renderCell,
+}: {
+  record: RecordRow;
+  fields: TableField[];
+  selected: boolean;
+  onToggle: (checked: boolean) => void;
+  onDelete: () => void;
+  renderCell: (f: TableField) => React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: record.id });
+  return (
+    <tr
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 30 : undefined }}
+      className={cn("border-b border-line/50 hover:bg-muted/30", isDragging && "bg-elevated shadow-card ring-1 ring-teal/40")}
+    >
+      <td className="px-3 py-2 text-ink-muted">
+        <span className="mr-1 inline-flex align-middle">
+          <button
+            type="button"
+            className="cursor-grab touch-none text-ink-muted hover:text-ink active:cursor-grabbing"
+            aria-label="Reorder record"
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical className="h-3 w-3" />
+          </button>
+        </span>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(e) => onToggle(e.target.checked)}
+          className="h-3 w-3 align-middle"
+        />
+      </td>
+      {fields.map((f) => (
+        <td key={f.key} className="px-3 py-2">{renderCell(f)}</td>
+      ))}
+      <td>
+        <button type="button" className="text-ink-muted hover:text-danger" onClick={onDelete}>
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </td>
+    </tr>
   );
 }

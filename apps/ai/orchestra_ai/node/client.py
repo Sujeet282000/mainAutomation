@@ -87,7 +87,16 @@ class NodeApiClient:
             if kind == "action" and card.get("type") == "trigger":
                 return
             hay = f"{card.get('slug','')} {card.get('name','')} {card.get('op_name') or card.get('key','')} {card.get('key','')}".lower()
-            if any(tok in hay for tok in needle.split() if len(tok) > 2):
+            tokens = [t for t in needle.split() if len(t) > 2]
+            if any(tok in hay for tok in tokens):
+                hits.append(card)
+                return
+            # Phrase fallback: natural-language intents arrive as full phrases
+            # ("analyze with AI") whose individual tokens are stopwords+filler.
+            # Match the leading word ("analyze", "save") against the card so
+            # these still resolve to real operations instead of empty hits.
+            first_word = needle.split()[0] if needle.split() else ""
+            if first_word and first_word in hay:
                 hits.append(card)
 
         for app in apps:

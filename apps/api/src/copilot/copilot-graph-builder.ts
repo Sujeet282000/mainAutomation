@@ -55,8 +55,14 @@ export function compilePlanToGraph(plan: AutomationPlan): WorkflowGraph {
         });
       }
     } else {
-      // Default: connect to previous step
-      const prevStep = plan.steps.find((s) => s.order === step.order - 1);
+      // Default: connect to the previous step in EXECUTION order. Chaining by
+      // sorted position (not order === n-1) guarantees every non-trigger step
+      // gets an incoming edge even when plan orders are non-contiguous — the
+      // old exact-order lookup silently produced graphs with orphan nodes,
+      // which then failed compilation with WORKFLOW_GRAPH_UNREACHABLE_NODE.
+      const ordered = [...plan.steps].sort((a, b) => a.order - b.order);
+      const idx = ordered.findIndex((s) => s.id === step.id);
+      const prevStep = idx > 0 ? ordered[idx - 1] : undefined;
       if (prevStep) {
         edges.push({
           id: `e-${prevStep.id}-${step.id}`,

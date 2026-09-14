@@ -7,7 +7,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import crypto from "crypto";
-import { query, queryOne } from "./db";
+import { query, queryOne, pool } from "./db";
 import {
   authMiddleware,
   orgMiddleware,
@@ -243,7 +243,9 @@ router.post("/public/forms/:workspaceId/:slug", async (req, res) => {
   let row: { id: string };
   try {
     row = await queryOne<{ id: string }>(
-      `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
+      `INSERT INTO data_table_rows (org_id, table_id, data, position)
+       VALUES ($1, $2, $3, COALESCE((SELECT max(position) FROM data_table_rows WHERE org_id = $1 AND table_id = $2), -1) + 1)
+       RETURNING id`,
       [form.org_id, form.id, JSON.stringify(data)],
     );
   } catch (e) {
@@ -383,19 +385,19 @@ router.post("/public/interfaces/:workspaceId/:slug/buttons/:automationId/run", a
 // ── Public chatbot share links (apps/web/app/c/[workspaceId]/[slug]) ────────
 
 router.get("/public/chatbots/:workspaceId/:slug", async (req, res) => {
-  const bot = await queryOne<{ id: string; name: string; payload: { instructions?: string; welcomeMessage?: string; is_public?: boolean } }>(
-    `SELECT id, name, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
+  const bot = await queryOne<{ id: string; name: string; instructions: string; welcome_message: string | null; is_public: boolean }>(
+    `SELECT id, name, instructions, welcome_message, is_public FROM chatbots WHERE org_id = $1 AND slug = $2`,
     [req.params.workspaceId, req.params.slug],
   );
   if (!bot) return res.status(404).json({ error: "not_found" });
   // Private bots stay invisible on the public surface.
-  if ((bot.payload as { is_public?: boolean }).is_public === false) return res.status(404).json({ error: "not_found" });
+  if (bot.is_public === false) return res.status(404).json({ error: "not_found" });
   res.json({
     chatbot: {
       id: bot.id,
       name: bot.name,
-      instructions: String((bot.payload as { instructions?: string }).instructions ?? ""),
-      welcomeMessage: (bot.payload as { welcomeMessage?: string }).welcomeMessage ?? null,
+      instructions: String(bot.instructions ?? ""),
+      welcomeMessage: bot.welcome_message ?? null,
     },
   });
 });
@@ -404,13 +406,12 @@ router.post("/public/chatbots/:workspaceId/:slug/chat", async (req, res) => {
   const message = String((req.body as { message?: unknown } | undefined)?.message ?? "").trim();
   if (!message) return res.status(400).json({ error: "missing_message" });
   if (message.length > 4000) return res.status(400).json({ error: "message_too_long" });
-  const bot = await queryOne<{ id: string; payload: Record<string, unknown> }>(
-    `SELECT id, payload FROM workspace_items WHERE org_id = $1 AND kind = 'chatbot' AND payload->>'slug' = $2`,
+  const bot = await queryOne<{ id: string; instructions: string; knowledge: string; model: string | null; is_public: boolean }>(
+    `SELECT id, instructions, knowledge, model, is_public FROM chatbots WHERE org_id = $1 AND slug = $2`,
     [req.params.workspaceId, req.params.slug],
   );
   if (!bot) return res.status(404).json({ error: "not_found" });
-  const payload = bot.payload as Record<string, unknown>;
-  if (payload.is_public === false) return res.status(404).json({ error: "not_found" });
+  if (bot.is_public === false) return res.status(404).json({ error: "not_found" });
   // Public-surface abuse guard: fixed-window per-bot rate limit (fail open).
   try {
     const { consumeRateLimit } = await import("./rate-limit");
@@ -419,16 +420,14 @@ router.post("/public/chatbots/:workspaceId/:slug/chat", async (req, res) => {
   } catch { /* limiter unavailable — fail open */ }
   // Chatbot = Agent + chat channel (P1 #20/#21): reuse the one agent runtime
   // instead of a second AI path. No tools are exposed on public chat.
-  // agent_runs.agent_id is a UUID column — a "chatbot:..." prefix breaks every
-  // insert, so the workspace_item id (a real UUID) is used directly.
   try {
     const result = await runAgentLoop({
       agent: {
-        id: String(bot.id),
-        instructions: String(payload.instructions ?? ""),
-        knowledge: String(payload.knowledge ?? ""),
+        id: bot.id,
+        instructions: bot.instructions ?? "",
+        knowledge: bot.knowledge ?? "",
         tools: [],
-        model: typeof payload.model === "string" ? payload.model : null,
+        model: bot.model,
         approval_required: false,
         max_actions: 4,
         status: "on",
@@ -2275,8 +2274,31 @@ authed.get("/automations", async (req, res) => {
   }
   q += ` ORDER BY f.updated_at DESC`;
   const rows = await query(q, params);
+  // Per-workflow run stats in one shot: totals + last run, for list badges.
+  const stats = await query(
+    `SELECT flow_id,
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+            COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+            MAX(created_at)::text AS last_run_at,
+            (SELECT status FROM flow_runs lr WHERE lr.flow_id = fr.flow_id ORDER BY created_at DESC LIMIT 1) AS last_status
+     FROM flow_runs fr
+     WHERE org_id = $1
+     GROUP BY flow_id`,
+    params.slice(0, 1),
+  );
+  const statsByFlow = new Map((stats ?? []).map((s: Record<string, unknown>) => [String(s.flow_id), s]));
   // Map flow status to automation status for frontend
-  const automations = rows.map((r: any) => applyAutomationGraphShape(r));
+  const automations = rows.map((r: any) => {
+    const shaped = applyAutomationGraphShape(r);
+    const s = statsByFlow.get(String(shaped.id));
+    return {
+      ...shaped,
+      runStats: s
+        ? { total: s.total, succeeded: s.succeeded, failed: s.failed, lastRunAt: s.last_run_at, lastStatus: s.last_status }
+        : null,
+    };
+  });
   res.json({ automations });
 });
 
@@ -2393,14 +2415,18 @@ authed.post("/automations/:id/run", async (req, res) => {
     );
     if (!flow) return res.status(404).json({ error: "not_found" });
 
-    // Execute workflow — createAndRunFlow creates the run record first, returns ID
+    // Execute workflow — createAndRunFlow creates the run record first, returns ID.
+    // triggerKind "manual_test" selects the TEST path in createAndRunFlow:
+    // executes the current DRAFT graph against a test version. Production runs
+    // (webhook/schedule ingress) must use the published version and are routed
+    // elsewhere; anything explicitly labelled *_test never publishes blocks.
     const { createAndRunFlow } = await import("./flow-runtime");
     const exec = await createAndRunFlow({
       orgId: req.orgId!,
       flowId: flow.id,
       userId: req.user!.userId,
       payload: (req.body as any)?.payload ?? { ping: true },
-      triggerKind: "manual",
+      triggerKind: "manual_test",
     });
     res.json({ execution: { id: exec.id, status: "started" } });
   } catch (err: any) {
@@ -3006,18 +3032,53 @@ authed.patch("/tables/:id", async (req, res) => {
 });
 
 authed.get("/tables/:id/records", async (req, res) => {
+  // Manual order (dnd) first, then legacy rows newest-first.
   const rows = await query(
-    `SELECT * FROM data_table_rows WHERE table_id = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 200`,
+    `SELECT * FROM data_table_rows WHERE table_id = $1 AND org_id = $2
+     ORDER BY position ASC NULLS LAST, created_at DESC LIMIT 200`,
     [req.params.id, req.orgId],
   );
   res.json({ records: rows });
 });
 
+// Persist drag-and-drop row order from the Tables editor.
+authed.post("/tables/:id/records/reorder", async (req, res) => {
+  const body = z.object({ ids: z.array(z.string().uuid()).min(1).max(500) }).parse(req.body);
+  const owned = await queryOne<{ n: string }>(
+    `SELECT count(*)::text AS n FROM data_table_rows WHERE table_id = $1 AND org_id = $2 AND id = ANY($3::uuid[])`,
+    [req.params.id, req.orgId, body.ids],
+  );
+  if (!owned || Number(owned.n) !== body.ids.length) return res.status(404).json({ error: "not_found" });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (let i = 0; i < body.ids.length; i++) {
+      await client.query(`UPDATE data_table_rows SET position = $1, updated_at = now() WHERE id = $2 AND table_id = $3 AND org_id = $4`, [i, body.ids[i], req.params.id, req.orgId]);
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+  res.json({ ok: true });
+});
+
 authed.post("/tables/:id/records", async (req, res) => {
   const body = z.object({ data: z.record(z.unknown()) }).parse(req.body);
+  // New records land at the end of any manual ordering.
+  const maxPos = await queryOne<{ p: number | null }>(
+    `SELECT max(position) AS p FROM data_table_rows WHERE table_id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
   const row = await queryOne<{ id: string }>(
-    `INSERT INTO data_table_rows (org_id, table_id, data) VALUES ($1, $2, $3) RETURNING id`,
-    [req.orgId, req.params.id, JSON.stringify(body.data)],
+    `INSERT INTO data_table_rows (org_id, table_id, data, position) VALUES ($1, $2, $3, $4) RETURNING id`,
+    // max(position) is NULL when every row predates manual ordering (or the
+    // table is empty) — start the ordered sequence at 0 in that case so dnd
+    // has a base. Number.isFinite(null) is false, which used to persist NULL
+    // forever and made drag-reorder unreachable on legacy tables.
+    [req.orgId, req.params.id, JSON.stringify(body.data), maxPos?.p == null ? 0 : Number(maxPos.p) + 1],
   );
   // P4 #46: table records are first-class automation triggers.
   void fireTableRecordEvent({ tableId: req.params.id, record: { id: row!.id, ...body.data }, operation: "new_record" }).catch(() => {});
@@ -3445,7 +3506,8 @@ authed.post("/billing/checkout", async (req, res) => {
 });
 
 // ============================================================================
-// INTERFACES / CHATBOTS / AGENTS / CANVAS (workspace_items)
+// INTERFACES / CANVAS (workspace_items) — agents & chatbots live in their own
+// canonical tables (see above)
 // ============================================================================
 
 function presentItem(row: Record<string, unknown>) {
@@ -3515,9 +3577,34 @@ authed.patch("/interfaces/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Chatbots: canonical `chatbots` table ─────────────────────────────────────
+// Chatbots live in the real chatbots table — chatbot_messages FKs chatbots(id),
+// so the legacy workspace_items dual-write made every test message violate the
+// FK. The web surface expects camelCase (welcomeMessage/automationId/isPublic).
+function presentChatbot(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    instructions: row.instructions ?? "",
+    knowledge: row.knowledge ?? "",
+    keyword: row.keyword ?? null,
+    automationId: row.automation_id ?? null,
+    model: row.model ?? null,
+    welcomeMessage: row.welcome_message ?? null,
+    isPublic: row.is_public !== false,
+    status: row.status ?? "on",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 authed.get("/chatbots", async (req, res) => {
-  const rows = await listItems(req.orgId!, "chatbot");
-  res.json({ chatbots: rows.map(presentItem) });
+  const rows = await query(
+    `SELECT * FROM chatbots WHERE org_id = $1 ORDER BY updated_at DESC`,
+    [req.orgId],
+  );
+  res.json({ chatbots: rows.map(presentChatbot) });
 });
 
 authed.post("/chatbots", async (req, res) => {
@@ -3529,12 +3616,20 @@ authed.post("/chatbots", async (req, res) => {
     automationId: z.string().uuid().optional(),
   }).parse(req.body);
   const slug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const row = await insertItem(req.orgId!, "chatbot", body.name, { ...body, slug, activities: [] });
-  res.json({ chatbot: presentItem(row!) });
+  const row = await queryOne(
+    `INSERT INTO chatbots (org_id, name, slug, instructions, knowledge, keyword, automation_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [req.orgId, body.name, slug, body.instructions ?? "", body.knowledge ?? "", body.keyword ?? null, body.automationId ?? null],
+  );
+  res.json({ chatbot: presentChatbot(row!) });
 });
 
 authed.delete("/chatbots/:id", async (req, res) => {
-  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`, [req.params.id, req.orgId]);
+  const row = await queryOne<{ id: string }>(
+    `DELETE FROM chatbots WHERE id = $1 AND org_id = $2 RETURNING id`,
+    [req.params.id, req.orgId],
+  );
+  if (!row) return res.status(404).json({ error: "not_found" });
   res.json({ ok: true });
 });
 
@@ -3548,23 +3643,29 @@ authed.patch("/chatbots/:id", async (req, res) => {
     isPublic: z.boolean().optional(),
     model: z.string().nullable().optional(),
     welcomeMessage: z.string().nullable().optional(),
-    theme: z.record(z.unknown()).optional(),
+    theme: z.record(z.unknown()).nullable().optional(),
+    status: z.enum(["on", "off"]).optional(),
   }).parse(req.body);
-  const existing = await queryOne(`SELECT payload, name FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`, [req.params.id, req.orgId]);
-  if (!existing) return res.status(404).json({ error: "not_found" });
-  const payload = { ...(existing.payload as Record<string, unknown>) };
-  if (body.instructions !== undefined) payload.instructions = body.instructions;
-  if (body.knowledge !== undefined) payload.knowledge = body.knowledge;
-  if (body.automationId !== undefined) payload.automationId = body.automationId;
-  if (body.keyword !== undefined) payload.keyword = body.keyword;
-  if (body.isPublic !== undefined) payload.is_public = body.isPublic;
-  if (body.model !== undefined) payload.model = body.model;
-  if (body.welcomeMessage !== undefined) payload.welcomeMessage = body.welcomeMessage;
-  if (body.theme !== undefined) payload.theme = body.theme;
-  await query(
-    `UPDATE workspace_items SET name = $3, payload = $4, updated_at = now() WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`,
-    [req.params.id, req.orgId, body.name ?? existing.name, JSON.stringify(payload)],
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const map: Record<string, string> = {
+    name: "name", instructions: "instructions", knowledge: "knowledge",
+    keyword: "keyword", model: "model", welcomeMessage: "welcome_message",
+    theme: "theme", status: "status",
+  };
+  for (const [key, col] of Object.entries(map)) {
+    const v = (body as Record<string, unknown>)[key];
+    if (v !== undefined) { sets.push(`${col} = $${params.length + 1}`); params.push(v); }
+  }
+  if (body.automationId !== undefined) { sets.push(`automation_id = $${params.length + 1}`); params.push(body.automationId); }
+  if (body.isPublic !== undefined) { sets.push(`is_public = $${params.length + 1}`); params.push(body.isPublic); }
+  if (!sets.length) return res.json({ ok: true });
+  sets.push(`updated_at = now()`);
+  const row = await queryOne<{ id: string }>(
+    `UPDATE chatbots SET ${sets.join(", ")} WHERE id = $${params.length + 1} AND org_id = $${params.length + 2} RETURNING id`,
+    [...params, req.params.id, req.orgId],
   );
+  if (!row) return res.status(404).json({ error: "not_found" });
   res.json({ ok: true });
 });
 
@@ -3572,10 +3673,12 @@ authed.patch("/chatbots/:id", async (req, res) => {
 // just with the chat tool surface. Keyword hit triggers the linked workflow.
 authed.post("/chatbots/:id/chat", async (req, res) => {
   const body = z.object({ message: z.string().min(1), sessionId: z.string().optional() }).parse(req.body);
-  const bot = await queryOne(`SELECT * FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'chatbot'`, [req.params.id, req.orgId]);
+  const bot = await queryOne<{ id: string; instructions: string; knowledge: string; model: string | null; automation_id: string | null; keyword: string | null; status: string | null }>(
+    `SELECT id, instructions, knowledge, model, automation_id, keyword, status FROM chatbots WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.orgId],
+  );
   if (!bot) return res.status(404).json({ error: "not_found" });
-  const payload = (bot.payload ?? {}) as Record<string, unknown>;
-  if (payload.status === "off") return res.status(400).json({ error: "chatbot_off" });
+  if (bot.status === "off") return res.status(400).json({ error: "chatbot_off" });
   // Abuse guard: per-bot rate limit, fail open when Redis is down.
   try {
     const { consumeRateLimit } = await import("./rate-limit");
@@ -3586,11 +3689,11 @@ authed.post("/chatbots/:id/chat", async (req, res) => {
   try {
     const result = await runAgentLoop({
       agent: {
-        id: String(bot.id),
-        instructions: String(payload.instructions ?? ""),
-        knowledge: String(payload.knowledge ?? ""),
+        id: bot.id,
+        instructions: bot.instructions ?? "",
+        knowledge: bot.knowledge ?? "",
         tools: [], // chat answers only; tool calls belong to Agents
-        model: typeof payload.model === "string" ? payload.model : null,
+        model: bot.model,
         approval_required: false,
         max_actions: 4,
         status: "on",
@@ -3604,8 +3707,8 @@ authed.post("/chatbots/:id/chat", async (req, res) => {
     await query(`INSERT INTO chatbot_messages (chatbot_id, role, content, metadata) VALUES ($1,'assistant',$2,$3)`, [bot.id, result.reply, JSON.stringify({ runId: result.runId })]);
     // Keyword (or natural language) trigger -> linked workflow.
     let executionId: string | null = null;
-    const automationId = typeof payload.automationId === "string" ? payload.automationId : null;
-    const keyword = typeof payload.keyword === "string" ? payload.keyword.toLowerCase() : "";
+    const automationId = bot.automation_id;
+    const keyword = (bot.keyword ?? "").toLowerCase();
     const keywordHit = Boolean(keyword) && body.message.toLowerCase().includes(keyword);
     if (automationId && (keywordHit || /start|run|zap|automate/i.test(body.message))) {
       const { createAndRunFlow } = await import("./flow-runtime");
@@ -3641,34 +3744,63 @@ authed.get("/chatbots/:id/messages", async (req, res) => {
 });
 
 authed.delete("/chatbots/:id/messages", async (req, res) => {
-  await query(`DELETE FROM chatbot_messages WHERE chatbot_id = $1`, [req.params.id]);
+  await query(`DELETE FROM chatbot_messages WHERE chatbot_id = $1 AND chatbot_id IN (SELECT id FROM chatbots WHERE org_id = $2)`, [req.params.id, req.orgId]);
   res.json({ ok: true });
 });
 
+// ── Agents: canonical `agents` table ─────────────────────────────────────────
+// Agents live in the real agents table (org_id NOT NULL → organizations).
+// The legacy workspace_items path is what produced the "null value in column
+// org_id of relation agents" class of errors; this is the one CRUD surface.
+function presentAgent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    name: row.name,
+    instructions: row.instructions ?? "",
+    knowledge: row.knowledge ?? "",
+    model: row.model ?? null,
+    pod: row.pod ?? null,
+    automationId: row.automation_id ?? null,
+    tools: row.tools ?? [],
+    triggerMode: row.trigger_mode ?? "manual",
+    approvalRequired: row.approval_required === true,
+    maxActions: row.max_actions ?? 8,
+    status: row.status === "off" ? "off" : "on",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 authed.get("/agents", async (req, res) => {
-  const rows = await listItems(req.orgId!, "agent");
-  res.json({ agents: rows.map((r) => ({ ...presentItem(r), status: (r.payload as { status?: string })?.status ?? "active" })) });
+  const rows = await query(
+    `SELECT * FROM agents WHERE org_id = $1 ORDER BY updated_at DESC`,
+    [req.orgId],
+  );
+  res.json({ agents: rows.map(presentAgent) });
 });
 
 authed.post("/agents/:id/run", async (req, res) => {
   const body = z.object({ message: z.string().min(1) }).parse(req.body);
-  const agent = await queryOne(`SELECT * FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
+  const agent = await queryOne<{
+    id: string; instructions: string; knowledge: string; model: string | null;
+    tools: unknown; automation_id: string | null; approval_required: boolean;
+    max_actions: number; status: string;
+  }>(`SELECT id, instructions, knowledge, model, tools, automation_id, approval_required, max_actions, status FROM agents WHERE id = $1 AND org_id = $2`, [req.params.id, req.orgId]);
   if (!agent) return res.status(404).json({ error: "not_found" });
-  const payload = (agent.payload ?? {}) as Record<string, unknown>;
   // The real agent runtime: multi-round model <-> tool loop with allow-listed
-  // piece tools, budgets and durable runs. workspace_items agents store their
-  // allow-list as [{ appSlug, operation, connectionId }] in payload.tools.
+  // piece tools, budgets and durable runs. agents.tools stores the allow-list
+  // as [{ appSlug, operation, connectionId }].
   try {
     const result = await runAgentLoop({
       agent: {
-        id: String(agent.id ?? ""),
-        instructions: String(payload.instructions ?? ""),
-        knowledge: String(payload.knowledge ?? ""),
-        tools: payload.tools ?? [],
-        model: typeof payload.model === "string" ? payload.model : null,
-        approval_required: payload.approvalRequired === true,
-        max_actions: typeof payload.maxActions === "number" ? payload.maxActions : 8,
-        status: payload.status === "off" ? "off" : "on",
+        id: agent.id,
+        instructions: agent.instructions ?? "",
+        knowledge: agent.knowledge ?? "",
+        tools: agent.tools ?? [],
+        model: agent.model,
+        approval_required: agent.approval_required === true,
+        max_actions: typeof agent.max_actions === "number" ? agent.max_actions : 8,
+        status: agent.status === "off" ? "off" : "on",
       },
       message: body.message,
       workspaceId: req.orgId!,
@@ -3677,25 +3809,18 @@ authed.post("/agents/:id/run", async (req, res) => {
     });
     const reply = result.reply;
 
-  const activities = Array.isArray(payload.activities) ? payload.activities : [];
-  activities.unshift({ id: crypto.randomUUID(), message: body.message, reply, created_at: new Date().toISOString() });
-  await query(`UPDATE workspace_items SET payload = $3, updated_at = now() WHERE id = $1 AND org_id = $2`, [
-    req.params.id,
-    req.orgId,
-    JSON.stringify({ ...payload, activities: activities.slice(0, 50) }),
-  ]);
-  const automationId = typeof payload.automationId === "string" ? payload.automationId : undefined;
-  if (automationId && result.status === "ok") {
-    const { createAndRunFlow } = await import("./flow-runtime");
-    await createAndRunFlow({
-      orgId: req.orgId!,
-      flowId: automationId,
-      userId: req.user!.userId,
-      payload: { message: body.message, reply },
-      triggerKind: "agent",
-    }).catch(() => undefined);
-  }
-  res.json({ reply, traces: result.traces, status: result.status, runId: result.runId });
+    const automationId = typeof agent.automation_id === "string" ? agent.automation_id : undefined;
+    if (automationId && result.status === "ok") {
+      const { createAndRunFlow } = await import("./flow-runtime");
+      await createAndRunFlow({
+        orgId: req.orgId!,
+        flowId: automationId,
+        userId: req.user!.userId,
+        payload: { message: body.message, reply },
+        triggerKind: "agent",
+      }).catch(() => undefined);
+    }
+    res.json({ reply, traces: result.traces, status: result.status, runId: result.runId });
   } catch (err) {
     const message = err instanceof Error ? err.message : "agent_failed";
     const known = ["agent_off", "agents_disabled", "agent_activity_cap", "NO_MODEL_PROVIDER"].some((c) => message.startsWith(c));
@@ -3716,9 +3841,9 @@ authed.get("/agents/:id/activities", async (req, res) => {
   res.json({ activities: runs });
 });
 
-// ── Agents (workspace_items): canonical CRUD + run history ──────────────────
-// Agents live in workspace_items (kind='agent') — migrations 0012/0013 made
-// agent_runs/agent_activities polymorphic precisely for this registry.
+// ── Agent runs & approvals (canonical agents table) ───────────────────────
+// agent_runs/agent_activities are polymorphic on agent_id; runs reference the
+// canonical agents row.
 
 authed.post("/agents", async (req, res) => {
   const body = z
@@ -3735,20 +3860,16 @@ authed.post("/agents", async (req, res) => {
       maxActions: z.number().int().min(1).max(50).optional(),
     })
     .parse(req.body);
-  const row = await insertItem(req.orgId!, "agent", body.name, {
-    instructions: body.instructions ?? "",
-    knowledge: body.knowledge ?? "",
-    model: body.model ?? null,
-    pod: body.pod ?? null,
-    automationId: body.automationId ?? null,
-    tools: body.tools ?? [],
-    triggerMode: body.triggerMode ?? "manual",
-    approvalRequired: body.approvalRequired ?? false,
-    maxActions: body.maxActions ?? 8,
-    status: "on",
-    activities: [],
-  });
-  res.json({ agent: presentItem(row!) });
+  const row = await queryOne(
+    `INSERT INTO agents (org_id, name, instructions, knowledge, model, pod, automation_id, tools, trigger_mode, approval_required, max_actions, status)
+     VALUES ($1,$2,$3,$4,COALESCE($5,'auto'),$6,$7,$8,$9,$10,$11,'on') RETURNING *`,
+    [
+      req.orgId, body.name, body.instructions ?? "", body.knowledge ?? "", body.model ?? null,
+      body.pod ?? null, body.automationId ?? null, JSON.stringify(body.tools ?? []),
+      body.triggerMode ?? "manual", body.approvalRequired ?? false, body.maxActions ?? 8,
+    ],
+  );
+  res.json({ agent: presentAgent(row!) });
 });
 
 authed.patch("/agents/:id", async (req, res) => {
@@ -3767,23 +3888,39 @@ authed.patch("/agents/:id", async (req, res) => {
       status: z.enum(["on", "off"]).optional(),
     })
     .parse(req.body);
-  const existing = await queryOne(`SELECT payload, name FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
-  if (!existing) return res.status(404).json({ error: "not_found" });
-  const payload = { ...(existing.payload as Record<string, unknown>) };
-  for (const key of ["instructions", "knowledge", "model", "pod", "automationId", "tools", "triggerMode", "approvalRequired", "maxActions", "status"] as const) {
-    if (body[key] !== undefined) (payload as Record<string, unknown>)[key] = body[key];
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const scalar: Record<string, unknown> = {
+    name: body.name, instructions: body.instructions, knowledge: body.knowledge,
+    model: body.model, pod: body.pod, triggerMode: body.triggerMode,
+    approvalRequired: body.approvalRequired, maxActions: body.maxActions, status: body.status,
+  };
+  const colMap: Record<string, string> = {
+    name: "name", instructions: "instructions", knowledge: "knowledge", model: "model",
+    pod: "pod", triggerMode: "trigger_mode", approvalRequired: "approval_required",
+    maxActions: "max_actions", status: "status",
+  };
+  for (const [key, val] of Object.entries(scalar)) {
+    if (val !== undefined) { sets.push(`${colMap[key]} = $${params.length + 1}`); params.push(val); }
   }
-  await query(
-    `UPDATE workspace_items SET name = $3, payload = $4, updated_at = now() WHERE id = $1 AND org_id = $2 AND kind = 'agent'`,
-    [req.params.id, req.orgId, body.name ?? existing.name, JSON.stringify(payload)],
+  if (body.automationId !== undefined) { sets.push(`automation_id = $${params.length + 1}`); params.push(body.automationId); }
+  if (body.tools !== undefined) { sets.push(`tools = $${params.length + 1}`); params.push(JSON.stringify(body.tools)); }
+  if (!sets.length) return res.json({ ok: true });
+  sets.push(`updated_at = now()`);
+  const row = await queryOne<{ id: string }>(
+    `UPDATE agents SET ${sets.join(", ")} WHERE id = $${params.length + 1} AND org_id = $${params.length + 2} RETURNING id`,
+    [...params, req.params.id, req.orgId],
   );
+  if (!row) return res.status(404).json({ error: "not_found" });
   res.json({ ok: true });
 });
 
 authed.delete("/agents/:id", async (req, res) => {
-  const existing = await queryOne(`SELECT id FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
-  if (!existing) return res.status(404).json({ error: "not_found" });
-  await query(`DELETE FROM workspace_items WHERE id = $1 AND org_id = $2 AND kind = 'agent'`, [req.params.id, req.orgId]);
+  const row = await queryOne<{ id: string }>(
+    `DELETE FROM agents WHERE id = $1 AND org_id = $2 RETURNING id`,
+    [req.params.id, req.orgId],
+  );
+  if (!row) return res.status(404).json({ error: "not_found" });
   res.json({ ok: true });
 });
 

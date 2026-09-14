@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "next/navigation";
 import { Activity, Ban, CheckCircle2, ChevronDown, ChevronUp, Clock3, LayoutGrid, List, RefreshCw, Search, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -58,6 +59,24 @@ export default function ActivityPage() {
 
   const items = useMemo(() => list.data?.executions ?? [], [list.data]);
   const pagination = list.data?.pagination;
+
+  // Deep-link filter: /activity?flow=<id> scopes the list to one workflow
+  // (used by the per-workflow run badges on the automations page).
+  const flowFilter = useSearchParams().get("flow");
+  const filteredItems = useMemo(
+    () => (flowFilter ? items.filter((r: { automation_id?: string }) => r.automation_id === flowFilter) : items),
+    [items, flowFilter],
+  );
+
+  // Authoritative per-workflow totals (all runs, not just this page) when the
+  // list is scoped to one workflow via ?flow=.
+  const flowStatsQuery = useQuery({
+    queryKey: ["automation-run-stats", flowFilter],
+    enabled: Boolean(flowFilter),
+    queryFn: () => api<{ totals: { total: number; succeeded: number; failed: number; avgDurationMs: number | null }; lastStatus: string | null; lastRunAt: string | null; lastFailure: { runId: string; at: string; error: unknown } | null }>(`/automations/${flowFilter}/run-stats`),
+    retry: false,
+  });
+  const flowName = flowFilter ? filteredItems.find((r: Run) => r.automation_id === flowFilter)?.automation_name : undefined;
 
   // Stats are computed from the current page — the canonical server-side
   // aggregation endpoint will replace these when wired to daily rollups.
@@ -158,7 +177,7 @@ export default function ActivityPage() {
         </div>
       )}
 
-      {!list.isLoading && !items.length && (
+      {!list.isLoading && !filteredItems.length && (
         <EmptyState
           icon={<Activity className="h-10 w-10" />}
           title="No runs yet"
@@ -166,9 +185,38 @@ export default function ActivityPage() {
         />
       )}
 
+      {flowFilter && (
+        <div className="rounded-2xl border border-line bg-elevated p-4 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Workflow activity</p>
+              <p className="truncate text-sm font-medium">{flowName ?? "Selected workflow"}</p>
+            </div>
+            {flowStatsQuery.isLoading ? (
+              <p className="text-xs text-ink-muted">Loading totals…</p>
+            ) : flowStatsQuery.data ? (
+              <>
+                <span className="text-sm text-ink-muted"><b className="text-ink">{flowStatsQuery.data.totals.total}</b> total runs</span>
+                <span className="text-sm text-ok"><b>{flowStatsQuery.data.totals.succeeded}</b> succeeded</span>
+                <span className="text-sm text-danger"><b>{flowStatsQuery.data.totals.failed}</b> failed</span>
+                {flowStatsQuery.data.totals.avgDurationMs != null && (
+                  <span className="text-sm text-ink-muted">avg <b className="text-ink">{(flowStatsQuery.data.totals.avgDurationMs / 1000).toFixed(1)}s</b></span>
+                )}
+                {flowStatsQuery.data.lastRunAt && (
+                  <span className="text-xs text-ink-muted">last run {new Date(flowStatsQuery.data.lastRunAt).toLocaleString()} {flowStatsQuery.data.lastStatus ? `· ${flowStatsQuery.data.lastStatus}` : ""}</span>
+                )}
+                {flowStatsQuery.data.lastFailure && (
+                  <a className="text-sm font-medium text-violet-700 hover:underline" href={`/activity/${flowStatsQuery.data.lastFailure.runId}`}>Inspect last failure →</a>
+                )}
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
+
       {view === "cards" ? (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {items.map((r) => (
+          {filteredItems.map((r) => (
             <div key={r.id} className="rounded-2xl border border-line bg-elevated p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-card">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -202,7 +250,7 @@ export default function ActivityPage() {
             <span>When</span>
             <span />
           </div>
-          {items.map((r) => (
+          {filteredItems.map((r) => (
             <div
               key={r.id}
               className="grid grid-cols-[1.5fr_110px_120px_90px_1fr_70px] items-center gap-2 border-b border-line px-4 py-3 text-sm last:border-0 hover:bg-muted/60"

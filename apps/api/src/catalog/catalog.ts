@@ -1167,7 +1167,26 @@ export function listCatalogApps(q?: string) {
   const term = (q ?? "").trim().toLowerCase();
   const apps = APP_CATALOG.map(presentCatalogApp);
   if (!term) return apps;
-  return apps.filter((a) => `${a.slug} ${a.name} ${a.description} ${a.operations.map((o) => o.name).join(" ")}`.toLowerCase().includes(term));
+  const tokens = term.split(/\s+/).filter((t) => t.length > 2);
+  // Natural-language intents ("analyze with AI", "save to Sheets") rarely
+  // appear verbatim in catalog text, and requiring the whole phrase as one
+  // substring returned zero hits — which made Copilot planning fall back to
+  // junk candidates. Score instead: every app gets a relevance count over
+  // phrase and token matches across slug/name/description/operation names,
+  // and only apps scoring above zero are returned.
+  const scored = apps
+    .map((a) => {
+      const opNames = a.operations.map((o) => `${o.key} ${o.name}`).join(" ");
+      const hay = `${a.slug} ${a.name} ${a.description} ${opNames} ${a.category}`.toLowerCase();
+      let score = 0;
+      if (hay.includes(term)) score += 10;
+      for (const t of tokens) if (hay.includes(t)) score += 1;
+      return { app: a, score };
+    })
+    .filter((s) => s.score > 0)
+    .sort((x, y) => y.score - x.score)
+    .map((s) => s.app);
+  return scored;
 }
 
 export function getApp(slug: string) {

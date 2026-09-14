@@ -17,8 +17,8 @@ import { enqueueFlowResume } from "./queue";
 
 export async function sweepPausedRuns(): Promise<number> {
   // 1. Due delayed runs: resume_at has passed and they're still paused.
-  const due = await query<{ id: string; org_id: string; workspace_id: string; paused_reason: string | null; cursor: number | null }>(
-    `SELECT id, org_id, workspace_id, paused_reason, cursor
+  const due = await query<{ id: string; org_id: string; paused_reason: string | null; cursor: number | null }>(
+    `SELECT id, org_id, paused_reason, cursor
      FROM flow_runs
      WHERE status = 'paused' AND paused_reason = 'delay' AND resume_at IS NOT NULL AND resume_at <= now()
      LIMIT 200`,
@@ -34,8 +34,8 @@ export async function sweepPausedRuns(): Promise<number> {
 
   // 2. Approval timeouts: pending todos past their deadline get resolved by
   //    their configured onTimeout policy, then the run resumes or fails.
-  const overdue = await query<{ id: string; run_id: string; org_id: string; workspace_id: string; payload_json: { onTimeout?: string } | null }>(
-    `SELECT t.id, t.run_id, t.org_id, r.workspace_id, t.payload_json
+  const overdue = await query<{ id: string; run_id: string; org_id: string; payload_json: { onTimeout?: string } | null }>(
+    `SELECT t.id, t.run_id, t.org_id, t.payload_json
      FROM todos t
      JOIN flow_runs r ON r.id = t.run_id
      WHERE t.status = 'pending'
