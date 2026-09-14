@@ -23,11 +23,6 @@ export function createEngineDb(db: Db) {
         return mapRun(result.rows[0]);
       },
       async finish(runId: string, status: string, context: unknown, finishedAt: Date) {
-        // duration_ms is GENERATED ALWAYS from started_at/finished_at: an
-        // explicit assignment (even a computed one) makes Postgres throw
-        // "column \"duration_ms\" can only be updated to DEFAULT", which left
-        // every engine run stuck in queued. Setting finished_at is enough —
-        // the generated column computes the duration.
         await db.service.query(
           `UPDATE flow_runs SET status = $2, context = $3::jsonb, finished_at = $4, steps_billable = (SELECT count(*)::int FROM run_steps WHERE run_id = $1 AND status = 'succeeded') WHERE id = $1`,
           [runId, status, JSON.stringify(context), finishedAt]
@@ -48,6 +43,13 @@ export function createEngineDb(db: Db) {
         );
         const row = result.rows[0];
         return row ? mapRun(row) : null;
+      },
+      async fail(runId: string, error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        await db.service.query(
+          `UPDATE flow_runs SET status = 'failed', finished_at = COALESCE(finished_at, now()), context = context || $2::jsonb WHERE id = $1 AND status NOT IN ('succeeded','failed','filtered','cancelled')`,
+          [runId, JSON.stringify({ __workerError: { message } })]
+        );
       },
     },
     flowVersions: {
@@ -75,15 +77,6 @@ export function createEngineDb(db: Db) {
         return row ? { outputJson: row.output_json ?? {} } : null;
       },
       async insert(input: any) {
-        // run_steps write contract: duration_ms is GENERATED ALWAYS (computed
-        // from started_at/finished_at) so it must NOT be supplied; sequence_no
-        // is assigned by the DB trigger internal.assign_run_step_sequence and
-        // must NOT be supplied either; and the partitioned FK
-        // (run_id, run_created_at, org_id) must match the parent row exactly —
-        // PostgreSQL owns the stored timestamp, not a JS Date. The timestamp
-        // is selected TO CHAR(...) as MICROSECOND-EXACT TEXT: pg's default
-        // parse to a JS Date truncates to milliseconds, and the mismatch
-        // violates run_steps_run_id_run_created_at_org_id_fkey on every step.
         const meta = await db.service.query(
           `SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_text, org_id FROM flow_runs WHERE id = $1 LIMIT 1`,
           [input.runId]
@@ -112,16 +105,16 @@ export function createEngineDb(db: Db) {
         );
         return result.rows[0];
       },
-      async finish(orgId: string, id: string, output: unknown, durationMs: number, status = "succeeded", errorClass?: string, errorCode?: string, errorJson?: Record<string, unknown>) {
+      async finish(orgId: string, id: string, output: unknown, _durationMs: number, status = "succeeded", errorClass?: string, errorCode?: string, errorJson?: Record<string, unknown>) {
+        // duration_ms is GENERATED ALWAYS from started_at/finished_at. The
+        // engine still passes the measured value for API compatibility, but
+        // Postgres owns the persisted duration and must not be assigned to it.
         await db.service.query(
-          `UPDATE run_steps SET status=$3, output_json=$4::jsonb, error_class=$5, error_code=$6, error_json=$7::jsonb, duration_ms=$8, finished_at=now() WHERE id=$1 AND org_id=$2`,
-          [id, orgId, status, output == null ? null : JSON.stringify(output), errorClass ?? null, errorCode ?? null, errorJson ? JSON.stringify(errorJson) : null, durationMs]
+          `UPDATE run_steps SET status=$3, output_json=$4::jsonb, error_class=$5, error_code=$6, error_json=$7::jsonb, finished_at=now() WHERE id=$1 AND org_id=$2`,
+          [id, orgId, status, output == null ? null : JSON.stringify(redact(output)), errorClass ?? null, errorCode ?? null, errorJson ? JSON.stringify(redact(errorJson)) : null]
         );
       },
     },
-    // Sub-flow fire-and-forget needs the same flow_runs table as the parent
-    // engine. It must start queued so the first transition is atomically
-    // claimed by the durable worker rather than executing in the API process.
     runs: {
       async create(input: { orgId: string; projectId?: string; flowId: string; flowVersionId: string; triggerKind: string; context: Record<string, unknown> }) {
         const result = await db.service.query(
@@ -157,7 +150,6 @@ function mapRun(row: any) {
     triggerKind: row.trigger_kind,
     status: row.status,
     context,
-    // Executor reads contextJson; keep context as an alias for compatibility.
     contextJson: context,
     transitionEpoch: row.transition_epoch,
     cursor: row.cursor,
