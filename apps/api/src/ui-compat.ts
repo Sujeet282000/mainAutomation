@@ -6,7 +6,7 @@ import { APP_CATALOG, getApp, listCatalogApps } from "./catalog/catalog";
 import { authSchemaForSlug, credentialShapeError, validateAuthCredentials } from "./auth-schema";
 import { getDynamicFieldsHandler } from "./adapters";
 import { query, queryOne } from "./db";
-import { persistBuilderDraft, persistBuilderDraftLenient, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, resolveStepNames, resolveNodeIds, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
+import { persistBuilderDraft, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, resolveStepNames, resolveNodeIds, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
 import { validateWorkflowGraph } from "./workflow-validation";
 import { copilotGraph, copilotChat } from "./copilot/copilot";
 import { runCopilotEngine } from "./copilot/copilot-engine";
@@ -551,11 +551,10 @@ export function registerUiCompat(authed: Router) {
 
   authed.post("/ai/copilot/accept", async (req, res) => {
     const body = z.object({ automationId: z.string().uuid(), graph: z.unknown() }).parse(req.body);
-    // Copilot-applied drafts may still be incomplete; store leniently.
     await query(`UPDATE flows SET draft_definition = $3, updated_at = now() WHERE id = $1 AND org_id = $2`, [
       body.automationId,
       req.orgId,
-      JSON.stringify(persistBuilderDraftLenient(body.graph)),
+      JSON.stringify(persistBuilderDraft(body.graph)),
     ]);
     res.json({ ok: true });
   });
@@ -577,7 +576,7 @@ export function registerUiCompat(authed: Router) {
     const ai = await probeAiService();
     if (ai.reachable) {
       try {
-        const definition = graph ? persistBuilderDraftLenient(graph) : {};
+        const definition = graph ? persistBuilderDraft(graph) : {};
         const agentReply = await signedAiJson<{
           message: string;
           operations?: Array<{ kind: string; arguments: Record<string, unknown>; requires_confirmation?: boolean }>;
@@ -726,7 +725,7 @@ export function registerUiCompat(authed: Router) {
     const ai = await probeAiService();
     if (ai.reachable) {
       try {
-        const definition = body.graph ? persistBuilderDraftLenient(body.graph) : {};
+        const definition = body.graph ? persistBuilderDraft(body.graph) : {};
         const planResult = await signedAiJson<{
           message?: string;
           reply?: string;
@@ -857,7 +856,7 @@ export function registerUiCompat(authed: Router) {
             [
               sessionId,
               JSON.stringify(groundedOperations),
-              JSON.stringify(persistBuilderDraftLenient(groundedGraph)),
+              JSON.stringify(persistBuilderDraft(groundedGraph)),
             ],
           );
 
@@ -940,7 +939,7 @@ export function registerUiCompat(authed: Router) {
       [
         sessionCreated!.id,
         JSON.stringify(groundedApplied),
-        JSON.stringify(persistBuilderDraftLenient(groundedGraph)),
+        JSON.stringify(persistBuilderDraft(groundedGraph)),
       ],
     );
 
@@ -1280,9 +1279,7 @@ export function applyAutomationGraphShape(row: any) {
 
 export async function saveAutomationGraph(req: Request, res: Response, next: () => void) {
   if (!req.body?.graph) return next();
-  // Builder autosave: a work-in-progress graph (unwired node, half-configured
-  // step) must store instead of 400 — strict compilation gates test/publish.
-  const draft = persistBuilderDraftLenient(req.body.graph);
+  const draft = persistBuilderDraft(req.body.graph);
   const sets: string[] = ["draft_definition = $3", "updated_at = now()"];
   const params: unknown[] = [req.params.id, req.orgId, JSON.stringify(draft)];
   if (req.body.name) {

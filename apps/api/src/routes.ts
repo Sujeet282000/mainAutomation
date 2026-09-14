@@ -19,7 +19,7 @@ import { env } from "./config";
 import { definitionHash } from "@algoverge/core";
 import { oauthRouter } from "./oauth";
 import { registerUiCompat, applyAutomationGraphShape } from "./ui-compat";
-import { persistBuilderDraft, persistBuilderDraftLenient, loadBuilderGraph } from "./flow-runtime";
+import { persistBuilderDraft, loadBuilderGraph } from "./flow-runtime";
 import { copilotGraph } from "./copilot/copilot";
 import { fireTableRecordEvent } from "./events";
 import { runCopilotEngine } from "./copilot/copilot-engine";
@@ -751,9 +751,7 @@ authed.patch("/flows/:id", async (req, res) => {
   }
   if (body.draft_definition) {
     const rec = body.draft_definition as Record<string, unknown>;
-    // Draft updates are autosaves: store work-in-progress leniently (strict
-    // compilation still gates test/publish/run paths).
-    const draft = Array.isArray(rec.nodes) ? persistBuilderDraftLenient(rec) : rec.schemaVersion ? rec : persistBuilderDraftLenient(rec);
+    const draft = Array.isArray(rec.nodes) ? persistBuilderDraft(rec) : rec.schemaVersion ? rec : persistBuilderDraft(rec);
     sets.push(`draft_definition = $${i}`);
     params.push(JSON.stringify(draft));
     i++;
@@ -2386,10 +2384,10 @@ const updateAutomation = async (req: Request, res: Response) => {
     const dbStatus = body.status === "on" ? "active" : body.status === "off" ? "disabled" : body.status;
     sets.push(`status = $${i}`); params.push(dbStatus); i++;
   }
-  if (body.graph) { sets.push(`draft_definition = $${i}`); params.push(JSON.stringify(persistBuilderDraftLenient(body.graph))); i++; }
+  if (body.graph) { sets.push(`draft_definition = $${i}`); params.push(JSON.stringify(persistBuilderDraft(body.graph))); i++; }
   if (body.draft_definition) {
     const rec = body.draft_definition as Record<string, unknown>;
-    const draft = Array.isArray(rec.nodes) ? persistBuilderDraftLenient(rec) : rec;
+    const draft = Array.isArray(rec.nodes) ? persistBuilderDraft(rec) : rec;
     sets.push(`draft_definition = $${i}`);
     params.push(JSON.stringify(draft));
     i++;

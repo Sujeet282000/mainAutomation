@@ -10,25 +10,6 @@ export function persistBuilderDraft(graph: unknown) {
   const def = graphToFlowDefinition(graph);
   return { ...def, builderGraph: graph };
 }
-
-/**
- * Lenient draft persistence for work-in-progress graphs: the builder autosaves
- * on every keystroke and Copilot proposals may be temporarily incomplete
- * (unwired nodes, missing config). Those must STORE, not 400. Compilation
- * still gates everything that EXECUTES: manual tests, publish and run paths
- * keep using the strict persistBuilderDraft.
- */
-export function persistBuilderDraftLenient(graph: unknown) {
-  try {
-    const def = graphToFlowDefinition(graph);
-    return { ...def, builderGraph: graph };
-  } catch (err) {
-    return {
-      builderGraph: graph,
-      compile_error: err instanceof Error ? err.message : "graph_compile_failed",
-    };
-  }
-}
 export function loadBuilderGraph(draft: unknown): WorkflowGraph { const rec = draft && typeof draft === "object" ? (draft as Record<string, unknown>) : {}; if (rec.builderGraph) return coerceWorkflowGraph(rec.builderGraph); return coerceWorkflowGraph(draft); }
 
 export async function ensureRunPartition() { const dates = [new Date(), new Date()]; dates[1].setUTCMonth(dates[1].getUTCMonth() + 1); for (const date of dates) { const start = new Date(date); start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0); const end = new Date(start); end.setUTCMonth(end.getUTCMonth() + 1); const name = `flow_runs_${start.getUTCFullYear()}_${String(start.getUTCMonth() + 1).padStart(2, "0")}`; const lit = (d: Date) => `'${d.toISOString().slice(0, 19).replace("T", " ")}'`; try { await query(`CREATE TABLE IF NOT EXISTS public."${name}" PARTITION OF public.flow_runs FOR VALUES FROM (${lit(start)}) TO (${lit(end)})`); } catch {} } }
