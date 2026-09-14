@@ -55,7 +55,28 @@ export async function testFlowStep(opts:{orgId:string;flowId:string;nodeId:strin
       if (step?.status === "succeeded") return { ok:true, output:step.output_json, error:undefined, duration_ms:step.duration_ms ?? Date.now()-started, status:"succeeded", runId };
       if (step?.status === "failed") return { ok:false, output:undefined, error:step.error_json ?? "Step failed", duration_ms:step.duration_ms ?? Date.now()-started, status:"failed", runId };
     }
-    if (["failed","filtered","cancelled","succeeded"].includes(run.status)) return { ok:false, output:undefined, error:run.status === "filtered" ? "Workflow stopped before the target step" : "Workflow finished before the target step", duration_ms:Date.now()-started, status:run.status, runId };
+    if (["failed","filtered","cancelled","succeeded"].includes(run.status)) {
+      // If a predecessor failed before the requested target could execute,
+      // surface the real provider/adapter error instead of the misleading
+      // "finished before target" message.
+      const failed = await queryOne<{ step_id:string; error_json:unknown }>(
+        `SELECT step_id, error_json FROM run_steps WHERE run_id=$1 AND status='failed' ORDER BY sequence_no ASC, attempt ASC LIMIT 1`,
+        [runId]
+      );
+      if (failed) {
+        return {
+          ok:false,
+          output:undefined,
+          error:failed.error_json ?? "Step failed",
+          failedStepId: failed.step_id,
+          failedNodeId: mapping[failed.step_id],
+          duration_ms:Date.now()-started,
+          status:"failed",
+          runId
+        };
+      }
+      return { ok:false, output:undefined, error:run.status === "filtered" ? "Workflow stopped before the target step" : "Workflow finished before the target step", duration_ms:Date.now()-started, status:run.status, runId };
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return { ok:false, output:undefined, error:"Test step timed out waiting for the workflow engine", duration_ms:Date.now()-started, status:"failed", runId };
