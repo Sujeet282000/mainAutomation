@@ -65,7 +65,7 @@ export default function ActivityDetailPage() {
     queryKey: ["execution", id],
     queryFn: () =>
       api<{
-        execution: { status: string; error?: { message?: string }; created_at?: string; finished_at?: string; trigger_type?: string; automation_name?: string; automation_id?: string };
+        execution: { status: string; error?: { message?: string }; created_at?: string; finished_at?: string; trigger_type?: string; automation_name?: string; automation_id?: string; trigger_payload?: unknown };
         steps?: Step[];
         logs?: Array<{ id: string; message: string; created_at: string }>;
       }>(`/executions/${id}`),
@@ -154,6 +154,7 @@ export default function ActivityDetailPage() {
   const steps = (q.data?.steps ?? []).map((s) =>
     liveStatus[s.step_id ?? s.id] ? { ...s, status: liveStatus[s.step_id ?? s.id]! } : s,
   );
+  const failedStepName = steps.find((s) => s.status === "failed")?.name ?? "";
   // Total wall-clock: sum of finished steps or run-level finished_at−created_at
   const runTotalMs =
     ex?.created_at && ex?.finished_at
@@ -174,7 +175,12 @@ export default function ActivityDetailPage() {
                 Open workflow
               </Button>
             )}
-            <Button variant="secondary" onClick={() => diagnose.mutate()} disabled={diagnose.isPending}>
+            <Button
+              variant="secondary"
+              onClick={() => diagnose.mutate()}
+              disabled={diagnose.isPending}
+              title="AI root-cause analysis of this failed run"
+            >
               <Sparkles className="h-3.5 w-3.5" /> {diagnose.isPending ? "Diagnosing…" : "Explain this failure"}
             </Button>
             <Button variant="secondary" onClick={() => retry.mutate()} disabled={retry.isPending}>
@@ -188,14 +194,21 @@ export default function ActivityDetailPage() {
       {diagError && <p className="mb-3 text-sm text-danger">{diagError}</p>}
       {diagnosis && (
         <div className="mb-6 rounded-2xl border border-violet-200 bg-violet-50 p-4 text-sm text-violet-950">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide">Ops Copilot</div>
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide">
+            <Sparkles className="h-3 w-3" /> Ops Copilot — AI root cause
+          </div>
           <p className="font-medium">{diagnosis.cause}</p>
           <p className="mt-1 text-violet-900">{diagnosis.userFix}</p>
           <p className="mt-2 text-xs text-violet-800">
             {diagnosis.patchExplanation} Confidence {Math.round(diagnosis.confidence * 100)}%. Auto-apply is{" "}
             {diagnosis.safeToAutoApply ? "allowed" : "blocked"} — you approve any draft patch.
           </p>
-          <p className="mt-1 text-[11px] uppercase tracking-wide text-violet-700">{diagnosis.category}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-violet-200/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800">{diagnosis.category}</span>
+            {failedStepName && (
+              <span className="text-[11px] text-violet-700">Failed step: <b>{failedStepName}</b></span>
+            )}
+          </div>
         </div>
       )}
       {ex && (
@@ -212,6 +225,27 @@ export default function ActivityDetailPage() {
           {ex.error?.message && <span className="text-sm text-danger">{ex.error.message}</span>}
         </div>
       )}
+      {/* Trigger payload — the data that started this run. A note explains when
+          it is empty (manual/test runs or triggers that fired with no body) so
+          an empty section never looks like a bug. */}
+      {ex && ex.trigger_payload != null && (
+        <div className="mb-6 rounded-2xl border border-line bg-elevated p-4">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Trigger payload</div>
+          {Object.keys(ex.trigger_payload as Record<string, unknown>).length > 0 ? (
+            <>
+              <p className="mb-2 text-xs text-ink-muted">This is the data that started the run.</p>
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-muted p-3 text-[11px] leading-relaxed [overflow-wrap:anywhere]">
+                {JSON.stringify(ex.trigger_payload, null, 2)}
+              </pre>
+            </>
+          ) : (
+            <p className="text-xs text-ink-muted">
+              No payload was recorded — this was a manual or test run, or the trigger fired with an empty body. If a webhook
+              trigger should always send data, check that the source system includes a JSON body.
+            </p>
+          )}
+        </div>
+      )}
       <div className="relative space-y-3 before:absolute before:bottom-4 before:left-[15px] before:top-4 before:w-px before:bg-line">
         {steps.map((s, i) => (
           <article key={s.id} className="relative ml-10 rounded-2xl border border-line bg-elevated p-4 shadow-sm">
@@ -223,7 +257,14 @@ export default function ActivityDetailPage() {
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Step {i + 1}</div>
                 <h3 className="text-[15px] font-medium">{s.name ?? s.id}</h3>
                 <p className="text-xs text-ink-muted">
-                  {[s.app_slug, s.operation].filter(Boolean).join(" · ") || "built-in"}
+                  {(() => {
+                    const rawApp = s.app_slug ?? "";
+                    const rawOp = s.operation ?? "";
+                    const isInternal = !rawApp || ["piece_action", "piece_trigger", "builtin", "manual"].includes(rawApp);
+                    const appName = isInternal ? "Built-in step" : rawApp.replace(/-/g, " ");
+                    const opLabel = rawOp && !isInternal ? rawOp.replace(/[:_]/g, " ") : "";
+                    return [appName, opLabel].filter(Boolean).join(" · ") || "built-in";
+                  })()}
                   {s.duration_ms != null ? ` · ${s.duration_ms} ms` : ""}
                   {s.attempt != null && s.attempt > 1 ? ` · attempt ${s.attempt}` : ""}
                 </p>

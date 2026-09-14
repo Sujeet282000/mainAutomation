@@ -32,6 +32,9 @@ export interface AgentPlan {
   calls: AgentToolCall[];
   summary: string;
   confidence: number;
+  /** The user's verbatim request — kept so synthesis can act on exact values
+      the user already provided (channel names, recipients, templates…). */
+  userRequest?: string;
 }
 
 export interface AgentExecutionResult {
@@ -158,6 +161,7 @@ export async function generateAgentPlan(
       calls: validCalls,
       summary: parsed.summary || "",
       confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.7,
+      userRequest: prompt,
     };
   } catch {
     return null;
@@ -248,16 +252,17 @@ async function synthesizeResponse(
   const result = await completeAi({
     intent: "reason",
     prompt: JSON.stringify({
-      userRequest: plan.summary,
+      userRequest: plan.userRequest ?? plan.summary,
       toolResults: toolOutputs,
     }),
     system: [
-      "You are an AI assistant that synthesizes tool results into a clear, helpful response.",
-      "Summarize what was found and provide actionable guidance.",
-      "Use markdown for readability.",
+      "You are Orchestra Copilot, synthesizing tool results into a clear, helpful response to the user's request.",
+      "ACT on values the user already provided (channel names, recipients, sheet names, message templates) — do not ask for them again.",
+      "Never print internal identifiers: no node IDs, step IDs, execution IDs, flow IDs, or slugs like s_d8c5b973_… — refer to steps by their human label.",
+      "Formatting rules: NO markdown syntax (no #, ##, **). Use only <b>…</b> for emphasis, <ul><li>…</li></ul> for lists, and <code>…</code> for values.",
       "If tools failed, acknowledge the failure and suggest alternatives.",
-      "Keep the response concise (2-4 paragraphs).",
-      "End with a clear next step when appropriate.",
+      "Keep the response concise (2-4 short paragraphs or a single list).",
+      "End with ONE clear next step when appropriate.",
     ].join("\n"),
   });
 

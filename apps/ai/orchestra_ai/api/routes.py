@@ -115,11 +115,23 @@ async def refine(
     """
     require("refine_draft")
     try:
+        # The full catalog is essential grounding: without it the agent cannot
+        # pick exact operation identifiers, so mutations come back empty and
+        # chat degrades to advice. Fetch it from the Node control plane.
+        catalog_apps: list[dict[str, Any]] = []
+        try:
+            from orchestra_ai.node.client import NodeApiClient
+            from orchestra_ai.settings import get_settings
+            settings = get_settings()
+            client = NodeApiClient(settings.node_api_url, settings.service_token.get_secret_value())
+            catalog_apps = await client.full_catalog()
+        except Exception:
+            catalog_apps = []
         agent = await agent_chat(
             get_gateway(),
             message=body.instruction,
             workflow=body.definition,
-            catalog=[],
+            catalog=catalog_apps,
             history=[],
             attribution=ctx.attribution,
         )

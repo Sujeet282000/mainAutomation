@@ -11,7 +11,10 @@ export async function query<T extends Record<string, unknown> = Record<string, u
     const res = await pool.query(text, params);
     return res.rows as T[];
   } catch (err) {
-    console.error("DB query error:", (err as Error).message);
+    /* Include the SQL head + param count so param/placeholder mismatches
+       (e.g. "bind message supplies N parameters") are diagnosable from the log
+       without a code hunt. */
+    console.error(`DB query error: ${(err as Error).message} | params=${params.length} | sql=${text.replace(/\s+/g, " ").slice(0, 220)}`);
     throw err;
   }
 }

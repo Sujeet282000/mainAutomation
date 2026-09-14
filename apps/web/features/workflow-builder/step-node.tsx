@@ -1,6 +1,7 @@
 "use client";
 
-import { AlertTriangle, Check, Loader2, MoreVertical, Plus, X } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, Loader2, MoreVertical, Plus, X } from "lucide-react";
+import Link from "next/link";
 import { Handle, Position, type NodeProps } from "reactflow";
 import { AppIcon } from "@/components/app-icon";
 import { cn } from "@/lib/utils";
@@ -88,6 +89,10 @@ export function StepNode({
   pathLabel?: string;
   needsAccount?: boolean;
   terminal?: boolean;
+  /* Error message from the last test run — shown on the node when it failed. */
+  runError?: string;
+  /* Link to the run detail page (/activity/[id]) for the last test run. */
+  runDetailHref?: string;
   onMenu?: (anchor: HTMLElement) => void;
   onAddAccount?: () => void;
   onAddStep?: () => void;
@@ -136,8 +141,8 @@ export function StepNode({
 
   const borderClass = (() => {
     if (run === "running") return "border-2 border-violet-400 dark:border-violet-500 shadow-lg shadow-violet-500/10";
-    if (run === "ok") return "border-2 border-emerald-400 dark:border-emerald-500 shadow-md shadow-emerald-500/10";
-    if (run === "fail") return "border-2 border-red-400 dark:border-red-500 shadow-md shadow-red-500/10";
+    if (run === "ok") return "border-2 border-emerald-300/70 dark:border-emerald-700/60 shadow-sm shadow-emerald-500/5";
+    if (run === "fail") return "border-2 border-red-300/70 dark:border-red-700/60 shadow-sm shadow-red-500/5";
     if (run === "waiting") return "border-2 border-amber-400 dark:border-amber-500 shadow-md shadow-amber-500/10";
     if (selected) return "border border-violet-400 dark:border-violet-500";
     if (empty) return "border border-dashed border-line";
@@ -238,6 +243,24 @@ export function StepNode({
           <MoreVertical className="h-4 w-4" />
         </button>
       </div>
+
+      {/* Error strip: why this step failed in the last test run + run-detail link */}
+      {run === "fail" && data.runError && (
+        <div className="mt-2 rounded-lg border border-red-200/70 bg-red-50/70 px-2.5 py-2 dark:border-red-900/50 dark:bg-red-950/30">
+          <p className="break-words text-[11px] font-medium leading-snug text-red-600 dark:text-red-400" title={data.runError}>
+            {data.runError.length > 160 ? `${data.runError.slice(0, 160)}…` : data.runError}
+          </p>
+          {data.runDetailHref && (
+            <Link
+              href={data.runDetailHref}
+              className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-red-600 hover:underline dark:text-red-400"
+              onClick={(event) => event.stopPropagation()}
+            >
+              View run details <ExternalLink className="h-3 w-3" />
+            </Link>
+          )}
+        </div>
+      )}
 
       <div className="min-w-0 pl-8.5">
         <div

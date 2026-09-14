@@ -25,7 +25,25 @@ export function formatCopilotText(text: string): string {
   // already exist in backend HTML are parked in sentinels so they survive the
   // escape pass — mixed HTML+markdown messages keep their tags AND get their
   // markdown (tables, bold, bullets) normalized instead of leaking raw syntax.
-  const parked = text
+  // Pre-existing entities from upstream double-escaping (&amp;amp;) are
+  // normalized back to plain characters before the escape pass — safe because
+  // everything is escaped again immediately after. Repeat until stable so
+  // multi-level escapes ("&amp;amp;") collapse fully.
+  let unescaped = text;
+  for (let i = 0; i < 3 && /&(amp|lt|gt|quot|#39);/.test(unescaped); i++) {
+    unescaped = unescaped
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+  }
+  const parked = unescaped
+    // Internal identifiers are builder internals that should never be
+    // user-visible — replace with plain-language references.
+    .replace(/\bs_[0-9a-f]{4}(?:[_-][0-9a-f]{4,}){2,}\b/gi, "the step")
+    .replace(/\b[0-9a-f]{8}(?:_[0-9a-f]{4,}){3,}\b/gi, "the step")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "this workflow")
     .replace(/&/g, "&amp;")
     .replace(ALLOWED_TAG, "\u0001$1\u0002")
     .replace(/</g, "&lt;")
@@ -36,6 +54,9 @@ export function formatCopilotText(text: string): string {
   const out: string[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
+    // Markdown headings (# Title) → bold line (the trusted tag set has no h1-h6).
+    const heading = trimmed.match(/^#{1,6}\s+(.*)$/);
+    if (heading) { out.push(`<b>${inlineMarkdown(heading[1].replace(/^#+\s*/, "").trim())}</b>`); continue; }
     // Markdown table rows: | A | B | C | → one list item per row; separator
     // rows (|---|---|) are dropped entirely.
     if (/^\|.*\|$/.test(trimmed)) {

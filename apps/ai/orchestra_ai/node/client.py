@@ -68,6 +68,18 @@ class NodeApiClient:
             response.raise_for_status()
             return response.json().get("issues", [])
 
+    async def full_catalog(self) -> list[dict[str, Any]]:
+        """Fetch the complete app catalog (no query filter) for grounding the
+        refine agent — it needs exact operation identifiers to emit mutations."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(f"{self._url}/api/v1/catalog")
+                response.raise_for_status()
+                body = response.json()
+                return body.get("apps") or body.get("catalog") or []
+        except Exception:
+            return []
+
     async def search_catalog(self, query: str, kind: str | None = None) -> list[dict[str, Any]]:
         apps: list[dict[str, Any]] = []
         try:

@@ -387,7 +387,26 @@ class ModelGateway:
                 reply = await self._with_retry(adapter, spec, current)
                 return reply, current
             except ProviderError as err:
+                # A dead provider (401/402/403 billing/credentials, 400 model
+                # error, 429/5xx after retries) must cascade to the fallback
+                # provider — previously this branch recorded the error but
+                # never advanced `current`, so the next loop iteration saw
+                # `current.provider in tried` and aborted the whole cascade
+                # (e.g. Anthropic out of credits killed every plan request).
                 last_error = err
+                if current.fallback_provider and current.fallback_provider not in tried:
+                    current = replace(
+                        current,
+                        provider=current.fallback_provider,
+                        model=current.fallback_model or current.model,
+                        fallback_provider=None,
+                        fallback_model=None,
+                    )
+                    continue
+                nxt = self._next_provider(current.provider, tried)
+                if nxt is None:
+                    break
+                current = replace(current, provider=nxt, model=self._model_for(nxt, current.model))
             except Exception as err:
                 # Network failures (httpx.ReadTimeout, connection resets, …)
                 # must degrade to the next provider, not abort the whole

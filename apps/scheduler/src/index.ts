@@ -35,16 +35,32 @@ async function tick(): Promise<void> {
   }
   const tickId = randomUUID();
   const result = await tickLease.run(async () => {
-    const response = await fetch(`${API_URL}/internal/scheduler/tick`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${SCHEDULER_SECRET}`,
-        "x-scheduler-instance-id": INSTANCE_ID,
-        "x-scheduler-tick-id": tickId,
-      },
-    });
-    if (!response.ok) throw new Error(`Scheduler tick failed: HTTP ${response.status}`);
-    return (await response.json()) as { scheduled?: number; polled?: number };
+    /* Retry with short backoff: while the API dev server (tsx watch) restarts
+       after a code change nothing listens on the port for a few seconds and
+       every tick would otherwise log a raw ECONNREFUSED stack. 3 tries cover
+       a full restart; schedule ticks are idempotent per minute so a retried
+       tick cannot double-fire schedules. */
+    const attempts = 3;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const response = await fetch(`${API_URL}/internal/scheduler/tick`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${SCHEDULER_SECRET}`,
+            "x-scheduler-instance-id": INSTANCE_ID,
+            "x-scheduler-tick-id": tickId,
+          },
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!response.ok) throw new Error(`Scheduler tick failed: HTTP ${response.status}`);
+        return (await response.json()) as { scheduled?: number; polled?: number };
+      } catch (err) {
+        lastError = err;
+        if (attempt < attempts) await sleep(2_000 * attempt);
+      }
+    }
+    throw lastError;
   });
   if (!result) {
     console.log(JSON.stringify({ service: "scheduler", skipped: "lease_not_acquired", instanceId: INSTANCE_ID, tickId, at: new Date().toISOString() }));

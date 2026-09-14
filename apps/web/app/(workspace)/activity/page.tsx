@@ -46,13 +46,20 @@ export default function ActivityPage() {
 
   const cursor = pageCursors[pageCursors.length - 1];
 
+  // Deep-link filter: /activity?flow=<id> scopes the list to one workflow
+  // (used by the per-workflow run badges on the automations page). The API
+  // filters server-side via ?flowId= — pass it through so scoped pages show
+  // that workflow's runs instead of an empty list.
+  const flowFilter = useSearchParams().get("flow");
+
   const list = useQuery({
-    queryKey: ["executions", { q, status, cursor }],
+    queryKey: ["executions", { q, status, cursor, flowFilter }],
     queryFn: () => {
       const params = new URLSearchParams({ limit: "50" });
       if (q.trim()) params.set("search", q.trim());
       if (status !== "all") params.set("status", status);
       if (cursor) params.set("before", cursor);
+      if (flowFilter) params.set("flowId", flowFilter);
       return api<{ executions: Run[]; pagination?: { hasMore?: boolean; nextBefore?: string | null } }>(`/executions?${params.toString()}`);
     },
   });
@@ -60,13 +67,7 @@ export default function ActivityPage() {
   const items = useMemo(() => list.data?.executions ?? [], [list.data]);
   const pagination = list.data?.pagination;
 
-  // Deep-link filter: /activity?flow=<id> scopes the list to one workflow
-  // (used by the per-workflow run badges on the automations page).
-  const flowFilter = useSearchParams().get("flow");
-  const filteredItems = useMemo(
-    () => (flowFilter ? items.filter((r: { automation_id?: string }) => r.automation_id === flowFilter) : items),
-    [items, flowFilter],
-  );
+  const filteredItems = items;
 
   // Authoritative per-workflow totals (all runs, not just this page) when the
   // list is scoped to one workflow via ?flow=.

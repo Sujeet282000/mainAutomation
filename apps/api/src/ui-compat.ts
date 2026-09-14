@@ -6,7 +6,7 @@ import { APP_CATALOG, getApp, listCatalogApps } from "./catalog/catalog";
 import { authSchemaForSlug, credentialShapeError, validateAuthCredentials } from "./auth-schema";
 import { getDynamicFieldsHandler } from "./adapters";
 import { query, queryOne } from "./db";
-import { persistBuilderDraft, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, resolveStepNames, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
+import { persistBuilderDraft, loadBuilderGraph, createAndRunFlow, testFlowStep, mapRunToExecution, resolveStepNames, resolveNodeIds, sealConnectionSecret, loadConnectionSecret } from "./flow-runtime";
 import { validateWorkflowGraph } from "./workflow-validation";
 import { copilotGraph, copilotChat } from "./copilot/copilot";
 import { runCopilotEngine } from "./copilot/copilot-engine";
@@ -86,7 +86,7 @@ function _buildPlanPreview(
     { re: /hubspot|crm/i, slug: "hubspot" },
     { re: /salesforce|new lead|lead arrives|new prospect/i, slug: "salesforce" },
     { re: /whatsapp/i, slug: "whatsapp" },
-    { re: /openai|chatgpt|ai/i, slug: "openai" },
+    { re: /openai|chatgpt|\bai\b/i, slug: "openai" },
     { re: /webhook|http post/i, slug: "webhook" },
     { re: /schedule|cron|every day/i, slug: "schedule" },
     { re: /form|typeform/i, slug: "typeform" },
@@ -97,6 +97,18 @@ function _buildPlanPreview(
 
   const detectedSlugs = new Set<string>();
   const slugOrder = new Map<string, number>();
+  // Fetch/call-an-API phrasing means an HTTP request step — detected separately
+  // from the webhook trigger hint ("http post") so "fetch the weather from an
+  // API" plans an HTTP action instead of being dropped.
+  if (/\b(?:fetch|call|hit|query|pull)\b[^.;]*\b(?:api|url|endpoint|rest)\b|\bapi\b[^.;]*\b(?:request|call|fetch|get|pull)\b|make\s+(?:an?\s+)?api\s+(?:request|call)|weather|stock\s+price|exchange\s+rate/i.test(lower) && !detectedSlugs.has("http")) {
+    const httpApp = apps.find((a) => a.slug === "http");
+    if (httpApp) {
+      const m = /\b(?:fetch|call|hit|query|pull|weather|stock|exchange)/i.exec(lower);
+      detectedSlugs.add("http");
+      if (m) slugOrder.set("http", m.index);
+      usedApps.push({ name: httpApp.name, slug: httpApp.slug });
+    }
+  }
   for (const hint of appHints) {
     const m = hint.re.exec(lower);
     if (m && !detectedSlugs.has(hint.slug)) {
@@ -327,7 +339,8 @@ export function registerUiCompat(authed: Router) {
       [run.id],
     );
     const stepNames = await resolveStepNames(run.flow_version_id as string | null | undefined);
-    res.json(mapRunToExecution(run as any, steps as any, stepNames));
+    const nodeIds = await resolveNodeIds(run.flow_version_id as string | null | undefined);
+    res.json(mapRunToExecution(run as any, steps as any, stepNames, nodeIds));
   });
 
   /** SSE stream: real-time step-by-step execution updates */
@@ -361,7 +374,9 @@ export function registerUiCompat(authed: Router) {
       [runId],
     );
     lastStepCount = initialSteps.length;
-    sendEvent("snapshot", mapRunToExecution(run as any, initialSteps as any, await resolveStepNames((run.flow_version_id as string | null | undefined))));
+    const nodeIds = await resolveNodeIds((run.flow_version_id as string | null | undefined));
+    const nodeIdsByStep = nodeIds; // engine step id → builder node id, reused by the per-step events below
+    sendEvent("snapshot", mapRunToExecution(run as any, initialSteps as any, await resolveStepNames((run.flow_version_id as string | null | undefined)), nodeIds));
 
     // Poll for new steps every 200ms until terminal status
     const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "timeout"]);
@@ -384,6 +399,7 @@ export function registerUiCompat(authed: Router) {
           const s = steps[i] as any;
           sendEvent("step", {
             stepId: s.step_id,
+            nodeId: nodeIdsByStep[s.step_id] ?? null,
             status: s.status,
             sequenceNo: s.sequence_no,
             durationMs: s.started_at && s.finished_at
@@ -395,7 +411,9 @@ export function registerUiCompat(authed: Router) {
         lastStepCount = steps.length;
 
         if (terminalStatuses.has(String(currentRun.status))) {
-          sendEvent("done", mapRunToExecution(currentRun as any, steps as any));
+          const doneStepNames = await resolveStepNames((currentRun.flow_version_id as string | null | undefined));
+          const doneNodeIds = await resolveNodeIds((currentRun.flow_version_id as string | null | undefined));
+          sendEvent("done", mapRunToExecution(currentRun as any, steps as any, doneStepNames, doneNodeIds));
           done = true;
           clearInterval(interval);
           res.end();
@@ -944,17 +962,21 @@ export function registerUiCompat(authed: Router) {
 
   authed.post("/ai/copilot/diagnose-run", async (req, res) => {
     const runId = String(req.body?.runId ?? "");
-    const run = await queryOne<{ status: string }>(
-      `SELECT status FROM flow_runs WHERE id = $1 AND org_id = $2`,
+    const run = await queryOne<{ status: string; flow_version_id: string | null }>(
+      `SELECT status, flow_version_id FROM flow_runs WHERE id = $1 AND org_id = $2`,
       [runId, req.orgId],
     );
     const failed = await queryOne(
       `SELECT step_id, error_json FROM run_steps WHERE run_id = $1 AND status = 'failed' ORDER BY sequence_no DESC LIMIT 1`,
       [runId],
     );
+    /* Name the failed step for the user — the engine step id is a sanitized
+       internal value (e.g. "d8c5b973_f353_…") that should never surface. */
+    const stepNames = await resolveStepNames(run?.flow_version_id ?? null);
+    const failedName = failed ? stepNames[String((failed as any).step_id)] ?? String((failed as any).step_id) : undefined;
     const diagnosis = diagnoseFromFailure({
       status: run?.status,
-      failed: failed ? { name: String((failed as any).step_id), error: (failed as any).error_json } : undefined,
+      failed: failed ? { name: failedName, error: (failed as any).error_json } : undefined,
     });
     res.json({ diagnosis });
   });

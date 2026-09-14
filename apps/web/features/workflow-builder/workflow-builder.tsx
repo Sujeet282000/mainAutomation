@@ -16,7 +16,7 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Book, Check, ChevronLeft, ChevronRight, Clock, Copy, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Workflow, Wrench, X, Zap } from "lucide-react";
+import { AlertTriangle, Book, Check, ChevronLeft, ChevronRight, Clock, Copy, ExternalLink, History, Loader2, Maximize2, Minimize2, Redo2, Search, Sparkles, Undo2, Workflow, Wrench, X, Zap } from "lucide-react";
 import { api, streamSse, streamGetSse } from "@/lib/api";
 import {
   appAuth,
@@ -198,6 +198,10 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
   const [runStates, setRunStates] = useState<Record<string, RunState>>({});
   const [appPicker, setAppPicker] = useState<{ kind: "trigger" | "action"; nodeId?: string; edgeId?: string } | null>(null);
   const [testedSteps, setTestedSteps] = useState<Record<string, boolean>>({});
+  /* Per-step error messages + link target for the run detail page (/activity/[id]).
+     Filled from the run SSE stream; cleared when a new test starts. */
+  const [stepErrors, setStepErrors] = useState<Record<string, string>>({});
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
   const [connectReplaceId, setConnectReplaceId] = useState<string | null>(null);
   const [inspectorW, setInspectorW] = useState(420);
@@ -624,6 +628,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           index: i + 1,
           empty: !n.data.operation,
           runState: runStates[n.id] ?? "idle",
+          runError: stepErrors[n.id],
+          runDetailHref: lastRunId ? `/activity/${lastRunId}` : undefined,
           needsAccount: Boolean(n.data.kind === "action" && selectedAppForNode(n.data.appSlug) && needsConnection(selectedAppForNode(n.data.appSlug)!) && !n.data.connectionId),
           terminal: n.data.kind === "action" && !edges.some((e) => e.source === n.id),
           pathLabel: edges.find((e) => e.target === n.id && e.sourceHandle)?.sourceHandle?.replace("path-", "Path "),
@@ -641,7 +647,7 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
           onAddStep: () => openPicker("action", undefined, undefined)
         }
       })),
-    [edges, nodes, runStates, setSelected]
+    [edges, nodes, runStates, stepErrors, lastRunId, setSelected]
   );
 
   const displayEdges = useMemo(
@@ -685,8 +691,12 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         setInspectorTab("setup");
       }
     } catch (err) {
-      setTestResult({ ok: false, body: { error: err instanceof Error ? err.message : "Test failed" }, ms: Date.now() - started });
+      const errMsg = err instanceof Error ? err.message : "Test failed";
+      setTestResult({ ok: false, body: { error: errMsg }, ms: Date.now() - started });
       setInspectorTab("test");
+      /* Paint the failure on the node itself: red cross badge + error strip. */
+      setRunStates((prev) => ({ ...prev, [node.id]: "fail" }));
+      setStepErrors((prev) => ({ ...prev, [node.id]: errMsg }));
     } finally {
       setBusy(null);
     }
@@ -697,6 +707,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
     const ordered = layoutFlow(nodes, edges);
     /* Reset all nodes to idle first, then animate step by step */
     setRunStates({});
+    setStepErrors({});
+    setLastRunId(null);
     try {
       await saveDraft();
       const trigger = nodes.find((n) => n.data.kind === "trigger");
@@ -732,18 +744,18 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         body: JSON.stringify({ payload })
       });
       const execId = d.execution.id;
-      const lastRef: { current: { execution: { status: string }; steps: Array<{ step_id: string; status: string }> } | null } = { current: null };
+      const lastRef: { current: { execution: { status: string }; steps: Array<{ step_id: string; node_id?: string | null; status: string; error?: unknown }> } | null } = { current: null };
       
       /* SSE-based real-time step streaming */
       await new Promise<void>((resolve) => {
         const controller = new AbortController();
         streamGetSse(`/executions/${execId}/stream`, (event, data) => {
           if (event === "snapshot" || event === "done") {
-            const snap = data as { execution: { status: string }; steps: Array<{ step_id: string; status: string }> };
+            const snap = data as { execution: { status: string }; steps: Array<{ step_id: string; node_id?: string | null; status: string; error?: unknown }> };
             lastRef.current = snap;
             const byId: Record<string, RunState> = {};
             for (const s of snap.steps) {
-              byId[s.step_id] =
+              const state: RunState =
                 s.status === "succeeded" || s.status === "success" || s.status === "completed"
                   ? "ok"
                   : s.status === "failed" || s.status === "cancelled"
@@ -753,10 +765,21 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                       : s.status === "queued"
                         ? "queued"
                         : "running";
+              /* Prefer the API-provided builder node id; legacy runs only have
+                 the sanitized engine step id. */
+              const targetId = s.node_id ?? s.step_id;
+              byId[targetId] = state;
             }
             const painted: Record<string, RunState> = Object.fromEntries(ordered.map((n) => [n.id, "idle" as RunState]));
             for (const n of ordered) {
               if (byId[n.id]) painted[n.id] = byId[n.id];
+            }
+            /* The trigger is not an engine step — once any action step exists
+               in the stream, the trigger fired successfully. Paint the first
+               node (trigger) green so the run's start is visible on canvas. */
+            const triggerNode = ordered[0];
+            if (triggerNode && Object.keys(byId).length > 0 && painted[triggerNode.id] === "idle") {
+              painted[triggerNode.id] = "ok";
             }
             if (snap.execution.status === "waiting") {
               const lastExecuted = [...snap.steps].reverse().find((step) => byId[step.step_id] === "ok" || byId[step.step_id] === "waiting");
@@ -769,19 +792,42 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
             setRunStates(painted);
             const runningStep = ordered.find((n) => painted[n.id] === "running");
             const failedStep = ordered.find((n) => painted[n.id] === "fail");
+            /* Capture per-step errors from the snapshot too */
+            const snapErrors: Record<string, string> = {};
+            for (const s of snap.steps) {
+              if (s.status === "failed" || s.status === "cancelled") {
+                snapErrors[s.node_id ?? s.step_id] =
+                  s.error && typeof s.error === "object" && "message" in s.error
+                    ? String((s.error as { message?: unknown }).message ?? "Step failed")
+                    : s.error ? String(s.error) : "Step failed";
+              }
+            }
+            if (Object.keys(snapErrors).length) setStepErrors((prev) => ({ ...prev, ...snapErrors }));
             const activeStep = failedStep || runningStep || ordered.find((n) => painted[n.id] === "waiting");
             if (activeStep) {
               setSelected(activeStep.id);
               setInspectorTab("test");
             }
           } else if (event === "step") {
-            /* Individual step update — animate immediately */
-            const stepData = data as { stepId: string; status: string };
+            /* Individual step update — animate immediately. Failed steps also
+               capture the error message so the node can show why it failed. */
+            const stepData = data as { stepId: string; nodeId?: string | null; status: string; error?: unknown };
+            /* streamGetSse resolves when the response body ends; the server
+               closes the stream after emitting the terminal "done" event. */
+            const targetId = stepData.nodeId || stepData.stepId;
             const state: RunState =
               stepData.status === "succeeded" ? "ok" :
               stepData.status === "failed" ? "fail" : "running";
-            setRunStates((prev) => ({ ...prev, [stepData.stepId]: state }));
-            setSelected(stepData.stepId);
+            setRunStates((prev) => ({ ...prev, [targetId]: state }));
+            if (state === "fail") {
+              const stepErr =
+                typeof stepData.error === "string" ? stepData.error :
+                stepData.error && typeof stepData.error === "object" && "message" in stepData.error
+                  ? String((stepData.error as { message?: unknown }).message ?? "Step failed")
+                  : "Step failed";
+              setStepErrors((prev) => ({ ...prev, [targetId]: stepErr }));
+            }
+            setSelected(targetId);
             setInspectorTab("test");
           }
           if (event === "done") { resolve(); controller.abort(); }
@@ -790,13 +836,14 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         setTimeout(() => { controller.abort(); resolve(); }, 30000);
       });
       const ok = lastRef.current?.execution.status === "succeeded";
+      setLastRunId(execId);
       setTestResult({ ok: Boolean(ok), body: lastRef.current });
       /* After test completes, select the failed node if any, otherwise the last
          node. Read from lastRef (the final snapshot) — the runStates state from
          this closure is stale and always empty here. */
       const finalStatuses: Record<string, RunState> = {};
       for (const s of lastRef.current?.steps ?? []) {
-        finalStatuses[s.step_id] =
+        finalStatuses[s.node_id ?? s.step_id] =
           s.status === "succeeded" || s.status === "success" || s.status === "completed"
             ? "ok"
             : s.status === "failed" || s.status === "cancelled"
@@ -804,6 +851,22 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
               : s.status === "waiting" || s.status === "pending_approval"
                 ? "waiting"
                 : s.status === "queued" ? "queued" : "running";
+      }
+      /* Final per-step errors for nodes that failed (message + run-detail link). */
+      const finalErrors: Record<string, string> = {};
+      for (const s of lastRef.current?.steps ?? []) {
+        if (s.status === "failed" || s.status === "cancelled") {
+          finalErrors[s.node_id ?? s.step_id] =
+            s.error && typeof s.error === "object" && "message" in s.error
+              ? String((s.error as { message?: unknown }).message ?? "Step failed")
+              : s.error ? String(s.error) : "Step failed";
+        }
+      }
+      if (Object.keys(finalErrors).length) setStepErrors((prev) => ({ ...prev, ...finalErrors }));
+      /* Trigger fired iff any action step ran — paint it green if still idle. */
+      const finalTrigger = ordered[0];
+      if (finalTrigger && Object.keys(finalStatuses).length > 0 && !finalStatuses[finalTrigger.id]) {
+        finalStatuses[finalTrigger.id] = "ok";
       }
       const finalFailed = ordered.find((n) => finalStatuses[n.id] === "fail");
       const finalNode = finalFailed || ordered[ordered.length - 1];
@@ -814,8 +877,9 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
       const runStatus = lastRef.current?.execution.status ?? "timed out";
       setMsg(ok ? "Test workflow completed." : runStatus === "waiting" ? "Test workflow is waiting to resume." : `Test workflow ${runStatus}.`);
     } catch (err) {
-      setTestResult({ ok: false, body: { error: err instanceof Error ? err.message : "Run failed" } });
-      setMsg(err instanceof Error ? err.message : "Run failed");
+      const errMsg = err instanceof Error ? err.message : "Run failed";
+      setTestResult({ ok: false, body: { error: errMsg } });
+      setMsg(errMsg);
     } finally {
       setBusy(null);
     }
@@ -1096,6 +1160,14 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
         <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-ink-muted">
           {published ? "On" : "Draft"}
         </span>
+        <Link
+          href={`/activity?flow=${automationId}`}
+          className="rounded-lg p-1.5 text-ink-muted hover:bg-muted hover:text-ink transition-colors"
+          title="Run history — recent runs of this workflow"
+          aria-label="Run history"
+        >
+          <History className="h-4 w-4" />
+        </Link>
         {msg && (
           <button
             type="button"
@@ -1946,18 +2018,26 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                           return null;
                         })()}
                         {testResult.ms != null && <p className="mb-2 text-xs text-ink-muted">Duration {testResult.ms}ms</p>}
+                        {!testResult.ok && lastRunId && (
+                          <a
+                            href={`/activity/${lastRunId}`}
+                            className="mb-2 inline-flex items-center gap-1 text-xs font-semibold text-violet-600 hover:underline"
+                          >
+                            View run details <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                         <pre className="av-hide-scroll max-h-56 whitespace-pre-wrap break-all rounded-lg bg-muted p-2 text-[11px] leading-relaxed [overflow-wrap:anywhere]">
-                          {JSON.stringify(testResult.body, null, 2)}
-                        </pre>
-                        <button
-                          className="mt-2 inline-flex items-center gap-1 text-xs text-ink-muted hover:text-ink"
-                          onClick={() => void navigator.clipboard.writeText(JSON.stringify(testResult.body, null, 2))}
-                        >
-                          <Copy className="h-3 w-3" /> Copy JSON
-                        </button>
-                      </>
-                    )}
-                  </section>
+                      {JSON.stringify(testResult.body, null, 2)}
+                    </pre>
+                    <button
+                      className="mt-2 inline-flex items-center gap-1 text-xs text-ink-muted hover:text-ink"
+                      onClick={() => void navigator.clipboard.writeText(JSON.stringify(testResult.body, null, 2))}
+                    >
+                      <Copy className="h-3 w-3" /> Copy JSON
+                    </button>
+                  </>
+                )}
+              </section>
                 )}
               </div>
               <div className="border-t border-line px-4 py-3">
@@ -1990,8 +2070,8 @@ function Inner(props: { automationId: string; name: string; initialGraph: GraphP
                     <Button className="flex-1" onClick={() => void testStep()} disabled={busy === "step"}>
                       {busy === "step" ? "Testing…" : selected.data.kind === "trigger" ? "Test trigger" : "Test step"}
                     </Button>
-                    <Button variant="secondary" className="flex-1" onClick={() => void testWorkflow()} disabled={busy === "test"}>
-                      Test workflow
+                    <Button className="flex-1" onClick={() => void testWorkflow()} disabled={busy === "test"}>
+                      {busy === "test" ? "Testing…" : "Test workflow"}
                     </Button>
                   </div>
                 )}
